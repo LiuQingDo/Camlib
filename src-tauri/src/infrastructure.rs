@@ -416,7 +416,7 @@ impl InfrastructureError {
         }
     }
 
-    fn database(error: DbError) -> Self {
+    pub(crate) fn database(error: DbError) -> Self {
         Self::Database(error.to_string())
     }
 }

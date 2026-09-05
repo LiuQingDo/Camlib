@@ -549,6 +549,13 @@ impl Repository {
             ));
             values.push(format!("%{}%", escape_like(&search)));
         }
+        if let Some(date_prefix) = query.date_prefix.filter(|value| !value.trim().is_empty()) {
+            conditions.push(format!(
+                "m.capture_date LIKE ?{} ESCAPE '\\'",
+                values.len() + 1
+            ));
+            values.push(format!("{}%", escape_like(&date_prefix)));
+        }
         let where_clause = conditions.join(" AND ");
         let count_sql = format!("SELECT COUNT(*) FROM media_items m WHERE {where_clause}");
         let count_params = values.iter().map(String::as_str).collect::<Vec<_>>();
@@ -590,6 +597,22 @@ impl Repository {
             offset,
             limit,
         })
+    }
+
+    pub fn list_date_facets(&self, library_id: &str) -> DbResult<Vec<DateFacet>> {
+        let mut statement = self.connection.prepare(
+            "SELECT capture_date, COUNT(*)
+             FROM media_items
+             WHERE library_id = ?1 AND capture_date IS NOT NULL
+             GROUP BY capture_date ORDER BY capture_date DESC",
+        )?;
+        let rows = statement.query_map([library_id], |row| {
+            Ok(DateFacet {
+                date: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn set_favorite(&self, media_item_id: &str, favorite: bool, at: &str) -> DbResult<()> {
@@ -1138,9 +1161,17 @@ pub struct MediaQuery {
     pub kind: Option<MediaKind>,
     pub favorite_only: bool,
     pub search: Option<String>,
+    pub date_prefix: Option<String>,
     pub offset: i64,
     pub limit: i64,
     pub sort: MediaSort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DateFacet {
+    pub date: String,
+    pub count: i64,
 }
 #[derive(Debug, Clone, Default)]
 pub enum MediaSort {

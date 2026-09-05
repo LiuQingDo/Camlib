@@ -85,9 +85,21 @@ export interface MediaQueryInput {
   kind?: MediaKind;
   favoriteOnly?: boolean;
   search?: string;
+  /** YYYY, YYYY-MM, or YYYY-MM-DD. */
+  datePrefix?: string;
   offset?: number;
   limit?: number;
   sort?: "newest" | "oldest" | "name";
+}
+
+export interface DateFacetDto {
+  date: string;
+  count: number;
+}
+
+export interface MediaAssetDto {
+  mimeType: string;
+  dataBase64: string;
 }
 
 export interface ScanStartDto {
@@ -150,10 +162,18 @@ export function queryMedia(query: MediaQueryInput): Promise<MediaPageDto> {
   return invoke<MediaPageDto>("media_query", { query });
 }
 
+export function listDateFacets(libraryId: string): Promise<DateFacetDto[]> {
+  return invoke<DateFacetDto[]>("media_date_facets", { libraryId });
+}
+
 export function getMediaItem(mediaItemId: string): Promise<MediaItemDetailsDto> {
   return invoke<MediaItemDetailsDto>("media_get", { mediaItemId });
 }
 
 export function setFavorite(mediaItemId: string, favorite: boolean): Promise<void> {
   return invoke<void>("favorite_set", { mediaItemId, favorite });
+}
+
+export function getMediaAsset(mediaItemId: string): Promise<MediaAssetDto> {
+  return invoke<MediaAssetDto>("media_asset", { mediaItemId });
 }
