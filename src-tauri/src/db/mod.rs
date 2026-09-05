@@ -14,6 +14,7 @@ pub mod dto {
 
 mod migrations {
     pub const INITIAL: &str = include_str!("migrations/0001_initial.sql");
+    pub const SCAN_RUNS: &str = include_str!("migrations/0002_scan_runs.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -22,7 +23,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -126,6 +127,238 @@ impl Repository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn get_library_by_root(&self, root_path: &str) -> DbResult<Option<Library>> {
+        self.connection
+            .query_row(
+                "SELECT id, root_path, volume_id, volume_label, drive_letter, state,
+                        last_seen_at, last_scan_at, scan_generation, created_at, updated_at
+                 FROM libraries WHERE root_path = ?1",
+                [root_path],
+                map_library,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_library(&self, input: NewLibrary) -> DbResult<Library> {
+        validate_non_empty("library id", &input.id)?;
+        validate_non_empty("library root", &input.root_path)?;
+        validate_non_empty("created_at", &input.created_at)?;
+        validate_non_empty("updated_at", &input.updated_at)?;
+        self.connection.execute(
+            "INSERT INTO libraries
+             (id, root_path, volume_id, volume_label, drive_letter, state,
+              last_seen_at, last_scan_at, scan_generation, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+               root_path = excluded.root_path, volume_id = excluded.volume_id,
+               volume_label = excluded.volume_label, drive_letter = excluded.drive_letter,
+               state = excluded.state, last_seen_at = excluded.last_seen_at,
+               updated_at = excluded.updated_at",
+            params![
+                input.id,
+                input.root_path,
+                input.volume_id,
+                input.volume_label,
+                input.drive_letter,
+                input.state.as_str(),
+                input.last_seen_at,
+                input.last_scan_at,
+                input.scan_generation,
+                input.created_at,
+                input.updated_at,
+            ],
+        )?;
+        self.get_library(&input.id)?
+            .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    pub fn begin_scan_run(&self, input: NewScanRun) -> DbResult<()> {
+        validate_non_empty("scan run id", &input.id)?;
+        validate_non_empty("job id", &input.job_id)?;
+        validate_non_empty("library id", &input.library_id)?;
+        validate_non_empty("started_at", &input.started_at)?;
+        self.connection.execute(
+            "INSERT INTO scan_runs
+             (id, library_id, job_id, status, started_at, finished_at, files_seen,
+              items_added, items_updated, items_missing, errors, error_summary)
+             VALUES (?1, ?2, ?3, 'running', ?4, NULL, 0, 0, 0, 0, 0, NULL)",
+            params![input.id, input.library_id, input.job_id, input.started_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_scan_run(&self, input: FinishScanRun<'_>) -> DbResult<()> {
+        self.connection.execute(
+            "UPDATE scan_runs SET status = ?2, finished_at = ?3, files_seen = ?4,
+             items_added = ?5, items_updated = ?6, items_missing = ?7, errors = ?8,
+             error_summary = ?9 WHERE id = ?1",
+            params![
+                input.id,
+                input.status,
+                input.finished_at,
+                input.files_seen,
+                input.items_added,
+                input.items_updated,
+                input.items_missing,
+                input.errors,
+                input.error_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_scan_file_records(&self, library_id: &str) -> DbResult<Vec<ScanFileRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, media_item_id, relative_path, size_bytes, modified_at, exists_now
+             FROM media_files WHERE library_id = ?1",
+        )?;
+        let rows = statement.query_map([library_id], |row| {
+            Ok(ScanFileRecord {
+                id: row.get(0)?,
+                media_item_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                exists_now: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Commit one complete filesystem snapshot. The caller must not invoke this
+    /// until enumeration has succeeded; therefore a failed or cancelled scan
+    /// leaves the old media rows untouched.
+    pub fn apply_scan_snapshot(
+        &self,
+        library_id: &str,
+        generation: i64,
+        now: &str,
+        groups: &[ScanGroup],
+    ) -> DbResult<ScanApplyStats> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut existing = std::collections::HashMap::<String, ScanFileRecord>::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT id, media_item_id, relative_path, size_bytes, modified_at, exists_now
+                 FROM media_files WHERE library_id = ?1",
+            )?;
+            let rows = statement.query_map([library_id], |row| {
+                Ok(ScanFileRecord {
+                    id: row.get(0)?,
+                    media_item_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    modified_at: row.get(4)?,
+                    exists_now: row.get::<_, i64>(5)? != 0,
+                })
+            })?;
+            for row in rows {
+                let record = row?;
+                existing.insert(record.relative_path.clone(), record);
+            }
+        }
+
+        transaction.execute(
+            "UPDATE media_files SET exists_now = 0, last_scanned_at = ?2 WHERE library_id = ?1",
+            params![library_id, now],
+        )?;
+
+        let mut stats = ScanApplyStats::default();
+        for group in groups {
+            let matched = group
+                .files
+                .iter()
+                .filter_map(|file| existing.get(&file.relative_path))
+                .map(|file| file.media_item_id.clone())
+                .next();
+            let item_id = matched.clone().unwrap_or_else(|| {
+                stable_id("item", &format!("{library_id}:{}", group.logical_key))
+            });
+            if matched.is_none() {
+                stats.items_added += 1;
+            } else if group.files.iter().any(|file| file.needs_reprocess) {
+                stats.items_updated += 1;
+            }
+
+            let total_size = group.files.iter().map(|file| file.size_bytes).sum::<i64>();
+            let item = MediaItem {
+                id: item_id.clone(),
+                library_id: library_id.to_owned(),
+                logical_key: group.logical_key.clone(),
+                kind: group.kind.clone(),
+                display_name: group.display_name.clone(),
+                capture_at: group.capture_at.clone(),
+                capture_date: group.capture_date.clone(),
+                width: None,
+                height: None,
+                duration_ms: None,
+                total_size_bytes: total_size,
+                burst_group: None,
+                metadata_json: None,
+                scan_state: if group.ambiguous {
+                    ScanState::Ambiguous
+                } else {
+                    ScanState::Present
+                },
+                first_seen_at: now.to_owned(),
+                last_seen_at: now.to_owned(),
+            };
+            transaction.execute(
+                "UPDATE media_items SET logical_key = logical_key || '#legacy-' || id
+                 WHERE library_id = ?1 AND logical_key = ?2 AND id <> ?3",
+                params![library_id, group.logical_key, item_id],
+            )?;
+            upsert_media_item_on(&transaction, &item)?;
+            for file in &group.files {
+                let id = existing
+                    .get(&file.relative_path)
+                    .map(|old| old.id.clone())
+                    .unwrap_or_else(|| {
+                        stable_id("file", &format!("{library_id}:{}", file.relative_path))
+                    });
+                let input = NewMediaFile {
+                    id,
+                    media_item_id: item_id.clone(),
+                    library_id: library_id.to_owned(),
+                    role: file.role.clone(),
+                    relative_path: file.relative_path.clone(),
+                    size_bytes: file.size_bytes,
+                    modified_at: file.modified_at.clone(),
+                    content_hash: None,
+                    hash_algorithm: None,
+                    file_identity: None,
+                    exists_now: true,
+                    last_scanned_at: now.to_owned(),
+                };
+                upsert_media_file_on(&transaction, &input)?;
+                stats.files_seen += 1;
+            }
+        }
+
+        let seen_paths = groups
+            .iter()
+            .flat_map(|group| group.files.iter().map(|file| file.relative_path.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        stats.items_missing = existing
+            .values()
+            .filter(|file| file.exists_now && !seen_paths.contains(file.relative_path.as_str()))
+            .count() as i64;
+        transaction.execute(
+            "UPDATE media_items SET scan_state = 'missing', last_seen_at = ?2
+             WHERE library_id = ?1 AND NOT EXISTS
+             (SELECT 1 FROM media_files f WHERE f.media_item_id = media_items.id AND f.exists_now = 1)",
+            params![library_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE libraries SET last_scan_at = ?2, scan_generation = ?3, updated_at = ?2
+             WHERE id = ?1",
+            params![library_id, now, generation],
+        )?;
+        transaction.commit()?;
+        Ok(stats)
     }
 
     pub fn list_libraries(&self) -> DbResult<Vec<Library>> {
@@ -549,7 +782,16 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         transaction.execute_batch(migrations::INITIAL)?;
         transaction.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-            [CURRENT_SCHEMA_VERSION],
+            [1_i64],
+        )?;
+        transaction.commit()?;
+    }
+    if max_version < 2 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::SCAN_RUNS)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [2_i64],
         )?;
         transaction.commit()?;
     }
@@ -695,6 +937,64 @@ pub struct NewLibrary {
     pub scan_generation: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewScanRun {
+    pub id: String,
+    pub library_id: String,
+    pub job_id: String,
+    pub started_at: String,
+}
+
+pub struct FinishScanRun<'a> {
+    pub id: &'a str,
+    pub status: &'a str,
+    pub finished_at: &'a str,
+    pub files_seen: i64,
+    pub items_added: i64,
+    pub items_updated: i64,
+    pub items_missing: i64,
+    pub errors: i64,
+    pub error_summary: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanFileRecord {
+    pub id: String,
+    pub media_item_id: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub modified_at: String,
+    pub exists_now: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanGroup {
+    pub logical_key: String,
+    pub display_name: String,
+    pub kind: MediaKind,
+    pub capture_at: Option<String>,
+    pub capture_date: Option<String>,
+    pub ambiguous: bool,
+    pub files: Vec<ScanGroupFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanGroupFile {
+    pub relative_path: String,
+    pub role: MediaFileRole,
+    pub size_bytes: i64,
+    pub modified_at: String,
+    pub needs_reprocess: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanApplyStats {
+    pub files_seen: i64,
+    pub items_added: i64,
+    pub items_updated: i64,
+    pub items_missing: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1030,6 +1330,17 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+fn stable_id(prefix: &str, value: &str) -> String {
+    // FNV-1a is deterministic across processes, unlike DefaultHasher. The
+    // database's unique constraints remain the final guard against collisions.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{prefix}-{hash:016x}")
+}
+
 fn map_library(row: &Row<'_>) -> rusqlite::Result<Library> {
     Ok(Library {
         id: row.get(0)?,
@@ -1231,7 +1542,7 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 1);
+        assert_eq!(repository.schema_version().unwrap(), 2);
         apply_migrations(&mut repository.connection).unwrap();
         let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','backup_runs','app_settings')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 8);
@@ -1243,7 +1554,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 9);
+        assert_eq!(indexes, 10);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! persisted settings, canonical paths, and the identity/availability check for a
 //! registered library volume.
 
-use crate::db::{DbError, Repository};
+use crate::db::{DbError, LibraryState, NewLibrary, Repository};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -79,6 +79,7 @@ impl InfrastructureState {
 pub struct Infrastructure {
     store: SettingsStore,
     repository: Repository,
+    database_path: PathBuf,
 }
 
 impl Infrastructure {
@@ -100,8 +101,12 @@ impl Infrastructure {
         database_path: PathBuf,
     ) -> Result<Self, InfrastructureError> {
         let store = SettingsStore::open(settings_path, default_thumbnail_cache_dir)?;
-        let repository = Repository::open(database_path).map_err(InfrastructureError::database)?;
-        Ok(Self { store, repository })
+        let repository = Repository::open(&database_path).map_err(InfrastructureError::database)?;
+        Ok(Self {
+            store,
+            repository,
+            database_path,
+        })
     }
 
     #[allow(dead_code)]
@@ -128,7 +133,71 @@ impl Infrastructure {
             return Err(error);
         }
 
+        // The JSON file is a UI/bootstrap cache; the scanner trusts only this
+        // database record. Keep the library registration in the same operation.
+        let root_path = path_to_string(&canonical_root);
+        let existing = self
+            .repository
+            .get_library_by_root(&root_path)
+            .map_err(InfrastructureError::database)?;
+        let now = timestamp_now();
+        let library = NewLibrary {
+            id: existing
+                .as_ref()
+                .map(|library| library.id.clone())
+                .unwrap_or_else(|| stable_library_id(&root_path)),
+            root_path,
+            volume_id: self
+                .store
+                .settings
+                .library_volume
+                .as_ref()
+                .and_then(|v| v.volume_id.clone()),
+            volume_label: self
+                .store
+                .settings
+                .library_volume
+                .as_ref()
+                .and_then(|v| v.volume_label.clone()),
+            drive_letter: self
+                .store
+                .settings
+                .library_volume
+                .as_ref()
+                .and_then(|v| v.drive_letter.clone()),
+            state: LibraryState::Available,
+            last_seen_at: Some(now.clone()),
+            last_scan_at: existing
+                .as_ref()
+                .and_then(|library| library.last_scan_at.clone()),
+            scan_generation: existing
+                .as_ref()
+                .map(|library| library.scan_generation)
+                .unwrap_or(0),
+            created_at: existing
+                .as_ref()
+                .map(|library| library.created_at.clone())
+                .unwrap_or_else(|| now.clone()),
+            updated_at: now,
+        };
+        if let Err(error) = self.repository.upsert_library(library) {
+            self.store.settings = previous_settings;
+            let _ = self.store.save();
+            return Err(InfrastructureError::database(error));
+        }
+
         self.library_status()
+    }
+
+    pub fn database_path(&self) -> PathBuf {
+        self.database_path.clone()
+    }
+
+    pub fn has_library(&self, library_id: &str) -> Result<bool, InfrastructureError> {
+        self.repository
+            .get_library(library_id)
+            .map(|library| library.is_some())
+            .map_err(InfrastructureError::database)
     }
 
     pub fn set_thumbnail_cache_dir(
@@ -461,6 +530,23 @@ fn lexical_normalize_absolute(path: &Path) -> Result<PathBuf, InfrastructureErro
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn timestamp_now() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("unix-ms:{millis}")
+}
+
+fn stable_library_id(root: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in root.to_ascii_lowercase().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("library-{hash:016x}")
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), InfrastructureError> {

@@ -1,9 +1,12 @@
 pub mod db;
 mod infrastructure;
+mod scanner;
 
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
+use scanner::{ScanManagerState, ScanStartResponse};
 use std::path::PathBuf;
-use tauri::{Manager, State};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager, State};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -53,6 +56,43 @@ fn get_infrastructure_state(
     state.with_infrastructure(|infrastructure| infrastructure.state())
 }
 
+/// Start an incremental scan. The worker reads the root path from the
+/// `libraries` table, not from frontend input or a compiled-in drive letter.
+#[tauri::command]
+fn library_scan_start(
+    library_id: String,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    jobs: State<'_, ScanManagerState>,
+) -> Result<ScanStartResponse, String> {
+    let (database_path, exists) = infrastructure.with_infrastructure(|value| {
+        Ok((value.database_path(), value.has_library(&library_id)?))
+    })?;
+    if !exists {
+        return Err("媒体库不存在".to_owned());
+    }
+    let (job_id, cancel) = jobs.start(&library_id)?;
+    let manager = jobs.inner().clone();
+    let scan_run_id = format!("run-{job_id}");
+    scanner::spawn_scan(
+        app,
+        Arc::new(manager),
+        database_path,
+        library_id,
+        job_id.clone(),
+        cancel,
+    );
+    Ok(ScanStartResponse {
+        job_id,
+        scan_run_id,
+    })
+}
+
+#[tauri::command]
+fn library_scan_cancel(job_id: String, jobs: State<'_, ScanManagerState>) -> Result<(), String> {
+    jobs.cancel(&job_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -71,6 +111,7 @@ pub fn run() {
             )
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             app.manage(InfrastructureState::new(infrastructure));
+            app.manage(ScanManagerState::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -79,7 +120,9 @@ pub fn run() {
             set_library_root,
             set_thumbnail_cache_dir,
             get_library_status,
-            get_infrastructure_state
+            get_infrastructure_state,
+            library_scan_start,
+            library_scan_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
