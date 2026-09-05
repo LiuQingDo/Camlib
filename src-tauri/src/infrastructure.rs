@@ -4,6 +4,7 @@
 //! persisted settings, canonical paths, and the identity/availability check for a
 //! registered library volume.
 
+use crate::db::{DbError, Repository};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -77,15 +78,35 @@ impl InfrastructureState {
 #[derive(Debug)]
 pub struct Infrastructure {
     store: SettingsStore,
+    repository: Repository,
 }
 
 impl Infrastructure {
+    #[allow(dead_code)]
     pub fn open(
         settings_path: PathBuf,
         default_thumbnail_cache_dir: PathBuf,
     ) -> Result<Self, InfrastructureError> {
+        let database_path = settings_path
+            .parent()
+            .map(|parent| parent.join("camlib.sqlite3"))
+            .ok_or_else(|| InfrastructureError::InvalidPath("数据库路径无效".to_owned()))?;
+        Self::open_with_database(settings_path, default_thumbnail_cache_dir, database_path)
+    }
+
+    pub fn open_with_database(
+        settings_path: PathBuf,
+        default_thumbnail_cache_dir: PathBuf,
+        database_path: PathBuf,
+    ) -> Result<Self, InfrastructureError> {
         let store = SettingsStore::open(settings_path, default_thumbnail_cache_dir)?;
-        Ok(Self { store })
+        let repository = Repository::open(database_path).map_err(InfrastructureError::database)?;
+        Ok(Self { store, repository })
+    }
+
+    #[allow(dead_code)]
+    pub fn repository(&self) -> &Repository {
+        &self.repository
     }
 
     pub fn settings(&self) -> Result<AppSettings, InfrastructureError> {
@@ -193,6 +214,9 @@ impl Infrastructure {
     }
 
     pub fn state(&mut self) -> Result<InfrastructureStateDto, InfrastructureError> {
+        self.repository
+            .schema_version()
+            .map_err(InfrastructureError::database)?;
         let library_status = self.library_status()?;
         let settings = self.settings()?;
         Ok(InfrastructureStateDto {
@@ -312,6 +336,7 @@ pub enum InfrastructureError {
     InvalidPath(String),
     Io { path: PathBuf, message: String },
     InvalidSettings(String),
+    Database(String),
 }
 
 impl InfrastructureError {
@@ -320,6 +345,10 @@ impl InfrastructureError {
             path: path.to_path_buf(),
             message: error.to_string(),
         }
+    }
+
+    fn database(error: DbError) -> Self {
+        Self::Database(error.to_string())
     }
 }
 
@@ -331,6 +360,7 @@ impl std::fmt::Display for InfrastructureError {
                 write!(formatter, "访问路径 {} 失败: {message}", path.display())
             }
             Self::InvalidSettings(message) => write!(formatter, "设置文件无效: {message}"),
+            Self::Database(message) => write!(formatter, "数据库无效: {message}"),
         }
     }
 }

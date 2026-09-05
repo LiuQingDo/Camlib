@@ -1,3 +1,4 @@
+pub mod db;
 mod infrastructure;
 
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
@@ -62,8 +63,13 @@ pub fn run() {
             let settings_path = app_data_dir.join("settings.json");
             let default_thumbnail_cache_dir = app_cache_dir.join("thumbnails");
 
-            let infrastructure = Infrastructure::open(settings_path, default_thumbnail_cache_dir)
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            let database_path = app_data_dir.join("camlib.sqlite3");
+            let infrastructure = Infrastructure::open_with_database(
+                settings_path,
+                default_thumbnail_cache_dir,
+                database_path,
+            )
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             app.manage(InfrastructureState::new(infrastructure));
             Ok(())
         })
