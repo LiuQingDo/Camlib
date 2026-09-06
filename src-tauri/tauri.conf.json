@@ -14,8 +14,9 @@
     "windows": [
       {
         "title": "Camlib",
-        "width": 800,
-        "height": 600
+        "width": 1800,
+        "height": 900,
+        "center": true
       }
     ],
     "security": {
