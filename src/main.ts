@@ -110,6 +110,11 @@ const thumbnailQueue: Array<{
 // grid for selection/favorite changes; dropping these used to repeat one IPC +
 // Base64 transfer per card after every redraw.
 const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
+// The modal must not hand a camera original directly to WebView2. A bounded
+// cached preview is large enough for the modal while avoiding failures caused
+// by decoding very large textures at their native dimensions.
+const modalThumbnailWidth = 1600;
+const modalThumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
 
 function pumpThumbnailQueue(): void {
   while (activeThumbnailRequests < thumbnailConcurrency && thumbnailQueue.length) {
@@ -141,6 +146,15 @@ function loadThumbnail(id: string, highPriority = false): Promise<Awaited<Return
   });
   thumbnailRequests.set(id, request);
   void request.catch(() => thumbnailRequests.delete(id));
+  return request;
+}
+
+function loadModalThumbnail(id: string): Promise<Awaited<ReturnType<typeof getMediaThumbnail>>> {
+  const pending = modalThumbnailRequests.get(id);
+  if (pending) return pending;
+  const request = getMediaThumbnail(id, modalThumbnailWidth);
+  modalThumbnailRequests.set(id, request);
+  void request.catch(() => modalThumbnailRequests.delete(id));
   return request;
 }
 
@@ -389,12 +403,14 @@ async function loadModalAsset(): Promise<void> {
     if (!media) return;
     const photo = preview.sources.find((source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")));
     const video = preview.sources.find((source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")));
+    const photoPreview = photo ? await loadModalThumbnail(item.id) : undefined;
+    if (request !== previewRequest || state.previewIndex === null) return;
     if (item.kind === "live" && photo && video) {
-      media.innerHTML = `<div class="live-preview"><img src="${photo.url}" alt="${escapeHtml(item.displayName)}" /><video src="${video.url}" controls autoplay muted loop playsinline></video></div>`;
+      media.innerHTML = `<div class="live-preview"><img src="${photoPreview?.url ?? photo.url}" alt="${escapeHtml(item.displayName)}" /><video src="${video.url}" controls autoplay muted loop playsinline></video></div>`;
     } else if (video) {
       media.innerHTML = `<video src="${video.url}" controls autoplay playsinline></video>`;
-    } else if (photo) {
-      media.innerHTML = `<img src="${photo.url}" alt="${escapeHtml(item.displayName)}" />`;
+    } else if (photoPreview) {
+      media.innerHTML = `<img src="${photoPreview.url}" alt="${escapeHtml(item.displayName)}" />`;
     } else {
       media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`;
     }
