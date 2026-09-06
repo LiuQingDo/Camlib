@@ -97,9 +97,38 @@ export interface DateFacetDto {
   count: number;
 }
 
-export interface MediaAssetDto {
+export interface ThumbnailDto {
   mimeType: string;
   dataBase64: string;
+  cacheKey: string;
+}
+
+export interface MediaSourceDto {
+  role: "single" | "photo" | "video";
+  url: string;
+  mimeType: string;
+}
+
+export interface MediaPreviewDto {
+  kind: MediaKind;
+  sources: MediaSourceDto[];
+}
+
+export interface PreviewJobStartDto {
+  jobId: string;
+}
+
+export interface PreviewProgressDto {
+  jobId: string;
+  kind: "thumbnail";
+  seq: number;
+  phase: "thumbnailing" | "finalizing";
+  state: "running" | "completed" | "cancelled" | "failed";
+  current: string | null;
+  processed: number;
+  total: number;
+  errors: string[];
+  error: string | null;
 }
 
 export interface ScanStartDto {
@@ -174,6 +203,22 @@ export function setFavorite(mediaItemId: string, favorite: boolean): Promise<voi
   return invoke<void>("favorite_set", { mediaItemId, favorite });
 }
 
-export function getMediaAsset(mediaItemId: string): Promise<MediaAssetDto> {
-  return invoke<MediaAssetDto>("media_asset", { mediaItemId });
+export function getMediaThumbnail(mediaItemId: string, width = 320): Promise<ThumbnailDto> {
+  return invoke<ThumbnailDto>("media_thumbnail", { mediaItemId, width });
+}
+
+export function getMediaPreview(mediaItemId: string): Promise<MediaPreviewDto> {
+  return invoke<MediaPreviewDto>("media_preview", { mediaItemId });
+}
+
+export function startThumbnailRebuild(libraryId: string): Promise<PreviewJobStartDto> {
+  return invoke<PreviewJobStartDto>("thumbnail_rebuild_start", { libraryId });
+}
+
+export function cancelPreviewJob(jobId: string): Promise<void> {
+  return invoke<void>("preview_job_cancel", { jobId });
+}
+
+export function onPreviewProgress(callback: (event: PreviewProgressDto) => void): Promise<UnlistenFn> {
+  return listen<PreviewProgressDto>("preview-progress", (event) => callback(event.payload));
 }

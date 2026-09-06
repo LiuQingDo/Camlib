@@ -4,7 +4,8 @@ import {
   type MediaItemDto,
   type MediaKind,
   type MediaPageDto,
-  getMediaAsset,
+  getMediaPreview,
+  getMediaThumbnail,
   listDateFacets,
   listLibraries,
   onScanProgress,
@@ -57,6 +58,7 @@ const appRoot = document.querySelector<HTMLElement>("#app");
 if (!appRoot) throw new Error("找不到应用容器");
 const app: HTMLElement = appRoot;
 let searchTimer: number | undefined;
+let previewRequest = 0;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
@@ -194,12 +196,11 @@ function bindEvents(): void {
 function observePreviews(): void {
   const cards = [...app.querySelectorAll<HTMLElement>("[data-preview]")];
   const load = (card: HTMLElement) => {
-    if (card.classList.contains("is-video")) return;
     if (card.dataset.loaded === "true") return;
     card.dataset.loaded = "true";
     const id = card.dataset.preview;
     if (!id) return;
-    void getMediaAsset(id).then((asset) => {
+    void getMediaThumbnail(id).then((asset) => {
       const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
       const item = state.page.items.find((entry) => entry.id === id);
       if (!target || !item) return;
@@ -216,12 +217,24 @@ function observePreviews(): void {
 async function loadModalAsset(): Promise<void> {
   const item = state.previewIndex === null ? undefined : state.page.items[state.previewIndex];
   if (!item) return;
+  const request = ++previewRequest;
   try {
-    const asset = await getMediaAsset(item.id);
+    const preview = await getMediaPreview(item.id);
+    if (request !== previewRequest || state.previewIndex === null) return;
     const media = app.querySelector<HTMLElement>("#modal-media");
     if (!media) return;
-    media.innerHTML = asset.mimeType.startsWith("video/") ? `<video src="data:${asset.mimeType};base64,${asset.dataBase64}" controls autoplay playsinline></video>` : `<img src="data:${asset.mimeType};base64,${asset.dataBase64}" alt="${escapeHtml(item.displayName)}" />`;
-  } catch { const media = app.querySelector<HTMLElement>("#modal-media"); if (media) media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`; }
+    const photo = preview.sources.find((source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")));
+    const video = preview.sources.find((source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")));
+    if (item.kind === "live" && photo && video) {
+      media.innerHTML = `<div class="live-preview"><img src="${photo.url}" alt="${escapeHtml(item.displayName)}" /><video src="${video.url}" controls autoplay muted loop playsinline></video></div>`;
+    } else if (video) {
+      media.innerHTML = `<video src="${video.url}" controls autoplay playsinline></video>`;
+    } else if (photo) {
+      media.innerHTML = `<img src="${photo.url}" alt="${escapeHtml(item.displayName)}" />`;
+    } else {
+      media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`;
+    }
+  } catch { const media = app.querySelector<HTMLElement>("#modal-media"); if (request === previewRequest && media) media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`; }
 }
 
 function closePreview(): void { state.previewIndex = null; render(); }
@@ -266,8 +279,8 @@ async function bootstrap(): Promise<void> {
 
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.previewIndex !== null) { closePreview(); return; }
-  if (state.previewIndex !== null && event.key === "ArrowLeft") { movePreview(-1); return; }
-  if (state.previewIndex !== null && event.key === "ArrowRight") { movePreview(1); return; }
+  if (state.previewIndex !== null && (event.key === "ArrowLeft" || event.key === "ArrowUp")) { event.preventDefault(); movePreview(-1); return; }
+  if (state.previewIndex !== null && (event.key === "ArrowRight" || event.key === "ArrowDown")) { event.preventDefault(); movePreview(1); return; }
   if (event.key === "/" && document.activeElement?.tagName !== "INPUT") { event.preventDefault(); app.querySelector<HTMLInputElement>("#search-input")?.focus(); }
 });
 

@@ -1,16 +1,16 @@
 pub mod db;
 mod infrastructure;
+mod media;
 mod scanner;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use db::{MediaKind, MediaQuery, MediaSort};
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
+use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
-use serde::{Deserialize, Serialize};
-use std::fs;
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -73,13 +73,6 @@ struct MediaQueryInput {
     sort: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MediaAssetDto {
-    mime_type: String,
-    data_base64: String,
-}
-
 #[tauri::command]
 fn library_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Library>, String> {
     state.with_infrastructure(|infrastructure| {
@@ -140,7 +133,9 @@ fn media_get(
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
-            .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned()))
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+            })
     })
 }
 
@@ -166,57 +161,137 @@ fn favorite_set(
 }
 
 #[tauri::command]
-fn media_asset(
+fn media_thumbnail(
     media_item_id: String,
+    width: Option<u32>,
+    app: AppHandle,
     state: State<'_, InfrastructureState>,
-) -> Result<MediaAssetDto, String> {
+) -> Result<media::ThumbnailDto, String> {
     state.with_infrastructure(|infrastructure| {
         let details = infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
-            .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned()))?;
-        let file = details
-            .files
-            .iter()
-            .find(|file| file.exists_now)
-            .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath("媒体文件不可用".to_owned()))?;
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+            })?;
         let library = infrastructure
             .repository()
             .get_library(&details.item.library_id)
             .map_err(infrastructure::InfrastructureError::database)?
-            .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned()))?;
-        let root = fs::canonicalize(&library.root_path)
-            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(format!("媒体库不可用: {error}")))?;
-        let candidate = root.join(PathBuf::from(&file.relative_path));
-        let path = fs::canonicalize(&candidate)
-            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(format!("媒体文件不可用: {error}")))?;
-        if !path.starts_with(&root) {
-            return Err(infrastructure::InfrastructureError::InvalidPath("媒体路径越界".to_owned()));
-        }
-        let bytes = fs::read(&path)
-            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(format!("读取媒体失败: {error}")))?;
-        Ok(MediaAssetDto {
-            mime_type: mime_for_extension(&file.extension).to_owned(),
-            data_base64: BASE64.encode(bytes),
-        })
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        let settings = infrastructure.settings()?;
+        media::thumbnail_for_item(
+            &details,
+            PathBuf::from(&library.root_path).as_path(),
+            PathBuf::from(&settings.thumbnail_cache_dir).as_path(),
+            width.unwrap_or(320).clamp(96, 1600),
+            Some(&app),
+            None,
+        )
+        .map_err(infrastructure::InfrastructureError::InvalidPath)
     })
 }
 
-fn mime_for_extension(extension: &str) -> &'static str {
-    match extension.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "heic" => "image/heic",
-        "heif" => "image/heif",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        "m4v" => "video/x-m4v",
-        "webm" => "video/webm",
-        _ => "application/octet-stream",
+#[tauri::command]
+fn media_preview(
+    media_item_id: String,
+    state: State<'_, InfrastructureState>,
+    streams: State<'_, MediaStreamRegistry>,
+) -> Result<media::MediaPreviewDto, String> {
+    state.with_infrastructure(|infrastructure| {
+        let details = infrastructure
+            .repository()
+            .get_media_item_details(&media_item_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+            })?;
+        let library = infrastructure
+            .repository()
+            .get_library(&details.item.library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        media::preview_sources(
+            &details,
+            PathBuf::from(&library.root_path).as_path(),
+            &streams,
+        )
+        .map_err(infrastructure::InfrastructureError::InvalidPath)
+    })
+}
+
+#[tauri::command]
+fn thumbnail_rebuild_start(
+    library_id: String,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    jobs: State<'_, PreviewJobManagerState>,
+) -> Result<media::PreviewJobStartDto, String> {
+    let (database_path, root, cache_dir, exists) = infrastructure.with_infrastructure(|value| {
+        let settings = value.settings()?;
+        let library = value
+            .repository()
+            .get_library(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)?;
+        Ok((
+            value.database_path(),
+            library.as_ref().map(|item| item.root_path.clone()),
+            settings.thumbnail_cache_dir,
+            library.is_some(),
+        ))
+    })?;
+    if !exists {
+        return Err("媒体库不存在".to_owned());
     }
+    let root = PathBuf::from(root.ok_or_else(|| "媒体库不存在".to_owned())?);
+    let (job_id, cancel) = jobs.start()?;
+    let manager = jobs.shared();
+    let job_for_thread = job_id.clone();
+    std::thread::spawn(move || {
+        match db::Repository::open(&database_path) {
+            Ok(repository) => media::run_thumbnail_job(
+                &app,
+                &repository,
+                &root,
+                PathBuf::from(cache_dir).as_path(),
+                &library_id,
+                &job_for_thread,
+                &cancel,
+            ),
+            Err(error) => {
+                let _ = app.emit(
+                    "preview-progress",
+                    media::PreviewProgress {
+                        job_id: job_for_thread.clone(),
+                        kind: "thumbnail",
+                        seq: u64::MAX,
+                        phase: "finalizing",
+                        state: "failed",
+                        current: None,
+                        processed: 0,
+                        total: 0,
+                        errors: vec![error.to_string()],
+                        error: Some(error.to_string()),
+                    },
+                );
+            }
+        }
+        manager.finish(&job_for_thread);
+    });
+    Ok(media::PreviewJobStartDto { job_id: job_id })
+}
+
+#[tauri::command]
+fn preview_job_cancel(
+    job_id: String,
+    jobs: State<'_, PreviewJobManagerState>,
+) -> Result<(), String> {
+    jobs.cancel(&job_id)
 }
 
 /// Start an incremental scan. The worker reads the root path from the
@@ -258,9 +333,11 @@ fn library_scan_cancel(job_id: String, jobs: State<'_, ScanManagerState>) -> Res
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let streams = MediaStreamRegistry::default();
+    let protocol_streams = streams.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             let app_cache_dir = app.path().app_cache_dir()?;
             let settings_path = app_data_dir.join("settings.json");
@@ -275,7 +352,12 @@ pub fn run() {
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             app.manage(InfrastructureState::new(infrastructure));
             app.manage(ScanManagerState::new());
+            app.manage(PreviewJobManagerState::new());
+            app.manage(streams.clone());
             Ok(())
+        })
+        .register_uri_scheme_protocol("camlib", move |_context, request| {
+            media::serve_stream(&protocol_streams, request)
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -289,7 +371,10 @@ pub fn run() {
             media_date_facets,
             media_get,
             favorite_set,
-            media_asset,
+            media_thumbnail,
+            media_preview,
+            thumbnail_rebuild_start,
+            preview_job_cancel,
             library_scan_start,
             library_scan_cancel
         ])
