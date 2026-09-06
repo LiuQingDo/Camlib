@@ -10,6 +10,7 @@ export interface AppSettings {
   library_root: string | null;
   thumbnail_cache_dir: string;
   library_volume: VolumeInfo | null;
+  backup_conflict_policy: "skip_same" | "rename" | "overwrite";
 }
 
 export type LibraryAvailability =
@@ -40,6 +41,10 @@ export function setLibraryRoot(path: string): Promise<LibraryStatus> {
 
 export function setThumbnailCacheDir(path: string): Promise<AppSettings> {
   return invoke<AppSettings>("set_thumbnail_cache_dir", { path });
+}
+
+export function setBackupConflictPolicy(policy: AppSettings["backup_conflict_policy"]): Promise<AppSettings> {
+  return invoke<AppSettings>("set_backup_conflict_policy", { policy });
 }
 
 export function getLibraryStatus(): Promise<LibraryStatus> {

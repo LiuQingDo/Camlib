@@ -1,17 +1,18 @@
-//! Camera-volume discovery and read-only backup planning.
-//!
-//! This module deliberately stops at a persisted preview.  It does not copy,
-//! rename, delete, or otherwise write camera files.  A later execution phase
-//! can consume the preview after the safety checks here have passed.
+//! Camera-volume discovery, read-only planning, and safe backup execution.
 
-use crate::db::{BackupStatus, ConflictPolicy, NewBackupRun, Repository};
+use crate::db::{
+    BackupItem, BackupStatus, ConflictPolicy, NewBackupItem, NewBackupRun, Repository,
+};
+use crate::scanner;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter};
 
 const DEFAULT_IGNORED_EXTENSIONS: &[&str] = &[".dng", ".lrv"];
 const PHOTO_EXTENSIONS: &[&str] = &[
@@ -86,6 +87,87 @@ pub struct BackupPreviewDto {
     pub required_bytes: u64,
     pub free_bytes: Option<u64>,
     pub space_sufficient: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupProgress {
+    pub job_id: String,
+    pub kind: &'static str,
+    pub seq: u64,
+    pub phase: &'static str,
+    pub state: &'static str,
+    pub current_file: Option<String>,
+    pub file_processed: i64,
+    pub file_total: i64,
+    pub bytes_processed: i64,
+    pub bytes_total: i64,
+    pub speed_bytes_per_sec: u64,
+    pub eta_seconds: Option<u64>,
+    pub errors: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStartResponse {
+    pub job_id: String,
+    pub backup_run_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveBackup {
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupManagerState {
+    jobs: Arc<Mutex<HashMap<String, ActiveBackup>>>,
+}
+
+impl BackupManagerState {
+    pub fn new() -> Self {
+        Self {
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn start(&self) -> Result<(String, Arc<AtomicBool>), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "备份任务状态锁已损坏".to_owned())?;
+        if !jobs.is_empty() {
+            return Err("已有备份任务正在运行".to_owned());
+        }
+        let job_id = format!("backup-{}", NEXT_BACKUP.fetch_add(1, Ordering::Relaxed));
+        let cancel = Arc::new(AtomicBool::new(false));
+        jobs.insert(
+            job_id.clone(),
+            ActiveBackup {
+                cancel: cancel.clone(),
+            },
+        );
+        Ok((job_id, cancel))
+    }
+
+    pub fn cancel(&self, job_id: &str) -> Result<(), String> {
+        let jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "备份任务状态锁已损坏".to_owned())?;
+        jobs.get(job_id)
+            .ok_or_else(|| "备份任务不存在".to_owned())?
+            .cancel
+            .store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn finish(&self, job_id: &str) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(job_id);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -203,10 +285,9 @@ fn preview_paths(
     let required_bytes = items
         .iter()
         .filter(|item| {
-            matches!(
-                item.status,
-                BackupItemStatus::Ready | BackupItemStatus::Conflict
-            )
+            item.status == BackupItemStatus::Ready
+                || (item.status == BackupItemStatus::Conflict
+                    && conflict_policy != ConflictPolicy::SkipSame)
         })
         .map(|item| item.size_bytes)
         .sum();
@@ -238,6 +319,23 @@ fn preview_paths(
         error_summary,
     })?;
 
+    for (index, item) in items.iter().enumerate() {
+        repository.create_backup_item(NewBackupItem {
+            id: format!("{}-item-{index}", backup_run_id),
+            backup_run_id: backup_run_id.clone(),
+            source_relative: item.source_relative.clone(),
+            destination_relative: item.destination_relative.clone(),
+            size_bytes: item.size_bytes as i64,
+            status: match &item.status {
+                BackupItemStatus::Ready | BackupItemStatus::Conflict => "planned",
+                BackupItemStatus::AlreadyExists | BackupItemStatus::Ignored => "skipped",
+            }
+            .to_owned(),
+            copied_bytes: 0,
+            error_message: item.reason.clone(),
+        })?;
+    }
+
     Ok(BackupPreviewDto {
         id: preview_id,
         backup_run_id,
@@ -257,6 +355,687 @@ fn preview_paths(
         free_bytes,
         space_sufficient,
     })
+}
+
+/// Start a previously persisted preview. The caller must provide the preview's
+/// job id as its confirmation token; this binds confirmation to exactly the
+/// plan the user inspected and prevents a fresh/unreviewed plan from running.
+pub fn spawn(
+    app: AppHandle,
+    manager: Arc<BackupManagerState>,
+    scan_manager: Arc<scanner::ScanManagerState>,
+    database_path: PathBuf,
+    preview_id: String,
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+    retry_item_ids: Option<Vec<String>>,
+) {
+    std::thread::spawn(move || {
+        let result = run(
+            &app,
+            &database_path,
+            &preview_id,
+            &job_id,
+            &cancel,
+            retry_item_ids,
+        );
+        if let Err(error) = &result {
+            if let Ok(mut log) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(database_path.with_file_name(format!("backup-{preview_id}.log")))
+            {
+                let _ = writeln!(log, "{} [task] {}", timestamp_now(), error);
+            }
+            if let Ok(repository) = Repository::open(&database_path) {
+                let record = repository.get_backup_run(&preview_id).ok().flatten();
+                let _ = repository.update_backup_run(
+                    &preview_id,
+                    &job_id,
+                    BackupStatus::Failed,
+                    record.as_ref().map(|value| value.copied_files).unwrap_or(0),
+                    record
+                        .as_ref()
+                        .map(|value| value.skipped_files)
+                        .unwrap_or(0),
+                    record
+                        .as_ref()
+                        .map(|value| value.failed_files.max(1))
+                        .unwrap_or(1),
+                    record.as_ref().map(|value| value.copied_bytes).unwrap_or(0),
+                    Some(&timestamp_now()),
+                    Some(error),
+                );
+                let items = repository
+                    .list_backup_items(&preview_id)
+                    .unwrap_or_default();
+                emit(
+                    &app,
+                    progress(
+                        &job_id,
+                        "failed",
+                        None,
+                        &items,
+                        0,
+                        0,
+                        Instant::now(),
+                        vec![error.clone()],
+                        Some(error.clone()),
+                    ),
+                );
+            }
+        }
+        if matches!(result, Ok(BackupStatus::Completed)) {
+            if let Ok(repository) = Repository::open(&database_path) {
+                if let Ok(Some(run)) = repository.get_backup_run(&preview_id) {
+                    if let Ok((scan_job, scan_cancel)) = scan_manager.start(&run.target_library_id)
+                    {
+                        scanner::spawn_scan(
+                            app.clone(),
+                            scan_manager.clone(),
+                            database_path.clone(),
+                            run.target_library_id,
+                            scan_job,
+                            scan_cancel,
+                        );
+                    }
+                }
+            }
+        }
+        manager.finish(&job_id);
+    });
+}
+
+fn run(
+    app: &AppHandle,
+    database_path: &Path,
+    run_id: &str,
+    job_id: &str,
+    cancel: &AtomicBool,
+    retry_item_ids: Option<Vec<String>>,
+) -> Result<BackupStatus, String> {
+    let repository = Repository::open(database_path).map_err(|error| error.to_string())?;
+    let run_record = repository
+        .get_backup_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "备份任务不存在".to_owned())?;
+    let target = repository
+        .get_library(&run_record.target_library_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "目标媒体库不存在".to_owned())?;
+    let source_root = canonical_dir(Path::new(&run_record.source_root_path), "相机源盘")?;
+    let target_root = canonical_dir(Path::new(&target.root_path), "目标媒体库")?;
+    if is_same_or_child(&target_root, &source_root) {
+        return fail_run(&repository, run_id, job_id, "目标媒体库不能位于相机源盘内");
+    }
+    if let Some(volume_id) = &run_record.source_volume_id {
+        let current = discover_candidates()
+            .into_iter()
+            .find(|candidate| volume_dto(candidate).id == *volume_id)
+            .ok_or_else(|| "源相机盘已断开或身份已变化".to_owned())?;
+        let current_root = canonical_dir(&current.root_path, "相机源盘")?;
+        if current_root != source_root {
+            return fail_run(
+                &repository,
+                run_id,
+                job_id,
+                "源相机盘身份已变化，请重新预览",
+            );
+        }
+    }
+
+    let mut items = repository
+        .list_backup_items(run_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(free) = available_space(&target_root) {
+        let required = items
+            .iter()
+            .filter(|item| item.status == "planned")
+            .filter_map(|item| {
+                let destination = item
+                    .destination_relative
+                    .as_deref()
+                    .and_then(|relative| safe_join(&target_root, relative).ok());
+                if run_record.conflict_policy == ConflictPolicy::SkipSame
+                    && destination.as_ref().is_some_and(|path| path.exists())
+                {
+                    None
+                } else {
+                    Some(item.size_bytes.max(0) as u64)
+                }
+            })
+            .sum::<u64>();
+        if free < required {
+            return fail_run(
+                &repository,
+                run_id,
+                job_id,
+                "目标盘空间不足，请重新检查目标盘",
+            );
+        }
+    }
+    let retry_set = retry_item_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    if retry_set.is_some() {
+        for item in &items {
+            if item.status == "failed"
+                && retry_set.as_ref().is_some_and(|ids| ids.contains(&item.id))
+            {
+                repository
+                    .update_backup_item(&item.id, "planned", 0, None, None)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        items = repository
+            .list_backup_items(run_id)
+            .map_err(|error| error.to_string())?;
+    }
+
+    repository
+        .update_backup_run(
+            run_id,
+            job_id,
+            BackupStatus::Running,
+            count_items(&items, "copied"),
+            count_items(&items, "skipped"),
+            count_items(&items, "failed"),
+            sum_copied(&items),
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    emit(
+        app,
+        progress(
+            job_id,
+            "running",
+            None,
+            &items,
+            0,
+            0,
+            Instant::now(),
+            vec![],
+            None,
+        ),
+    );
+
+    let started = Instant::now();
+    let mut completed_bytes = sum_copied(&items).max(0) as u64;
+    let mut completed_files = count_items(&items, "copied") + count_items(&items, "skipped");
+    let mut errors = Vec::new();
+    let log_path = database_path.with_file_name(format!("backup-{run_id}.log"));
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+
+    for index in 0..items.len() {
+        let item = items[index].clone();
+        if item.status != "planned" {
+            continue;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            cancel_remaining(&repository, &items[index..])?;
+            return finish(
+                app,
+                &repository,
+                run_id,
+                job_id,
+                BackupStatus::Cancelled,
+                completed_files,
+                completed_bytes,
+                errors,
+                Some("用户取消备份".to_owned()),
+            );
+        }
+        let source_path = safe_join(&source_root, &item.source_relative)?;
+        let Some(destination_relative) = item.destination_relative.as_deref() else {
+            repository
+                .update_backup_item(&item.id, "skipped", 0, None, None)
+                .map_err(|e| e.to_string())?;
+            items[index].status = "skipped".to_owned();
+            completed_files += 1;
+            continue;
+        };
+        let destination = safe_join(&target_root, destination_relative)?;
+        let policy = run_record.conflict_policy.clone();
+        if policy == ConflictPolicy::SkipSame && destination.exists() {
+            repository
+                .update_backup_item(&item.id, "skipped", 0, None, Some("按冲突设置跳过"))
+                .map_err(|e| e.to_string())?;
+            items[index].status = "skipped".to_owned();
+            completed_files += 1;
+            continue;
+        }
+        let destination = if policy == ConflictPolicy::Rename {
+            unique_destination(&destination)?
+        } else {
+            destination
+        };
+        emit(
+            app,
+            progress(
+                job_id,
+                "running",
+                Some(item.source_relative.clone()),
+                &items,
+                completed_files,
+                completed_bytes,
+                started,
+                errors.clone(),
+                None,
+            ),
+        );
+        let base_bytes = completed_bytes;
+        let current_name = item.source_relative.clone();
+        let mut last_progress = Instant::now();
+        let result = copy_and_verify(
+            &source_path,
+            &destination,
+            item.size_bytes as u64,
+            cancel,
+            &mut |file_bytes| {
+                if last_progress.elapsed() >= Duration::from_millis(100) {
+                    emit(
+                        app,
+                        progress(
+                            job_id,
+                            "running",
+                            Some(current_name.clone()),
+                            &items,
+                            completed_files,
+                            base_bytes + file_bytes,
+                            started,
+                            errors.clone(),
+                            None,
+                        ),
+                    );
+                    last_progress = Instant::now();
+                }
+            },
+        );
+        match result {
+            Ok(copied) => {
+                let relative = relative_string(&target_root, &destination)?;
+                repository
+                    .update_backup_item(&item.id, "copied", copied as i64, Some(&relative), None)
+                    .map_err(|e| e.to_string())?;
+                items[index].status = "copied".to_owned();
+                items[index].copied_bytes = copied as i64;
+                items[index].destination_relative = Some(relative);
+                completed_files += 1;
+                completed_bytes += copied;
+            }
+            Err(CopyError::Cancelled) => {
+                cleanup_temp(&destination);
+                repository
+                    .update_backup_item(&item.id, "cancelled", 0, None, Some("用户取消备份"))
+                    .map_err(|e| e.to_string())?;
+                cancel_remaining(&repository, &items[index + 1..])?;
+                return finish(
+                    app,
+                    &repository,
+                    run_id,
+                    job_id,
+                    BackupStatus::Cancelled,
+                    completed_files,
+                    completed_bytes,
+                    errors,
+                    Some("用户取消备份".to_owned()),
+                );
+            }
+            Err(CopyError::Message(message)) => {
+                if let Some(file) = log.as_mut() {
+                    let _ = writeln!(
+                        file,
+                        "{} [{}] {}",
+                        timestamp_now(),
+                        item.source_relative,
+                        message
+                    );
+                }
+                repository
+                    .update_backup_item(&item.id, "failed", 0, None, Some(&message))
+                    .map_err(|e| e.to_string())?;
+                items[index].status = "failed".to_owned();
+                items[index].error_message = Some(message.clone());
+                errors.push(format!("{}: {}", item.file_name_hint(), message));
+            }
+        }
+        emit(
+            app,
+            progress(
+                job_id,
+                "running",
+                None,
+                &items,
+                completed_files,
+                completed_bytes,
+                started,
+                errors.clone(),
+                None,
+            ),
+        );
+    }
+    let status = if errors.is_empty() && count_items(&items, "failed") == 0 {
+        BackupStatus::Completed
+    } else {
+        BackupStatus::Failed
+    };
+    finish(
+        app,
+        &repository,
+        run_id,
+        job_id,
+        status,
+        completed_files,
+        completed_bytes,
+        errors,
+        None,
+    )
+}
+
+fn finish(
+    app: &AppHandle,
+    repository: &Repository,
+    run_id: &str,
+    job_id: &str,
+    status: BackupStatus,
+    copied_files: i64,
+    copied_bytes: u64,
+    errors: Vec<String>,
+    extra_error: Option<String>,
+) -> Result<BackupStatus, String> {
+    let items = repository
+        .list_backup_items(run_id)
+        .map_err(|error| error.to_string())?;
+    let summary = extra_error.or_else(|| (!errors.is_empty()).then(|| errors.join("; ")));
+    repository
+        .update_backup_run(
+            run_id,
+            job_id,
+            status.clone(),
+            copied_files,
+            count_items(&items, "skipped"),
+            count_items(&items, "failed"),
+            copied_bytes as i64,
+            Some(&timestamp_now()),
+            summary.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    emit(
+        app,
+        progress(
+            job_id,
+            match status {
+                BackupStatus::Completed => "completed",
+                BackupStatus::Cancelled => "cancelled",
+                _ => "failed",
+            },
+            None,
+            &items,
+            copied_files,
+            copied_bytes,
+            Instant::now(),
+            errors.clone(),
+            summary.clone(),
+        ),
+    );
+    Ok(status)
+}
+
+fn fail_run(
+    repository: &Repository,
+    run_id: &str,
+    job_id: &str,
+    message: &str,
+) -> Result<BackupStatus, String> {
+    let _ = repository.update_backup_run(
+        run_id,
+        job_id,
+        BackupStatus::Failed,
+        0,
+        0,
+        1,
+        0,
+        Some(&timestamp_now()),
+        Some(message),
+    );
+    Err(message.to_owned())
+}
+
+fn cancel_remaining(repository: &Repository, items: &[BackupItem]) -> Result<(), String> {
+    for item in items.iter().filter(|item| item.status == "planned") {
+        repository
+            .update_backup_item(&item.id, "cancelled", 0, None, Some("用户取消备份"))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn count_items(items: &[BackupItem], status: &str) -> i64 {
+    items.iter().filter(|item| item.status == status).count() as i64
+}
+fn sum_copied(items: &[BackupItem]) -> i64 {
+    items.iter().map(|item| item.copied_bytes).sum()
+}
+
+fn progress(
+    job_id: &str,
+    state: &'static str,
+    current_file: Option<String>,
+    items: &[BackupItem],
+    file_processed: i64,
+    bytes_processed: u64,
+    started: Instant,
+    errors: Vec<String>,
+    error: Option<String>,
+) -> BackupProgress {
+    let speed = if started.elapsed() >= Duration::from_millis(100) {
+        (bytes_processed as f64 / started.elapsed().as_secs_f64()) as u64
+    } else {
+        0
+    };
+    BackupProgress {
+        job_id: job_id.to_owned(),
+        kind: "backup",
+        seq: if state == "completed" || state == "cancelled" || state == "failed" {
+            u64::MAX
+        } else {
+            bytes_processed
+        },
+        phase: "copying",
+        state,
+        current_file,
+        file_processed,
+        file_total: items.len() as i64,
+        bytes_processed: bytes_processed as i64,
+        bytes_total: items
+            .iter()
+            .map(|item| item.size_bytes.max(0) as u64)
+            .sum::<u64>() as i64,
+        speed_bytes_per_sec: speed,
+        eta_seconds: (speed > 0).then(|| {
+            (items
+                .iter()
+                .filter(|item| item.status == "planned")
+                .map(|item| item.size_bytes.max(0) as u64)
+                .sum::<u64>()
+                / speed)
+                .max(0)
+        }),
+        errors,
+        error,
+    }
+}
+
+#[derive(Debug)]
+enum CopyError {
+    Cancelled,
+    Message(String),
+}
+
+struct TempGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn copy_and_verify(
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> Result<u64, CopyError> {
+    let source_file = File::open(source)
+        .map_err(|error| CopyError::Message(format!("读取源文件失败: {error}")))?;
+    let metadata = source_file
+        .metadata()
+        .map_err(|error| CopyError::Message(format!("读取源文件信息失败: {error}")))?;
+    if metadata.len() != expected_size {
+        return Err(CopyError::Message(
+            "源文件大小已变化，请重新预览".to_owned(),
+        ));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| CopyError::Message("目标路径无效".to_owned()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| CopyError::Message(format!("创建目标目录失败: {error}")))?;
+    let temp = parent.join(format!(
+        ".{}.camlib-part",
+        destination
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    ));
+    let _ = fs::remove_file(&temp);
+    let mut temp_guard = TempGuard {
+        path: temp.clone(),
+        armed: true,
+    };
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|error| CopyError::Message(format!("创建临时文件失败: {error}")))?;
+    let mut input = source_file;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(output);
+            return Err(CopyError::Cancelled);
+        }
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| CopyError::Message(format!("读取源文件失败: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| CopyError::Message(format!("写入目标文件失败: {error}")))?;
+        copied += read as u64;
+        on_bytes(copied);
+    }
+    output
+        .sync_all()
+        .map_err(|error| CopyError::Message(format!("刷新目标文件失败: {error}")))?;
+    drop(output);
+    if copied != expected_size
+        || fs::metadata(&temp)
+            .map_err(|error| CopyError::Message(format!("校验目标文件失败: {error}")))?
+            .len()
+            != expected_size
+    {
+        return Err(CopyError::Message("复制后文件大小校验失败".to_owned()));
+    }
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|error| CopyError::Message(format!("替换冲突文件失败: {error}")))?;
+    }
+    fs::rename(&temp, destination)
+        .map_err(|error| CopyError::Message(format!("提交目标文件失败: {error}")))?;
+    temp_guard.armed = false;
+    Ok(copied)
+}
+
+fn cleanup_temp(destination: &Path) {
+    if let Some(parent) = destination.parent() {
+        let _ = fs::remove_file(parent.join(format!(
+                ".{}.camlib-part",
+                destination
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )));
+    }
+}
+fn canonical_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| format!("{label}不可用: {error}"))
+}
+fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let mut path = root.to_owned();
+    for component in relative.replace('/', "\\").split('\\') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            return Err("备份相对路径无效".to_owned());
+        }
+        path.push(component);
+    }
+    if !is_same_or_child(&path, root) {
+        return Err("备份路径越过目录边界".to_owned());
+    }
+    Ok(path)
+}
+fn relative_string(root: &Path, path: &Path) -> Result<String, String> {
+    path.strip_prefix(root)
+        .map(path_to_string)
+        .map_err(|_| "目标路径越过媒体库边界".to_owned())
+}
+fn unique_destination(path: &Path) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Ok(path.to_owned());
+    }
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+    for index in 1..100_000 {
+        let candidate = path.with_file_name(format!("{stem} ({index}){extension}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("无法为冲突文件生成新文件名".to_owned())
+}
+fn emit(app: &AppHandle, progress: BackupProgress) {
+    let _ = app.emit("backup-progress", progress);
+}
+
+trait BackupItemHint {
+    fn file_name_hint(&self) -> String;
+}
+impl BackupItemHint for BackupItem {
+    fn file_name_hint(&self) -> String {
+        self.source_relative
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(&self.source_relative)
+            .to_owned()
+    }
 }
 
 fn collect_items(
@@ -781,7 +1560,7 @@ mod tests {
         assert_eq!(preview.conflict_files, 1);
         assert_eq!(preview.ignored_files, 2);
         assert_eq!(preview.ready_files, 0);
-        assert_eq!(preview.space_sufficient, Some(false));
+        assert_eq!(preview.space_sufficient, Some(true));
         assert!(preview
             .items
             .iter()
@@ -856,5 +1635,68 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("不能位于相机源盘内"));
+    }
+
+    #[test]
+    fn temp_source_and_target_execute_copy_verify_and_keep_source_read_only() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let source_file = source.path().join("DCIM/100MEDIA/IMG_20250101_000000.JPG");
+        let destination = target
+            .path()
+            .join("2025/01/2025-01-01/照片/IMG_20250101_000000.JPG");
+        let content = vec![42_u8; 2 * 1024 * 1024 + 17];
+        write(&source_file, &content);
+        let source_before = fs::read(&source_file).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut progress_calls = 0_u32;
+        let copied = copy_and_verify(
+            &source_file,
+            &destination,
+            content.len() as u64,
+            &cancel,
+            &mut |_| progress_calls += 1,
+        )
+        .unwrap();
+        assert_eq!(copied, content.len() as u64);
+        assert!(progress_calls > 0);
+        assert_eq!(fs::read(&destination).unwrap(), content);
+        assert_eq!(fs::read(&source_file).unwrap(), source_before);
+
+        let cancelled_destination = target.path().join("cancelled/file.JPG");
+        let cancelled = AtomicBool::new(true);
+        assert!(matches!(
+            copy_and_verify(
+                &source_file,
+                &cancelled_destination,
+                content.len() as u64,
+                &cancelled,
+                &mut |_| {}
+            ),
+            Err(CopyError::Cancelled)
+        ));
+        assert!(!cancelled_destination.exists());
+        assert_eq!(fs::read(&source_file).unwrap(), source_before);
+    }
+
+    #[test]
+    fn rename_conflict_never_overwrites_existing_target() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let source_file = source.path().join("source.JPG");
+        let destination = target.path().join("photo.JPG");
+        write(&source_file, b"new");
+        write(&destination, b"old");
+        let renamed = unique_destination(&destination).unwrap();
+        copy_and_verify(
+            &source_file,
+            &renamed,
+            3,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"old");
+        assert_eq!(fs::read(renamed).unwrap(), b"new");
     }
 }

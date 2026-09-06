@@ -249,12 +249,50 @@ export interface BackupPreviewInput {
   ignoreExtensions?: string[];
 }
 
+export interface BackupStartDto {
+  jobId: string;
+  backupRunId: string;
+}
+
+export interface BackupProgressDto {
+  jobId: string;
+  kind: "backup";
+  seq: number;
+  phase: "copying" | "finalizing";
+  state: "running" | "completed" | "cancelled" | "failed";
+  currentFile: string | null;
+  fileProcessed: number;
+  fileTotal: number;
+  bytesProcessed: number;
+  bytesTotal: number;
+  speedBytesPerSec: number;
+  etaSeconds: number | null;
+  errors: string[];
+  error: string | null;
+}
+
 export function discoverBackupSources(): Promise<BackupVolumeDto[]> {
   return invoke<BackupVolumeDto[]>("backup_sources_discover");
 }
 
 export function previewBackup(input: BackupPreviewInput): Promise<BackupPreviewDto> {
   return invoke<BackupPreviewDto>("backup_preview", { request: input });
+}
+
+export function startBackup(previewId: string, confirmationToken: string): Promise<BackupStartDto> {
+  return invoke<BackupStartDto>("backup_start", { previewId, confirmationToken });
+}
+
+export function retryFailedBackup(backupRunId: string, itemIds?: string[]): Promise<BackupStartDto> {
+  return invoke<BackupStartDto>("backup_retry_failed", { backupRunId, itemIds });
+}
+
+export function cancelBackup(jobId: string): Promise<void> {
+  return invoke<void>("backup_cancel", { jobId });
+}
+
+export function onBackupProgress(callback: (event: BackupProgressDto) => void): Promise<UnlistenFn> {
+  return listen<BackupProgressDto>("backup-progress", (event) => callback(event.payload));
 }
 
 export function listLibraries(): Promise<LibraryDto[]> {

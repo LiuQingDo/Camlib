@@ -4,7 +4,7 @@
 //! persisted settings, canonical paths, and the identity/availability check for a
 //! registered library volume.
 
-use crate::db::{DbError, LibraryState, NewLibrary, Repository};
+use crate::db::{ConflictPolicy, DbError, LibraryState, NewLibrary, Repository};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub library_root: Option<String>,
     pub thumbnail_cache_dir: String,
     pub library_volume: Option<VolumeInfo>,
+    pub backup_conflict_policy: ConflictPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +215,15 @@ impl Infrastructure {
         self.settings()
     }
 
+    pub fn set_backup_conflict_policy(
+        &mut self,
+        policy: ConflictPolicy,
+    ) -> Result<AppSettings, InfrastructureError> {
+        self.store.settings.backup_conflict_policy = policy;
+        self.store.save()?;
+        self.settings()
+    }
+
     pub fn library_status(&mut self) -> Result<LibraryStatus, InfrastructureError> {
         let Some(root_text) = self.store.settings.library_root.clone() else {
             return Ok(LibraryStatus {
@@ -324,6 +334,7 @@ impl SettingsStore {
                     &default_thumbnail_cache_dir,
                 )?),
                 library_volume: None,
+                backup_conflict_policy: ConflictPolicy::SkipSame,
             }
         };
 
@@ -362,6 +373,8 @@ struct DiskSettings {
     library_root: Option<String>,
     thumbnail_cache_dir: String,
     library_volume: Option<VolumeInfo>,
+    #[serde(default)]
+    backup_conflict_policy: Option<ConflictPolicy>,
 }
 
 impl DiskSettings {
@@ -385,6 +398,9 @@ impl DiskSettings {
             library_root: self.library_root,
             thumbnail_cache_dir: self.thumbnail_cache_dir,
             library_volume: self.library_volume,
+            backup_conflict_policy: self
+                .backup_conflict_policy
+                .unwrap_or(ConflictPolicy::SkipSame),
         })
     }
 }
@@ -396,6 +412,7 @@ impl From<&AppSettings> for DiskSettings {
             library_root: settings.library_root.clone(),
             thumbnail_cache_dir: settings.thumbnail_cache_dir.clone(),
             library_volume: settings.library_volume.clone(),
+            backup_conflict_policy: Some(settings.backup_conflict_policy.clone()),
         }
     }
 }
@@ -807,6 +824,7 @@ mod tests {
             library_root: Some(path_to_string(&missing_root)),
             thumbnail_cache_dir: path_to_string(&cache_path),
             library_volume: None,
+            backup_conflict_policy: None,
         };
         fs::write(
             &settings_path,

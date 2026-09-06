@@ -5,7 +5,10 @@ mod infrastructure;
 mod media;
 mod scanner;
 
-use backup::{BackupPreviewDto, BackupPreviewRequest, BackupVolumeDto};
+use backup::{
+    BackupManagerState, BackupPreviewDto, BackupPreviewRequest, BackupStartResponse,
+    BackupVolumeDto,
+};
 use db::{MediaKind, MediaQuery, MediaSort};
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
 use media::{MediaStreamRegistry, PreviewJobManagerState};
@@ -47,6 +50,14 @@ fn set_thumbnail_cache_dir(
     state.with_infrastructure(|infrastructure| {
         infrastructure.set_thumbnail_cache_dir(PathBuf::from(path))
     })
+}
+
+#[tauri::command]
+fn set_backup_conflict_policy(
+    policy: db::ConflictPolicy,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    state.with_infrastructure(|infrastructure| infrastructure.set_backup_conflict_policy(policy))
 }
 
 /// Re-check the library root and its recorded volume identity.
@@ -371,17 +382,123 @@ fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
     Ok(backup::discover_volumes())
 }
 
-/// Build and persist a read-only backup preview. This command intentionally
-/// has no copy counterpart in this session.
+/// Build and persist a read-only backup preview. Copying is a separate command
+/// and requires the preview confirmation token.
 #[tauri::command]
 fn backup_preview(
     request: BackupPreviewRequest,
     state: State<'_, InfrastructureState>,
 ) -> Result<BackupPreviewDto, String> {
     state.with_infrastructure(|infrastructure| {
+        let mut request = request;
+        request.conflict_policy = Some(infrastructure.settings()?.backup_conflict_policy);
         backup::preview(infrastructure.repository(), request)
             .map_err(|error| infrastructure::InfrastructureError::InvalidPath(error.to_string()))
     })
+}
+
+/// Execute only the exact persisted preview that the user confirmed.
+#[tauri::command]
+fn backup_start(
+    preview_id: String,
+    confirmation_token: String,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    backups: State<'_, BackupManagerState>,
+    scans: State<'_, ScanManagerState>,
+) -> Result<BackupStartResponse, String> {
+    let database_path = infrastructure.with_infrastructure(|value| {
+        let run = value
+            .repository()
+            .get_backup_run(&preview_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("备份预览不存在".to_owned())
+            })?;
+        if !matches!(run.status, db::BackupStatus::Preview) || confirmation_token != run.job_id {
+            return Err(infrastructure::InfrastructureError::InvalidPath(
+                "备份预览未确认，或已失效，请重新生成预览".to_owned(),
+            ));
+        }
+        Ok(value.database_path())
+    })?;
+    let (job_id, cancel) = backups.start()?;
+    let backup_run_id = preview_id.clone();
+    backup::spawn(
+        app,
+        Arc::new(backups.inner().clone()),
+        Arc::new(scans.inner().clone()),
+        database_path,
+        backup_run_id.clone(),
+        job_id.clone(),
+        cancel,
+        None,
+    );
+    Ok(BackupStartResponse {
+        job_id,
+        backup_run_id,
+    })
+}
+
+#[tauri::command]
+fn backup_retry_failed(
+    backup_run_id: String,
+    item_ids: Option<Vec<String>>,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    backups: State<'_, BackupManagerState>,
+    scans: State<'_, ScanManagerState>,
+) -> Result<BackupStartResponse, String> {
+    let database_path = infrastructure.with_infrastructure(|value| {
+        let run = value
+            .repository()
+            .get_backup_run(&backup_run_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("备份任务不存在".to_owned())
+            })?;
+        if !matches!(
+            run.status,
+            db::BackupStatus::Failed | db::BackupStatus::Cancelled
+        ) {
+            return Err(infrastructure::InfrastructureError::InvalidPath(
+                "只有失败或取消的备份任务可以重试".to_owned(),
+            ));
+        }
+        Ok(value.database_path())
+    })?;
+    let repository = db::Repository::open(&database_path).map_err(|error| error.to_string())?;
+    let failed = repository
+        .list_backup_items(&backup_run_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|item| item.status == "failed")
+        .map(|item| item.id)
+        .collect::<std::collections::HashSet<_>>();
+    let selected = item_ids.unwrap_or_else(|| failed.iter().cloned().collect());
+    if selected.is_empty() || selected.iter().any(|id| !failed.contains(id)) {
+        return Err("没有可重试的失败文件".to_owned());
+    }
+    let (job_id, cancel) = backups.start()?;
+    backup::spawn(
+        app,
+        Arc::new(backups.inner().clone()),
+        Arc::new(scans.inner().clone()),
+        database_path,
+        backup_run_id.clone(),
+        job_id.clone(),
+        cancel,
+        Some(selected),
+    );
+    Ok(BackupStartResponse {
+        job_id,
+        backup_run_id,
+    })
+}
+
+#[tauri::command]
+fn backup_cancel(job_id: String, backups: State<'_, BackupManagerState>) -> Result<(), String> {
+    backups.cancel(&job_id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -405,6 +522,7 @@ pub fn run() {
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             app.manage(InfrastructureState::new(infrastructure));
             app.manage(ScanManagerState::new());
+            app.manage(BackupManagerState::new());
             app.manage(PreviewJobManagerState::new());
             app.manage(streams.clone());
             Ok(())
@@ -417,6 +535,7 @@ pub fn run() {
             get_app_settings,
             set_library_root,
             set_thumbnail_cache_dir,
+            set_backup_conflict_policy,
             get_library_status,
             get_infrastructure_state,
             library_list,
@@ -433,7 +552,10 @@ pub fn run() {
             library_scan_start,
             library_scan_cancel,
             backup_sources_discover,
-            backup_preview
+            backup_preview,
+            backup_start,
+            backup_retry_failed,
+            backup_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

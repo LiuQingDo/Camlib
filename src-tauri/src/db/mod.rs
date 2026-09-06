@@ -16,6 +16,7 @@ mod migrations {
     pub const INITIAL: &str = include_str!("migrations/0001_initial.sql");
     pub const SCAN_RUNS: &str = include_str!("migrations/0002_scan_runs.sql");
     pub const DELETION_LOGS: &str = include_str!("migrations/0003_deletion_logs.sql");
+    pub const BACKUP_ITEMS: &str = include_str!("migrations/0004_backup_items.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -24,7 +25,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -815,6 +816,97 @@ impl Repository {
             .map_err(Into::into)
     }
 
+    pub fn update_backup_run(
+        &self,
+        id: &str,
+        job_id: &str,
+        status: BackupStatus,
+        copied_files: i64,
+        skipped_files: i64,
+        failed_files: i64,
+        copied_bytes: i64,
+        finished_at: Option<&str>,
+        error_summary: Option<&str>,
+    ) -> DbResult<()> {
+        self.connection.execute(
+            "UPDATE backup_runs SET job_id = ?2, status = ?3, copied_files = ?4,
+             skipped_files = ?5, failed_files = ?6, copied_bytes = ?7,
+             finished_at = ?8, error_summary = ?9 WHERE id = ?1",
+            params![
+                id,
+                job_id,
+                status.as_str(),
+                copied_files,
+                skipped_files,
+                failed_files,
+                copied_bytes,
+                finished_at,
+                error_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_backup_item(&self, input: NewBackupItem) -> DbResult<()> {
+        validate_non_empty("backup item id", &input.id)?;
+        validate_non_empty("backup run id", &input.backup_run_id)?;
+        validate_non_empty("source relative path", &input.source_relative)?;
+        validate_non_empty("status", &input.status)?;
+        self.connection.execute(
+            "INSERT INTO backup_items
+             (id, backup_run_id, source_relative, destination_relative, size_bytes,
+              status, copied_bytes, error_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                input.id,
+                input.backup_run_id,
+                input.source_relative,
+                input.destination_relative,
+                input.size_bytes,
+                input.status,
+                input.copied_bytes,
+                input.error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_backup_items(&self, backup_run_id: &str) -> DbResult<Vec<BackupItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, backup_run_id, source_relative, destination_relative, size_bytes,
+                    status, copied_bytes, error_message
+             FROM backup_items WHERE backup_run_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement
+            .query_map([backup_run_id], map_backup_item)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into);
+        rows
+    }
+
+    pub fn update_backup_item(
+        &self,
+        id: &str,
+        status: &str,
+        copied_bytes: i64,
+        destination_relative: Option<&str>,
+        error_message: Option<&str>,
+    ) -> DbResult<()> {
+        self.connection.execute(
+            "UPDATE backup_items SET status = ?2, copied_bytes = ?3,
+             destination_relative = COALESCE(?4, destination_relative), error_message = ?5
+             WHERE id = ?1",
+            params![
+                id,
+                status,
+                copied_bytes,
+                destination_relative,
+                error_message
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn set_app_setting<T: Serialize>(
         &self,
         key: &str,
@@ -899,6 +991,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         transaction.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             [3_i64],
+        )?;
+        transaction.commit()?;
+    }
+    if max_version < 4 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::BACKUP_ITEMS)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [4_i64],
         )?;
         transaction.commit()?;
     }
@@ -1239,6 +1340,31 @@ pub struct NewBackupRun {
     pub error_summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupItem {
+    pub id: String,
+    pub backup_run_id: String,
+    pub source_relative: String,
+    pub destination_relative: Option<String>,
+    pub size_bytes: i64,
+    pub status: String,
+    pub copied_bytes: i64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBackupItem {
+    pub id: String,
+    pub backup_run_id: String,
+    pub source_relative: String,
+    pub destination_relative: Option<String>,
+    pub size_bytes: i64,
+    pub status: String,
+    pub copied_bytes: i64,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MediaQuery {
     pub library_id: String,
@@ -1560,6 +1686,19 @@ fn map_backup_run(row: &Row<'_>) -> rusqlite::Result<BackupRun> {
     })
 }
 
+fn map_backup_item(row: &Row<'_>) -> rusqlite::Result<BackupItem> {
+    Ok(BackupItem {
+        id: row.get(0)?,
+        backup_run_id: row.get(1)?,
+        source_relative: row.get(2)?,
+        destination_relative: row.get(3)?,
+        size_bytes: row.get(4)?,
+        status: row.get(5)?,
+        copied_bytes: row.get(6)?,
+        error_message: row.get(7)?,
+    })
+}
+
 fn invalid_enum(value: String, field: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
@@ -1678,10 +1817,10 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 3);
+        assert_eq!(repository.schema_version().unwrap(), 4);
         apply_migrations(&mut repository.connection).unwrap();
-        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','backup_runs','app_settings','deletion_logs')", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 9);
+        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','backup_runs','backup_items','app_settings','deletion_logs')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 10);
         let indexes: i64 = repository
             .connection
             .query_row(
@@ -1690,7 +1829,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 11);
+        assert_eq!(indexes, 12);
     }
 
     #[test]
