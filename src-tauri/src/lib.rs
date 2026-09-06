@@ -205,13 +205,13 @@ fn media_delete_items(
 }
 
 #[tauri::command]
-fn media_thumbnail(
+async fn media_thumbnail(
     media_item_id: String,
     width: Option<u32>,
     app: AppHandle,
     state: State<'_, InfrastructureState>,
 ) -> Result<media::ThumbnailDto, String> {
-    state.with_infrastructure(|infrastructure| {
+    let (details, root, cache_dir) = state.with_infrastructure(|infrastructure| {
         let details = infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
@@ -227,16 +227,18 @@ fn media_thumbnail(
                 infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
             })?;
         let settings = infrastructure.settings()?;
-        media::thumbnail_for_item(
-            &details,
-            PathBuf::from(&library.root_path).as_path(),
-            PathBuf::from(&settings.thumbnail_cache_dir).as_path(),
-            width.unwrap_or(320).clamp(96, 1600),
-            Some(&app),
-            None,
-        )
-        .map_err(infrastructure::InfrastructureError::InvalidPath)
+        Ok((
+            details,
+            PathBuf::from(library.root_path),
+            PathBuf::from(settings.thumbnail_cache_dir),
+        ))
+    })?;
+    let width = width.unwrap_or(320).clamp(96, 1600);
+    tauri::async_runtime::spawn_blocking(move || {
+        media::thumbnail_for_item(&details, &root, &cache_dir, width, Some(&app), None)
     })
+    .await
+    .map_err(|error| format!("缩略图任务异常退出: {error}"))?
 }
 
 #[tauri::command]

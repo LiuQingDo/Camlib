@@ -19,6 +19,7 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::http::{header, Method, Request, Response, StatusCode};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -26,6 +27,9 @@ const THUMBNAIL_PROCESSOR_VERSION: &str = "image-exif-v1";
 const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 static NEXT_PREVIEW_JOB: AtomicU64 = AtomicU64::new(1);
 static NEXT_STREAM_TOKEN: AtomicU64 = AtomicU64::new(1);
+// Camera photos can be very large. Keep full-resolution decodes serialized so
+// several visible cards cannot exhaust the process memory at once.
+static IMAGE_DECODE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,6 +369,9 @@ pub fn thumbnail_cache_key(
 }
 
 fn generate_image_thumbnail(source: &Path, target: &Path, width: u32) -> Result<(), String> {
+    let _decode_guard = IMAGE_DECODE_LOCK
+        .lock()
+        .map_err(|_| "图片解码锁已损坏".to_owned())?;
     let orientation = read_exif_orientation(source);
     let image = ImageReader::open(source)
         .map_err(|error| format!("打开图片失败: {error}"))?
@@ -392,16 +399,28 @@ fn generate_ffmpeg_thumbnail(
     let ffmpeg = resolve_ffmpeg(app)?;
     let scale = format!("scale={width}:-2:force_original_aspect_ratio=decrease");
     let mut child = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "0", "-i"])
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "0",
+            "-i",
+        ])
         .arg(source)
         .args(["-frames:v", "1", "-vf"])
         .arg(scale)
         .args(["-q:v", "3", "-f", "image2", "-vcodec", "mjpeg"])
         .arg(target)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        // Do not pipe stderr without draining it while waiting. A malformed
+        // media file can fill the pipe and leave ffmpeg waiting forever.
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("启动 ffmpeg 失败: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         if cancel.is_some_and(|value| value.load(Ordering::Relaxed)) {
             let _ = child.kill();
@@ -409,21 +428,20 @@ fn generate_ffmpeg_thumbnail(
             let _ = fs::remove_file(target);
             return Err("用户取消视频首帧处理".to_owned());
         }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(target);
+            return Err("视频首帧处理超时".to_owned());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
             Err(error) => return Err(format!("等待 ffmpeg 失败: {error}")),
         }
     };
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
     if !status.success() {
-        return Err(format!(
-            "ffmpeg 首帧失败: {}",
-            stderr.trim().chars().take(500).collect::<String>()
-        ));
+        return Err("ffmpeg 首帧失败".to_owned());
     }
     if !target.is_file() {
         return Err("ffmpeg 未生成首帧".to_owned());

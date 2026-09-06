@@ -96,6 +96,40 @@ if (!appRoot) throw new Error("找不到应用容器");
 const app: HTMLElement = appRoot;
 let searchTimer: number | undefined;
 let previewRequest = 0;
+const thumbnailConcurrency = 4;
+let activeThumbnailRequests = 0;
+const thumbnailQueue: Array<{
+  id: string;
+  resolve: (asset: Awaited<ReturnType<typeof getMediaThumbnail>>) => void;
+  reject: (error: unknown) => void;
+}> = [];
+const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
+
+function pumpThumbnailQueue(): void {
+  while (activeThumbnailRequests < thumbnailConcurrency && thumbnailQueue.length) {
+    const request = thumbnailQueue.shift()!;
+    activeThumbnailRequests += 1;
+    void getMediaThumbnail(request.id)
+      .then(request.resolve, request.reject)
+      .finally(() => {
+        activeThumbnailRequests -= 1;
+        thumbnailRequests.delete(request.id);
+        pumpThumbnailQueue();
+      })
+      .catch(() => undefined);
+  }
+}
+
+function loadThumbnail(id: string): Promise<Awaited<ReturnType<typeof getMediaThumbnail>>> {
+  const pending = thumbnailRequests.get(id);
+  if (pending) return pending;
+  const request = new Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>((resolve, reject) => {
+    thumbnailQueue.push({ id, resolve, reject });
+    pumpThumbnailQueue();
+  });
+  thumbnailRequests.set(id, request);
+  return request;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
@@ -283,7 +317,7 @@ function observePreviews(): void {
     card.dataset.loaded = "true";
     const id = card.dataset.preview;
     if (!id) return;
-    void getMediaThumbnail(id).then((asset) => {
+    void loadThumbnail(id).then((asset) => {
       const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
       const item = state.page.items.find((entry) => entry.id === id);
       if (!target || !item) return;
