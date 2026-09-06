@@ -565,10 +565,40 @@ pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
             "ffmpeg"
         }));
     }
+    // Windows GUI applications can keep the environment inherited from
+    // Explorer, which may predate a WinGet installation and therefore omit
+    // the newly-added user PATH entry. Resolve the package directly as a
+    // fallback so preview generation does not depend on an Explorer restart.
+    #[cfg(windows)]
+    if let Some(path) = find_winget_ffmpeg() {
+        return Ok(path);
+    }
     Err(
         "找不到 ffmpeg：开发环境请安装到 PATH，打包环境应提供 resources/ffmpeg/ffmpeg.exe"
             .to_owned(),
     )
+}
+
+#[cfg(windows)]
+fn find_winget_ffmpeg() -> Option<PathBuf> {
+    let packages = PathBuf::from(env::var_os("LOCALAPPDATA")?)
+        .join("Microsoft")
+        .join("WinGet")
+        .join("Packages");
+    let package = fs::read_dir(packages)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("Gyan.FFmpeg_")
+        })?;
+    fs::read_dir(package.path())
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("bin").join("ffmpeg.exe"))
+        .find(|path| path.is_file())
 }
 
 pub fn preview_sources(
