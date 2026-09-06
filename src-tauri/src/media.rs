@@ -6,7 +6,6 @@
 //! complete video in an IPC response.
 
 use crate::db::{MediaFile, MediaFileRole, MediaItemDetails, MediaKind, Repository};
-use base64::Engine as _;
 use image::{DynamicImage, ImageReader};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -34,9 +33,10 @@ static IMAGE_DECODE_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThumbnailDto {
-    pub mime_type: String,
-    pub data_base64: String,
+    pub url: String,
     pub cache_key: String,
+    #[serde(skip)]
+    pub cache_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -254,6 +254,9 @@ pub fn serve_stream(
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, entry.mime_type)
+        // Every registry token points at one immutable version of a file. Let
+        // WebView2 retain decoded thumbnails across DOM redraws and navigation.
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, body.len().to_string());
     if partial {
@@ -324,7 +327,13 @@ pub fn thumbnail_for_item(
     let target = directory.join(format!("{cache_key}.jpg"));
     if !target.is_file() {
         let temp = directory.join(format!(".{cache_key}.{}.tmp", unique_suffix()));
-        let result = if is_image(&file.extension) {
+        // The previous H-drive viewer may already have a fresh 480px JPEG for
+        // this exact source. Importing its small cache file is dramatically
+        // faster than reopening the original on a mechanical disk, and keeps
+        // Camlib independent after the one-time copy into its SSD cache.
+        let result = if import_legacy_thumbnail(root, &file.relative_path, &source, &temp) {
+            Ok(())
+        } else if is_image(&file.extension) {
             generate_image_thumbnail(&source, &temp, width)
         } else {
             let app = app.ok_or_else(|| "视频缩略图需要应用上下文".to_owned())?;
@@ -336,12 +345,76 @@ pub fn thumbnail_for_item(
         }
         fs::rename(&temp, &target).map_err(|error| format!("提交缩略图缓存失败: {error}"))?;
     }
-    let bytes = fs::read(&target).map_err(|error| format!("读取缩略图缓存失败: {error}"))?;
     Ok(ThumbnailDto {
-        mime_type: "image/jpeg".to_owned(),
-        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        url: String::new(),
         cache_key,
+        cache_path: target,
     })
+}
+
+fn import_legacy_thumbnail(root: &Path, relative_path: &str, source: &Path, target: &Path) -> bool {
+    let parts = Path::new(relative_path)
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(year_index) = parts
+        .iter()
+        .position(|part| part.len() == 4 && part.bytes().all(|value| value.is_ascii_digit()))
+    else {
+        return false;
+    };
+    let Some(month) = parts
+        .get(year_index + 1)
+        .filter(|part| part.len() == 2 && part.bytes().all(|value| value.is_ascii_digit()))
+    else {
+        return false;
+    };
+    let Some(stem) = Path::new(relative_path).file_stem() else {
+        return false;
+    };
+    let Some(library_parent) = root.parent() else {
+        return false;
+    };
+    let legacy_root = library_parent
+        .join("media-viewer")
+        .join("assets")
+        .join("thumbs");
+    let candidate = legacy_root
+        .join(format!("{}-{month}", parts[year_index]))
+        .join(stem)
+        .with_extension("jpg");
+    let (Ok(candidate_path), Ok(legacy_root_path)) =
+        (fs::canonicalize(&candidate), fs::canonicalize(&legacy_root))
+    else {
+        return false;
+    };
+    if !candidate_path.starts_with(legacy_root_path) {
+        return false;
+    }
+    let (Ok(source_meta), Ok(thumb_meta)) = (fs::metadata(source), fs::metadata(&candidate_path))
+    else {
+        return false;
+    };
+    if thumb_meta.len() == 0
+        || matches!(
+            (thumb_meta.modified(), source_meta.modified()),
+            (Ok(thumb_time), Ok(source_time)) if thumb_time < source_time
+        )
+    {
+        return false;
+    }
+    fs::copy(candidate_path, target).is_ok()
+}
+
+pub fn stream_url(token: &str) -> String {
+    if cfg!(windows) {
+        format!("http://camlib.localhost/{token}")
+    } else {
+        format!("camlib://localhost/{token}")
+    }
 }
 
 pub fn thumbnail_cache_key(
@@ -519,11 +592,7 @@ pub fn preview_sources(
             root.to_path_buf(),
             mime_for_extension(&file.extension).to_owned(),
         );
-        let url = if cfg!(windows) {
-            format!("http://camlib.localhost/{token}")
-        } else {
-            format!("camlib://localhost/{token}")
-        };
+        let url = stream_url(&token);
         sources.push(MediaSourceDto {
             role: role.to_owned(),
             url,
@@ -810,5 +879,27 @@ mod tests {
         generate_image_thumbnail(&source, &target, 320).unwrap();
         assert!(source.is_file());
         assert!(target.is_file());
+    }
+
+    #[test]
+    fn fresh_legacy_thumbnail_is_imported_into_the_app_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("DCIM-local");
+        let relative = "2026/08/2026-08-11/视频/VID_001.mp4";
+        let source = library.join(relative);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"video").unwrap();
+
+        let legacy = temp
+            .path()
+            .join("media-viewer/assets/thumbs/2026-08/VID_001.jpg");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"jpeg thumbnail").unwrap();
+        let target = temp.path().join("cache.jpg");
+
+        assert!(import_legacy_thumbnail(
+            &library, relative, &source, &target
+        ));
+        assert_eq!(fs::read(target).unwrap(), b"jpeg thumbnail");
     }
 }

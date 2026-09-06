@@ -96,13 +96,19 @@ if (!appRoot) throw new Error("找不到应用容器");
 const app: HTMLElement = appRoot;
 let searchTimer: number | undefined;
 let previewRequest = 0;
-const thumbnailConcurrency = 4;
+// Image decoding is intentionally serialized in the backend to cap memory, but
+// cache hits are cheap. A wider queue makes warm-cache grids populate in one
+// short burst while the visible-first ordering protects cold-cache latency.
+const thumbnailConcurrency = 8;
 let activeThumbnailRequests = 0;
 const thumbnailQueue: Array<{
   id: string;
   resolve: (asset: Awaited<ReturnType<typeof getMediaThumbnail>>) => void;
   reject: (error: unknown) => void;
 }> = [];
+// Keep successful URL promises for the lifetime of the page. Camlib redraws the
+// grid for selection/favorite changes; dropping these used to repeat one IPC +
+// Base64 transfer per card after every redraw.
 const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
 
 function pumpThumbnailQueue(): void {
@@ -113,21 +119,28 @@ function pumpThumbnailQueue(): void {
       .then(request.resolve, request.reject)
       .finally(() => {
         activeThumbnailRequests -= 1;
-        thumbnailRequests.delete(request.id);
         pumpThumbnailQueue();
       })
       .catch(() => undefined);
   }
 }
 
-function loadThumbnail(id: string): Promise<Awaited<ReturnType<typeof getMediaThumbnail>>> {
+function loadThumbnail(id: string, highPriority = false): Promise<Awaited<ReturnType<typeof getMediaThumbnail>>> {
   const pending = thumbnailRequests.get(id);
-  if (pending) return pending;
+  if (pending) {
+    if (highPriority) {
+      const queuedIndex = thumbnailQueue.findIndex((entry) => entry.id === id);
+      if (queuedIndex > 0) thumbnailQueue.unshift(thumbnailQueue.splice(queuedIndex, 1)[0]);
+    }
+    return pending;
+  }
   const request = new Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>((resolve, reject) => {
-    thumbnailQueue.push({ id, resolve, reject });
+    const queued = { id, resolve, reject };
+    if (highPriority) thumbnailQueue.unshift(queued); else thumbnailQueue.push(queued);
     pumpThumbnailQueue();
   });
   thumbnailRequests.set(id, request);
+  void request.catch(() => thumbnailRequests.delete(id));
   return request;
 }
 
@@ -312,23 +325,44 @@ function bindEvents(): void {
 
 function observePreviews(): void {
   const cards = [...app.querySelectorAll<HTMLElement>("[data-preview]")];
-  const load = (card: HTMLElement) => {
+  const load = (card: HTMLElement, highPriority = false) => {
     if (card.dataset.loaded === "true") return;
     card.dataset.loaded = "true";
     const id = card.dataset.preview;
     if (!id) return;
-    void loadThumbnail(id).then((asset) => {
+    void loadThumbnail(id, highPriority).then((asset) => {
       const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
       const item = state.page.items.find((entry) => entry.id === id);
       if (!target || !item) return;
       target.classList.add("has-preview");
-      target.innerHTML = `<img src="data:${asset.mimeType};base64,${asset.dataBase64}" alt="" loading="lazy" />${item.kind === "video" ? `<span class="video-overlay">▶</span>` : ""}<span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>`;
-    }).catch(() => { card.innerHTML = `<span class="preview-fallback">预览不可用</span>`; });
+      target.querySelector(".preview-loading, .video-placeholder")?.remove();
+      const image = document.createElement("img");
+      image.src = asset.url;
+      image.alt = "";
+      image.decoding = "async";
+      target.prepend(image);
+      if (item.kind === "video" && !target.querySelector(".video-overlay")) {
+        const overlay = document.createElement("span");
+        overlay.className = "video-overlay";
+        overlay.textContent = "▶";
+        target.append(overlay);
+      }
+    }).catch(() => {
+      const target = app.querySelector<HTMLElement>(`[data-preview="${CSS.escape(id)}"]`);
+      target?.querySelector(".preview-loading, .video-placeholder")?.remove();
+      target?.insertAdjacentHTML("afterbegin", `<span class="preview-fallback">预览不可用</span>`);
+    });
   };
+  // Start the actual viewport synchronously and put it ahead of work left over
+  // from a previous filter/page. The observer then prefetches the next rows.
+  cards.filter((card) => {
+    const rect = card.getBoundingClientRect();
+    return rect.bottom >= 0 && rect.top <= window.innerHeight;
+  }).reverse().forEach((card) => load(card, true));
   if ("IntersectionObserver" in window) {
-    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => { if (entry.isIntersecting) { load(entry.target as HTMLElement); observer.unobserve(entry.target); } }), { rootMargin: "240px" });
+    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => { if (entry.isIntersecting) { load(entry.target as HTMLElement, entry.intersectionRatio > 0); observer.unobserve(entry.target); } }), { rootMargin: "320px" });
     cards.forEach((card) => observer.observe(card));
-  } else cards.slice(0, 24).forEach(load);
+  } else cards.slice(0, 24).forEach((card) => load(card));
 }
 
 async function loadModalAsset(): Promise<void> {

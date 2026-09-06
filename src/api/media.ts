@@ -113,8 +113,7 @@ export interface DateFacetDto {
 }
 
 export interface ThumbnailDto {
-  mimeType: string;
-  dataBase64: string;
+  url: string;
   cacheKey: string;
 }
 

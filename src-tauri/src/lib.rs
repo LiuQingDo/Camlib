@@ -210,6 +210,7 @@ async fn media_thumbnail(
     width: Option<u32>,
     app: AppHandle,
     state: State<'_, InfrastructureState>,
+    streams: State<'_, MediaStreamRegistry>,
 ) -> Result<media::ThumbnailDto, String> {
     let (details, root, cache_dir) = state.with_infrastructure(|infrastructure| {
         let details = infrastructure
@@ -234,11 +235,19 @@ async fn media_thumbnail(
         ))
     })?;
     let width = width.unwrap_or(320).clamp(96, 1600);
-    tauri::async_runtime::spawn_blocking(move || {
+    let stream_root = cache_dir.clone();
+    let mut thumbnail = tauri::async_runtime::spawn_blocking(move || {
         media::thumbnail_for_item(&details, &root, &cache_dir, width, Some(&app), None)
     })
     .await
-    .map_err(|error| format!("缩略图任务异常退出: {error}"))?
+    .map_err(|error| format!("缩略图任务异常退出: {error}"))??;
+    let token = streams.register(
+        thumbnail.cache_path.clone(),
+        stream_root,
+        "image/jpeg".to_owned(),
+    );
+    thumbnail.url = media::stream_url(&token);
+    Ok(thumbnail)
 }
 
 #[tauri::command]
