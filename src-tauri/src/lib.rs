@@ -1,4 +1,5 @@
 pub mod db;
+mod deletion;
 mod infrastructure;
 mod media;
 mod scanner;
@@ -157,6 +158,36 @@ fn favorite_set(
             .repository()
             .set_favorite(&media_item_id, favorite, &now)
             .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn media_delete_preview(
+    library_id: String,
+    media_item_ids: Vec<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<deletion::DeletePreviewDto, String> {
+    state.with_infrastructure(|infrastructure| {
+        deletion::preview(infrastructure.repository(), &library_id, &media_item_ids)
+            .map_err(infrastructure::InfrastructureError::InvalidPath)
+    })
+}
+
+#[tauri::command]
+fn media_delete_items(
+    library_id: String,
+    media_item_ids: Vec<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<deletion::DeleteResultDto, String> {
+    state.with_infrastructure(|infrastructure| {
+        let settings = infrastructure.settings()?;
+        deletion::delete_to_recycle_bin(
+            infrastructure.repository(),
+            &library_id,
+            &media_item_ids,
+            PathBuf::from(settings.thumbnail_cache_dir).as_path(),
+        )
+        .map_err(infrastructure::InfrastructureError::InvalidPath)
     })
 }
 
@@ -371,6 +402,8 @@ pub fn run() {
             media_date_facets,
             media_get,
             favorite_set,
+            media_delete_preview,
+            media_delete_items,
             media_thumbnail,
             media_preview,
             thumbnail_rebuild_start,

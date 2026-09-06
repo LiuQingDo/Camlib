@@ -1,6 +1,6 @@
 # Camlib SQLite 数据模型
 
-> 这是目标模型，不是当前已实现的数据库。当前仓库尚未引入 SQLite 或迁移。
+> 这是当前 SQLite 模型；迁移由 `src-tauri/src/db/migrations` 管理。
 
 ## 1. 设计原则
 
@@ -157,6 +157,17 @@ CREATE TABLE app_settings (
   value_json         TEXT NOT NULL,
   updated_at         TEXT NOT NULL
 );
+
+CREATE TABLE deletion_logs (
+  id             TEXT PRIMARY KEY,
+  media_item_id  TEXT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  media_file_id  TEXT REFERENCES media_files(id) ON DELETE SET NULL,
+  relative_path  TEXT,
+  action         TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  error_message  TEXT,
+  created_at     TEXT NOT NULL
+);
 ```
 
 ## 3. 索引和查询约定
@@ -198,4 +209,3 @@ CREATE INDEX idx_backup_items_run_status
 ```
 
 缓存失效只删除或覆盖缓存文件，不影响 SQLite 中的媒体记录和原始文件。
-

@@ -82,6 +82,9 @@ h1 { margin: 5px 0 2px; color: #1d2736; font-size: clamp(25px, 3vw, 33px); lette
 .media-card { min-width: 0; border: 0; border-radius: 9px; background: transparent; text-align: left; transition: transform .18s ease; }
 .media-card:hover { transform: translateY(-2px); }
 .card-preview { position: relative; display: grid; place-items: center; aspect-ratio: 1.17; overflow: hidden; border-radius: 9px; color: #9ba7b6; background: #e9edf2; }
+.media-card.is-selected .card-preview { box-shadow: 0 0 0 3px #3273e6; }
+.card-select, .card-favorite { position: absolute; z-index: 2; top: 9px; display: grid; place-items: center; width: 27px; height: 27px; border: 0; border-radius: 50%; color: #fff; background: #18223399; }
+.card-select { right: 42px; font-size: 15px; }.card-select.is-checked { background: #3273e6; }.card-favorite { right: 9px; color: #fff; font-size: 16px; }.card-favorite.is-favorite { color: #ffd15c; }
 .card-preview.has-preview { background: #e7ebf1; }
 .card-preview img { width: 100%; height: 100%; object-fit: cover; }
 .preview-loading, .preview-fallback { color: #a8b1bd; font-size: 11px; }
@@ -97,6 +100,8 @@ h1 { margin: 5px 0 2px; color: #1d2736; font-size: clamp(25px, 3vw, 33px); lette
 .card-title { overflow: hidden; color: #465368; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; color: #a1aab7; font-size: 10px; }
 .load-more { display: block; margin: 28px auto 0; padding: 10px 17px; }
+.selection-toolbar { display: flex; align-items: center; gap: 12px; min-height: 39px; margin: -7px 0 15px; padding: 6px 10px; border: 1px solid #e4eaf3; border-radius: 9px; color: #7b8798; background: #fff; font-size: 11px; }.selection-toolbar .danger-button { margin-left: auto; }
+.danger-button { height: 30px; padding: 0 12px; border: 1px solid #efb4b0; border-radius: 7px; color: #c94e49; background: #fff7f6; font-size: 11px; }
 
 .notice-banner, .scan-banner { display: flex; align-items: center; gap: 11px; margin: -13px 0 22px; padding: 12px 15px; border-radius: 9px; background: #f0f5ff; color: #627188; font-size: 12px; }
 .notice-banner > div { display: flex; flex: 1; flex-direction: column; gap: 2px; }.notice-banner strong { color: #40516c; }.notice-icon { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #fff; background: #e29450; font-weight: 800; }

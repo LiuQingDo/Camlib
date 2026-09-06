@@ -15,6 +15,7 @@ pub mod dto {
 mod migrations {
     pub const INITIAL: &str = include_str!("migrations/0001_initial.sql");
     pub const SCAN_RUNS: &str = include_str!("migrations/0002_scan_runs.sql");
+    pub const DELETION_LOGS: &str = include_str!("migrations/0003_deletion_logs.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -23,7 +24,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -632,6 +633,80 @@ impl Repository {
         Ok(())
     }
 
+    /// Record the filesystem outcome separately from the logical item. This
+    /// keeps partial failures and repeated-delete attempts auditable.
+    pub fn record_deletion_log(&self, input: DeletionLogInput<'_>) -> DbResult<()> {
+        validate_non_empty("deletion log id", input.id)?;
+        validate_non_empty("media item id", input.media_item_id)?;
+        validate_non_empty("status", input.status)?;
+        validate_non_empty("created_at", input.created_at)?;
+        self.connection.execute(
+            "INSERT INTO deletion_logs
+             (id, media_item_id, media_file_id, relative_path, action, status, error_message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                input.id,
+                input.media_item_id,
+                input.media_file_id,
+                input.relative_path,
+                input.action,
+                input.status,
+                input.error_message,
+                input.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_media_file_deleted(&self, file_id: &str, at: &str) -> DbResult<()> {
+        validate_non_empty("media file id", file_id)?;
+        self.connection.execute(
+            "UPDATE media_files SET exists_now = 0, last_scanned_at = ?2 WHERE id = ?1",
+            params![file_id, at],
+        )?;
+        let item_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT media_item_id FROM media_files WHERE id = ?1",
+                [file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(item_id) = item_id {
+            self.refresh_media_item_state(&item_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn refresh_media_item_state(&self, media_item_id: &str) -> DbResult<()> {
+        let (total, present): (i64, i64) = self.connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(exists_now), 0) FROM media_files WHERE media_item_id = ?1",
+            [media_item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let state = if present == 0 {
+            "missing"
+        } else if present < total {
+            "error"
+        } else {
+            "present"
+        };
+        self.connection.execute(
+            "UPDATE media_items SET scan_state = ?2, last_seen_at = ?3 WHERE id = ?1",
+            params![media_item_id, state, current_timestamp()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn deletion_log_count(&self, media_item_id: &str) -> DbResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM deletion_logs WHERE media_item_id = ?1",
+            [media_item_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn is_favorite(&self, media_item_id: &str) -> DbResult<bool> {
         Ok(self.connection.query_row(
             "SELECT EXISTS (SELECT 1 FROM favorites WHERE media_item_id = ?1)",
@@ -815,6 +890,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         transaction.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             [2_i64],
+        )?;
+        transaction.commit()?;
+    }
+    if max_version < 3 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::DELETION_LOGS)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [3_i64],
         )?;
         transaction.commit()?;
     }
@@ -1187,6 +1271,27 @@ pub struct MediaPage {
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
+}
+
+pub struct DeletionLogInput<'a> {
+    pub id: &'a str,
+    pub media_item_id: &'a str,
+    pub media_file_id: Option<&'a str>,
+    pub relative_path: Option<&'a str>,
+    pub action: &'a str,
+    pub status: &'a str,
+    pub error_message: Option<&'a str>,
+    pub created_at: &'a str,
+}
+
+fn current_timestamp() -> String {
+    format!(
+        "unix-ms:{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    )
 }
 
 fn validate_non_empty(field: &str, value: &str) -> DbResult<()> {
@@ -1573,10 +1678,10 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 2);
+        assert_eq!(repository.schema_version().unwrap(), 3);
         apply_migrations(&mut repository.connection).unwrap();
-        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','backup_runs','app_settings')", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 8);
+        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','backup_runs','app_settings','deletion_logs')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 9);
         let indexes: i64 = repository
             .connection
             .query_row(
@@ -1585,7 +1690,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 10);
+        assert_eq!(indexes, 11);
     }
 
     #[test]
@@ -1704,5 +1809,23 @@ mod tests {
                 .as_deref(),
             Some("comfortable")
         );
+    }
+
+    #[test]
+    fn favorite_survives_repository_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("camlib.sqlite3");
+        {
+            let repository = Repository::open(&database).unwrap();
+            repository.create_library(library()).unwrap();
+            repository
+                .upsert_media_item(item("photo-reopen", MediaKind::Photo))
+                .unwrap();
+            repository
+                .set_favorite("photo-reopen", true, "2026-01-01T00:00:00Z")
+                .unwrap();
+        }
+        let reopened = Repository::open(&database).unwrap();
+        assert!(reopened.is_favorite("photo-reopen").unwrap());
     }
 }

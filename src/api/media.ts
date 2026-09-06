@@ -80,6 +80,21 @@ export interface MediaPageDto {
   limit: number;
 }
 
+export interface DeletePreviewDto {
+  mediaCount: number;
+  fileCount: number;
+  totalSizeBytes: number;
+  summary: string[];
+}
+
+export interface DeleteResultDto {
+  mediaCount: number;
+  filesRecycled: number;
+  filesAlreadyMissing: number;
+  failedFiles: number;
+  errors: string[];
+}
+
 export interface MediaQueryInput {
   libraryId: string;
   kind?: MediaKind;
@@ -201,6 +216,14 @@ export function getMediaItem(mediaItemId: string): Promise<MediaItemDetailsDto> 
 
 export function setFavorite(mediaItemId: string, favorite: boolean): Promise<void> {
   return invoke<void>("favorite_set", { mediaItemId, favorite });
+}
+
+export function previewDelete(libraryId: string, mediaItemIds: string[]): Promise<DeletePreviewDto> {
+  return invoke<DeletePreviewDto>("media_delete_preview", { libraryId, mediaItemIds });
+}
+
+export function deleteMediaItems(libraryId: string, mediaItemIds: string[]): Promise<DeleteResultDto> {
+  return invoke<DeleteResultDto>("media_delete_items", { libraryId, mediaItemIds });
 }
 
 export function getMediaThumbnail(mediaItemId: string, width = 320): Promise<ThumbnailDto> {

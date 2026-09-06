@@ -5,11 +5,15 @@ import {
   type MediaKind,
   type MediaPageDto,
   getMediaPreview,
+  getMediaItem,
   getMediaThumbnail,
   listDateFacets,
   listLibraries,
   onScanProgress,
   queryMedia,
+  setFavorite,
+  previewDelete,
+  deleteMediaItems,
   startLibraryScan,
 } from "./api/media";
 import { getInfrastructureState, setLibraryRoot, type LibraryAvailability } from "./api/infrastructure";
@@ -26,6 +30,7 @@ interface AppState {
   page: MediaPageDto;
   search: string;
   kind: MediaKind | undefined;
+  favoriteOnly: boolean;
   datePrefix: string | undefined;
   sort: SortMode;
   density: Density;
@@ -34,6 +39,9 @@ interface AppState {
   scanProgress: ScanProgressDto | null;
   error: string | null;
   previewIndex: number | null;
+  selectedIds: Set<string>;
+  favorites: Set<string>;
+  deleting: boolean;
 }
 
 const state: AppState = {
@@ -44,6 +52,7 @@ const state: AppState = {
   page: { items: [], total: 0, offset: 0, limit: 120 },
   search: "",
   kind: undefined,
+  favoriteOnly: false,
   datePrefix: undefined,
   sort: "newest",
   density: 3,
@@ -52,6 +61,9 @@ const state: AppState = {
   scanProgress: null,
   error: null,
   previewIndex: null,
+  selectedIds: new Set(),
+  favorites: new Set(),
+  deleting: false,
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -74,6 +86,23 @@ function formatCount(value: number): string { return new Intl.NumberFormat("zh-C
 function formatSize(bytes: number): string { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 function kindLabel(kind: MediaKind): string { return kind === "photo" ? "照片" : kind === "video" ? "视频" : "实况"; }
 function selectedPrefix(prefix: string | undefined, value: string): string { return prefix === value ? "is-selected" : ""; }
+
+function toggleSelection(id: string): void {
+  if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
+  render();
+}
+
+async function toggleFavorite(id: string): Promise<void> {
+  try {
+    const details = await getMediaItem(id);
+    await setFavorite(id, !details.favorite);
+    if (details.favorite) state.favorites.delete(id); else state.favorites.add(id);
+    render();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "更新收藏失败";
+    render();
+  }
+}
 
 function groupedFacets(): Array<{ year: string; count: number; months: Array<{ month: string; count: number; dates: DateFacetDto[] }> }> {
   const years = new Map<string, { count: number; months: Map<string, { count: number; dates: DateFacetDto[] }> }>();
@@ -107,8 +136,8 @@ function renderDateNavigation(): string {
 
 function renderCard(item: MediaItemDto, index: number): string {
   const isVideo = item.kind === "video";
-  return `<article class="media-card" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="button" aria-label="打开${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}</div>
+  return `<article class="media-card ${state.selectedIds.has(item.id) ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="button" aria-label="打开${escapeHtml(item.displayName)}">
+    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${state.selectedIds.has(item.id) ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="选择${escapeHtml(item.displayName)}">${state.selectedIds.has(item.id) ? "✓" : ""}</button><button class="card-favorite ${state.favorites.has(item.id) ? "is-favorite" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="收藏${escapeHtml(item.displayName)}">★</button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span></div></div>
   </article>`;
 }
@@ -124,7 +153,8 @@ function renderMediaGrid(): string {
 }
 
 function renderKindFilters(): string {
-  return ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
+  const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !state.favoriteOnly ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
+  return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button>`;
 }
 
 function renderStatusBanner(): string {
@@ -139,11 +169,16 @@ function renderStatusBanner(): string {
   return "";
 }
 
+function renderSelectionToolbar(): string {
+  if (!state.page.total) return "";
+  return `<div class="selection-toolbar"><button class="text-button" id="select-current" type="button">${state.selectedIds.size >= state.page.total ? "取消全选" : "当前结果全选"}</button><span>${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项` : "可选择媒体进行管理"}</span>${state.selectedIds.size ? `<button class="danger-button" id="delete-selected" type="button">${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+}
+
 function renderLibraryEmpty(): string {
   if (state.loading) return `<div class="empty-state"><span class="empty-icon spinner large"></span><h2>正在读取媒体库</h2><p>正在从 Tauri 后端加载索引。</p></div>`;
   if (state.availability === "unconfigured") return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>输入一个本地媒体目录，Camlib 会建立可搜索的索引。</p><form id="library-form" class="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="primary-button" type="submit">连接媒体库</button></form></div>`;
   if (!state.library) return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
-  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${state.search || state.kind || state.datePrefix ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${state.search || state.kind || state.datePrefix ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
+  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
   return "";
 }
 
@@ -157,7 +192,7 @@ function render(): void {
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><label class="search-box"><span>⌕</span><input id="search-input" value="${escapeHtml(state.search)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd></label><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
-    ${renderStatusBanner()}<div class="toolbar"><div class="filter-row">${renderKindFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>
+    ${renderStatusBanner()}<div class="toolbar"><div class="filter-row">${renderKindFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
     <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}`;
   bindEvents();
   if (hasItems) observePreviews();
@@ -172,6 +207,7 @@ function renderPreview(): string {
 function bindEvents(): void {
   app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => { state.datePrefix = button.dataset.prefix || undefined; void refreshMedia(); }));
   app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = (button.dataset.kind || undefined) as MediaKind | undefined; void refreshMedia(); }));
+  app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => { state.favoriteOnly = !state.favoriteOnly; void refreshMedia(); });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { state.search = searchInput.value; window.clearTimeout(searchTimer); searchTimer = window.setTimeout(() => void refreshMedia(), 250); });
   app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => { state.sort = (event.target as HTMLSelectElement).value as SortMode; void refreshMedia(); });
@@ -181,12 +217,16 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
+  app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
+  app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void deleteSelected());
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
   app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
     const open = () => { state.previewIndex = Number(card.dataset.index); render(); void loadModalAsset(); };
     card.addEventListener("click", open);
     card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
+  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); toggleSelection(button.dataset.select!); }));
+  app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); }));
   app.querySelector<HTMLButtonElement>("#close-preview")?.addEventListener("click", closePreview);
   app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
@@ -243,15 +283,48 @@ function movePreview(delta: number): void { if (state.previewIndex === null || !
 async function refreshMedia(): Promise<void> {
   if (!state.library) { render(); return; }
   state.loading = true; state.error = null; render();
-  try { state.page = await queryMedia({ libraryId: state.library.id, kind: state.kind, search: state.search, datePrefix: state.datePrefix, limit: 120, sort: state.sort }); }
+  try { state.page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, limit: 120, sort: state.sort }); state.selectedIds.clear(); const favoriteEntries = await Promise.all(state.page.items.map(async (item) => [item.id, (await getMediaItem(item.id)).favorite] as const)); state.favorites = new Set(favoriteEntries.filter(([, favorite]) => favorite).map(([id]) => id)); }
   catch (error) { state.error = error instanceof Error ? error.message : "读取媒体索引失败"; }
   finally { state.loading = false; render(); }
 }
 
 async function loadMore(): Promise<void> {
   if (!state.library || state.page.items.length >= state.page.total) return;
-  try { const next = await queryMedia({ libraryId: state.library.id, kind: state.kind, search: state.search, datePrefix: state.datePrefix, offset: state.page.items.length, limit: 120, sort: state.sort }); state.page.items.push(...next.items); render(); }
+  try { const next = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset: state.page.items.length, limit: 120, sort: state.sort }); state.page.items.push(...next.items); const favoriteEntries = await Promise.all(next.items.map(async (item) => [item.id, (await getMediaItem(item.id)).favorite] as const)); favoriteEntries.filter(([, favorite]) => favorite).forEach(([id]) => state.favorites.add(id)); render(); }
   catch (error) { state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render(); }
+}
+
+async function selectCurrentResults(): Promise<void> {
+  if (!state.library) return;
+  if (state.selectedIds.size >= state.page.total) { state.selectedIds.clear(); render(); return; }
+  try {
+    const ids = new Set<string>();
+    for (let offset = 0; offset < state.page.total; offset += 500) {
+      const page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset, limit: 500, sort: state.sort });
+      page.items.forEach((item) => ids.add(item.id));
+      if (!page.items.length) break;
+    }
+    state.selectedIds = ids;
+    render();
+  } catch (error) { state.error = error instanceof Error ? error.message : "选择当前结果失败"; render(); }
+}
+
+async function deleteSelected(): Promise<void> {
+  if (!state.library || !state.selectedIds.size || state.deleting) return;
+  const ids = [...state.selectedIds];
+  state.deleting = true; render();
+  try {
+    const preview = await previewDelete(state.library.id, ids);
+    const summary = preview.summary.slice(0, 8).join("\n") + (preview.summary.length > 8 ? "\n…" : "");
+    const confirmed = window.confirm(`将 ${preview.mediaCount} 个媒体项（${preview.fileCount} 个文件，${formatSize(preview.totalSizeBytes)}）移入 Windows 回收站。\n\n文件摘要：\n${summary}\n\n此操作可从回收站恢复，是否继续？`);
+    if (!confirmed) return;
+    const result = await deleteMediaItems(state.library.id, ids);
+    if (result.errors.length) state.error = `已处理 ${result.filesRecycled} 个文件，但 ${result.failedFiles} 个文件失败：${result.errors.join("；")}`;
+    else state.error = null;
+    state.selectedIds.clear();
+    await refreshMedia();
+  } catch (error) { state.error = error instanceof Error ? error.message : "删除媒体失败"; }
+  finally { state.deleting = false; render(); }
 }
 
 async function connectLibrary(path: string): Promise<void> {
