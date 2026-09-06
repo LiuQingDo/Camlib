@@ -1,9 +1,11 @@
+mod backup;
 pub mod db;
 mod deletion;
 mod infrastructure;
 mod media;
 mod scanner;
 
+use backup::{BackupPreviewDto, BackupPreviewRequest, BackupVolumeDto};
 use db::{MediaKind, MediaQuery, MediaSort};
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
 use media::{MediaStreamRegistry, PreviewJobManagerState};
@@ -362,6 +364,26 @@ fn library_scan_cancel(job_id: String, jobs: State<'_, ScanManagerState>) -> Res
     jobs.cancel(&job_id)
 }
 
+/// Discover removable volumes with a direct DCIM directory. The result is
+/// only a list of candidates; no camera file is opened or changed here.
+#[tauri::command]
+fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
+    Ok(backup::discover_volumes())
+}
+
+/// Build and persist a read-only backup preview. This command intentionally
+/// has no copy counterpart in this session.
+#[tauri::command]
+fn backup_preview(
+    request: BackupPreviewRequest,
+    state: State<'_, InfrastructureState>,
+) -> Result<BackupPreviewDto, String> {
+    state.with_infrastructure(|infrastructure| {
+        backup::preview(infrastructure.repository(), request)
+            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(error.to_string()))
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let streams = MediaStreamRegistry::default();
@@ -409,7 +431,9 @@ pub fn run() {
             thumbnail_rebuild_start,
             preview_job_cancel,
             library_scan_start,
-            library_scan_cancel
+            library_scan_cancel,
+            backup_sources_discover,
+            backup_preview
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

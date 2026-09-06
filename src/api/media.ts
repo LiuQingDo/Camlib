@@ -198,6 +198,65 @@ export interface BackupRunDto {
   errorSummary: string | null;
 }
 
+export interface BackupVolumeDto {
+  id: string;
+  rootPath: string;
+  dcimPath: string;
+  volumeLabel: string | null;
+  driveLetter: string | null;
+  removable: boolean;
+}
+
+export type BackupItemStatus = "ready" | "already_exists" | "conflict" | "ignored";
+
+export interface BackupItemPreviewDto {
+  sourceRelative: string;
+  destinationRelative: string | null;
+  fileName: string;
+  kind: string | null;
+  captureDate: string | null;
+  dateSource: "filename" | "file_time" | null;
+  sizeBytes: number;
+  extension: string;
+  status: BackupItemStatus;
+  reason: string | null;
+}
+
+export interface BackupPreviewDto {
+  id: string;
+  backupRunId: string;
+  source: BackupVolumeDto;
+  targetLibraryId: string;
+  targetRootPath: string;
+  conflictPolicy: ConflictPolicy;
+  ignoreExtensions: string[];
+  items: BackupItemPreviewDto[];
+  totalFiles: number;
+  totalBytes: number;
+  readyFiles: number;
+  alreadyExistsFiles: number;
+  conflictFiles: number;
+  ignoredFiles: number;
+  requiredBytes: number;
+  freeBytes: number | null;
+  spaceSufficient: boolean | null;
+}
+
+export interface BackupPreviewInput {
+  sourceVolumeId: string;
+  targetLibraryId: string;
+  conflictPolicy?: ConflictPolicy;
+  ignoreExtensions?: string[];
+}
+
+export function discoverBackupSources(): Promise<BackupVolumeDto[]> {
+  return invoke<BackupVolumeDto[]>("backup_sources_discover");
+}
+
+export function previewBackup(input: BackupPreviewInput): Promise<BackupPreviewDto> {
+  return invoke<BackupPreviewDto>("backup_preview", { request: input });
+}
+
 export function listLibraries(): Promise<LibraryDto[]> {
   return invoke<LibraryDto[]>("library_list");
 }

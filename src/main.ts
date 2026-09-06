@@ -14,7 +14,11 @@ import {
   setFavorite,
   previewDelete,
   deleteMediaItems,
+  discoverBackupSources,
+  previewBackup,
   startLibraryScan,
+  type BackupPreviewDto,
+  type BackupVolumeDto,
 } from "./api/media";
 import { getInfrastructureState, setLibraryRoot, type LibraryAvailability } from "./api/infrastructure";
 import type { ScanProgressDto } from "./api/media";
@@ -26,6 +30,7 @@ interface AppState {
   availability: LibraryAvailability;
   rootPath: string | null;
   library: LibraryDto | null;
+  libraries: LibraryDto[];
   facets: DateFacetDto[];
   page: MediaPageDto;
   search: string;
@@ -42,12 +47,17 @@ interface AppState {
   selectedIds: Set<string>;
   favorites: Set<string>;
   deleting: boolean;
+  backupOpen: boolean;
+  backupSources: BackupVolumeDto[];
+  backupPreview: BackupPreviewDto | null;
+  backupLoading: boolean;
 }
 
 const state: AppState = {
   availability: "unconfigured",
   rootPath: null,
   library: null,
+  libraries: [],
   facets: [],
   page: { items: [], total: 0, offset: 0, limit: 120 },
   search: "",
@@ -64,6 +74,10 @@ const state: AppState = {
   selectedIds: new Set(),
   favorites: new Set(),
   deleting: false,
+  backupOpen: false,
+  backupSources: [],
+  backupPreview: null,
+  backupLoading: false,
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -157,7 +171,7 @@ function renderKindFilters(): string {
   return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button>`;
 }
 
-function renderStatusBanner(): string {
+function renderStatusBannerBase(): string {
   if (state.scanning && state.scanProgress) {
     const progress = state.scanProgress.total > 0 ? Math.round((state.scanProgress.processed / state.scanProgress.total) * 100) : 0;
     const phase = state.scanProgress.phase === "discovering" ? "发现文件" : state.scanProgress.phase === "indexing" ? "建立索引" : "整理结果";
@@ -167,6 +181,16 @@ function renderStatusBanner(): string {
   if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>请重新设置一个可访问的媒体库目录。</span></div></div>`;
   if (state.error) return `<div class="notice-banner is-error"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span></div>`;
   return "";
+}
+
+function renderBackupPanel(): string {
+  if (!state.backupOpen) return "";
+  const preview = state.backupPreview;
+  return `<section class="backup-panel" aria-label="相机备份预览"><div class="backup-heading"><div><strong>相机备份预览</strong><span>只读取相机文件，不会在此步骤复制或修改源盘</span></div><button class="icon-button" id="close-backup" type="button" aria-label="关闭备份预览">×</button></div><div class="backup-form"><label><span>源相机盘</span><select id="backup-source" ${state.backupLoading ? "disabled" : ""}>${state.backupSources.length ? state.backupSources.map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.volumeLabel || source.rootPath)} · ${escapeHtml(source.rootPath)}</option>`).join("") : "<option>未发现包含 DCIM 的可移动盘</option>"}</select></label><label><span>目标媒体库</span><select id="backup-target">${state.libraries.map((library) => `<option value="${escapeHtml(library.id)}" ${library.id === state.library?.id ? "selected" : ""}>${escapeHtml(library.volumeLabel || library.rootPath)}</option>`).join("")}</select></label><label><span>忽略扩展名</span><input id="backup-ignore" value=".dng, .lrv" aria-label="忽略扩展名" /></label><button class="primary-button" id="backup-preview-button" type="button" ${state.backupLoading || !state.backupSources.length || !state.libraries.length ? "disabled" : ""}>${state.backupLoading ? "预览中…" : "生成预览"}</button></div>${preview ? `<div class="backup-summary"><span>素材 ${formatCount(preview.totalFiles)}</span><span>总大小 ${formatSize(preview.totalBytes)}</span><span>可导入 ${formatCount(preview.readyFiles)}</span><span>已存在 ${formatCount(preview.alreadyExistsFiles)}</span><span>冲突 ${formatCount(preview.conflictFiles)}</span><span>忽略 ${formatCount(preview.ignoredFiles)}</span><span class="${preview.spaceSufficient === false ? "is-danger" : ""}">空间 ${preview.freeBytes === null ? "不可用" : preview.spaceSufficient ? "充足" : "不足"}</span></div><div class="backup-note">${preview.spaceSufficient === false ? "目标盘剩余空间不足，预览已记录但不会执行复制。" : `预览记录 ${escapeHtml(preview.backupRunId)}；当前版本只生成计划，不执行复制。`}</div>` : ""}</section>`;
+}
+
+function renderStatusBanner(): string {
+  return `${renderStatusBannerBase()}${state.backupOpen ? "" : `<div class="backup-launcher-row"><button class="outline-button" id="backup-open-button" type="button">相机备份预览</button></div>`}${renderBackupPanel()}`;
 }
 
 function renderSelectionToolbar(): string {
@@ -214,6 +238,9 @@ function bindEvents(): void {
   app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => { state.density = Number((event.target as HTMLInputElement).value) as Density; render(); });
   app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#scan-top-button")?.addEventListener("click", () => void scanLibrary());
+  app.querySelector<HTMLButtonElement>("#backup-open-button")?.addEventListener("click", () => void openBackupPanel());
+  app.querySelector<HTMLButtonElement>("#close-backup")?.addEventListener("click", () => { state.backupOpen = false; render(); });
+  app.querySelector<HTMLButtonElement>("#backup-preview-button")?.addEventListener("click", () => void createBackupPreview());
   app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
@@ -333,6 +360,42 @@ async function connectLibrary(path: string): Promise<void> {
   catch (error) { state.error = error instanceof Error ? error.message : "连接媒体库失败"; state.loading = false; render(); }
 }
 
+async function openBackupPanel(): Promise<void> {
+  state.backupOpen = true;
+  state.backupPreview = null;
+  state.backupLoading = true;
+  render();
+  try {
+    state.backupSources = await discoverBackupSources();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "发现相机盘失败";
+  } finally {
+    state.backupLoading = false;
+    render();
+  }
+}
+
+async function createBackupPreview(): Promise<void> {
+  const source = app.querySelector<HTMLSelectElement>("#backup-source")?.value;
+  const target = app.querySelector<HTMLSelectElement>("#backup-target")?.value;
+  if (!source || !target) return;
+  const ignore = app.querySelector<HTMLInputElement>("#backup-ignore")?.value
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  state.backupLoading = true;
+  state.error = null;
+  render();
+  try {
+    state.backupPreview = await previewBackup({ sourceVolumeId: source, targetLibraryId: target, conflictPolicy: "skip_same", ignoreExtensions: ignore });
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "生成备份预览失败";
+  } finally {
+    state.backupLoading = false;
+    render();
+  }
+}
+
 async function scanLibrary(): Promise<void> {
   if (!state.library || state.scanning) return;
   state.error = null; state.scanning = true; state.scanProgress = null; render();
@@ -344,7 +407,7 @@ async function bootstrap(): Promise<void> {
   state.loading = true; state.error = null; render();
   try {
     const [infra, libraries] = await Promise.all([getInfrastructureState(), listLibraries()]);
-    state.availability = infra.library_status.availability; state.rootPath = infra.library_status.root_path; state.library = libraries.find((library) => library.rootPath === infra.library_status.root_path) ?? libraries[0] ?? null;
+    state.libraries = libraries; state.availability = infra.library_status.availability; state.rootPath = infra.library_status.root_path; state.library = libraries.find((library) => library.rootPath === infra.library_status.root_path) ?? libraries[0] ?? null;
     if (state.library && state.availability === "available") { state.facets = await listDateFacets(state.library.id); await refreshMedia(); }
     else { state.page = { items: [], total: 0, offset: 0, limit: 120 }; state.facets = []; state.loading = false; render(); }
   } catch (error) { state.loading = false; state.error = error instanceof Error ? error.message : "初始化媒体库失败"; render(); }
