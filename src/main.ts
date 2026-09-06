@@ -158,6 +158,7 @@ function formatCount(value: number): string { return new Intl.NumberFormat("zh-C
 function formatSize(bytes: number): string { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 function kindLabel(kind: MediaKind): string { return kind === "photo" ? "照片" : kind === "video" ? "视频" : "实况"; }
 function selectedPrefix(prefix: string | undefined, value: string): string { return prefix === value ? "is-selected" : ""; }
+function facetTotal(): number { return state.facets.reduce((total, facet) => total + facet.count, 0); }
 
 function toggleSelection(id: string): void {
   if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
@@ -189,13 +190,25 @@ function groupedFacets(): Array<{ year: string; count: number; months: Array<{ m
     yearGroup.months.set(month, monthGroup);
     years.set(year, yearGroup);
   }
-  return [...years.entries()].map(([year, value]) => ({ year, count: value.count, months: [...value.months.entries()].map(([month, monthValue]) => ({ month, count: monthValue.count, dates: monthValue.dates })) }));
+  return [...years.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .map(([year, value]) => ({
+      year,
+      count: value.count,
+      months: [...value.months.entries()]
+        .sort(([left], [right]) => right.localeCompare(left))
+        .map(([month, monthValue]) => ({
+          month,
+          count: monthValue.count,
+          dates: [...monthValue.dates].sort((left, right) => right.date.localeCompare(left.date)),
+        })),
+    }));
 }
 
 function renderDateNavigation(): string {
   if (!state.facets.length) return `<div class="nav-empty">扫描后会在这里显示年月</div>`;
   return `<div class="date-tree">
-    <button class="date-link all-link ${state.datePrefix ? "" : "is-selected"}" data-prefix="" type="button"><span>全部媒体</span><span>${formatCount(state.page.total)}</span></button>
+    <button class="date-link all-link ${state.datePrefix ? "" : "is-selected"}" data-prefix="" type="button"><span>全部媒体</span><span>${formatCount(facetTotal())}</span></button>
     ${groupedFacets().map((yearGroup) => `<section class="year-group">
       <button class="date-link year-link ${selectedPrefix(state.datePrefix, yearGroup.year)}" data-prefix="${yearGroup.year}" type="button"><span>${yearGroup.year} 年</span><span>${formatCount(yearGroup.count)}</span></button>
       <div class="month-list">${yearGroup.months.map((monthGroup) => {
@@ -269,10 +282,10 @@ function renderLibraryEmpty(): string {
 function render(): void {
   const hasItems = state.page.items.length > 0;
   app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
-  app.innerHTML = `<div class="shell"><aside class="sidebar">
+  app.innerHTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
     <div class="brand"><span class="brand-mark">C</span><div><strong>Camlib</strong><span>媒体库</span></div></div>
-    <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(state.page.total)} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
-    <div class="sidebar-section date-section"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</div>
+    <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
+    <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><label class="search-box"><span>⌕</span><input id="search-input" value="${escapeHtml(state.search)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd></label><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>

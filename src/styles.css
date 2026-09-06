@@ -14,39 +14,47 @@ button { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, [tabindex="0"]:focus-visible { outline: 3px solid #a9c5ff; outline-offset: 2px; }
 
 .shell { display: flex; min-height: 100vh; }
-.sidebar { width: 246px; flex: 0 0 246px; display: flex; flex-direction: column; padding: 25px 14px 18px; background: #fff; border-right: 1px solid #e8ebef; }
+.sidebar { width: 246px; height: 100vh; flex: 0 0 246px; display: flex; flex-direction: column; padding: 25px 14px 18px; overflow: hidden; background: #fff; border-right: 1px solid #e8ebef; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 12px 29px; }
 .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; color: #fff; background: #3273e6; font-weight: 800; font-size: 17px; box-shadow: 0 5px 12px #3273e633; }
 .brand div, .library-entry div { display: flex; flex-direction: column; min-width: 0; }
 .brand strong { font-size: 16px; letter-spacing: -.3px; }
 .brand span:not(.brand-mark), .library-entry span, .sidebar-footer { color: #8a94a4; font-size: 11px; }
 .sidebar-section { margin-bottom: 25px; }
-.section-label { display: flex; justify-content: space-between; align-items: center; padding: 0 10px 9px; color: #a0a8b4; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.library-section { flex: 0 0 auto; margin-bottom: 25px; }
+.section-label { display: flex; justify-content: space-between; align-items: center; min-height: 22px; padding: 0 10px 8px; color: #99a4b3; font-size: 11px; font-weight: 700; letter-spacing: .06em; line-height: 14px; }
 .icon-button { border: 0; background: transparent; color: #9ca6b5; padding: 3px 6px; border-radius: 6px; font-size: 16px; }
 .icon-button:hover { background: #f0f3f8; color: #3273e6; }
-.library-entry { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 9px 10px; border-radius: 11px; background: #f3f6fb; }
+.library-entry { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 9px 10px; border: 1px solid transparent; border-radius: 11px; background: #f3f6fb; box-shadow: inset 0 1px #ffffffb8; }
 .library-entry.is-offline { background: #fff5ed; }
 .library-entry.is-empty { background: #f6f8fb; border: 1px dashed #d7dee9; }
 .drive-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: #dce9ff; color: #3273e6; font-size: 17px; }
-.library-entry strong { overflow: hidden; color: #273449; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.library-entry div { gap: 2px; }
+.library-entry strong { overflow: hidden; color: #273449; font-size: 12px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.library-entry div span { line-height: 14px; }
 .status-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: #35b783; }
 .is-offline .status-dot { background: #e58a48; }
-.date-section { overflow: auto; min-height: 0; }
-.date-tree { padding: 0 3px; }
+.date-section { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
+.date-tree { min-height: 0; padding: 0 3px 10px; overflow-y: auto; scrollbar-color: #d8e0ec transparent; scrollbar-width: thin; }
+.date-tree::-webkit-scrollbar { width: 5px; }
+.date-tree::-webkit-scrollbar-thumb { border-radius: 5px; background: #d8e0ec; }
 .date-link, .day-link { display: flex; width: 100%; justify-content: space-between; align-items: center; border: 0; border-radius: 7px; color: #6e7989; background: transparent; font-size: 12px; text-align: left; }
-.date-link { min-height: 30px; padding: 0 8px; }
-.date-link span:last-child, .day-link span:last-child { color: #a7afbb; font-size: 10px; }
+.date-link { min-height: 30px; padding: 0 8px; transition: color .15s ease, background .15s ease; }
+.date-link span:last-child, .day-link span:last-child { color: #a7afbb; font-size: 10px; font-variant-numeric: tabular-nums; }
 .date-link:hover, .day-link:hover, .date-link.is-selected, .day-link.is-selected { color: #2464d0; background: #edf4ff; }
 .date-link.is-selected span:last-child, .day-link.is-selected span:last-child { color: #6694df; }
 .all-link { margin-bottom: 7px; color: #556274; font-weight: 700; }
 .year-group { margin-top: 4px; }
 .year-link { color: #364357; font-weight: 700; }
-.month-list { padding-left: 13px; border-left: 1px solid #edf0f4; margin-left: 13px; }
-.month-link { color: #647084; }
-.day-list { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 0 0 4px 7px; }
-.day-link { min-height: 24px; padding: 0 6px; font-size: 11px; }
+.month-list { padding: 1px 0 0 13px; border-left: 1px solid #edf0f4; margin-left: 13px; }
+.month-group { margin-bottom: 7px; }
+.month-group + .month-group { margin-top: 8px; padding-top: 6px; border-top: 1px solid #f0f3f7; }
+.month-link { min-height: 30px; color: #4f5e73; font-weight: 600; }
+.month-link:not(.is-selected) { background: linear-gradient(90deg, #f8fafc 0%, #ffffff00 92%); }
+.day-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 3px; margin-left: 5px; padding: 0 0 4px 7px; border-left: 1px solid #f3f5f8; }
+.day-link { min-height: 24px; padding: 0 6px; font-size: 11px; transition: color .15s ease, background .15s ease; }
 .nav-empty { padding: 9px 10px; color: #a0a8b4; font-size: 12px; }
-.sidebar-footer { display: flex; align-items: center; gap: 7px; margin-top: auto; padding: 15px 10px 0; border-top: 1px solid #edf0f4; }
+.sidebar-footer { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; margin-top: 0; padding: 15px 10px 0; border-top: 1px solid #edf0f4; }
 .footer-dot { width: 7px; height: 7px; border-radius: 50%; background: #45ba8a; }
 .sidebar-footer .icon-button { margin-left: auto; }
 
