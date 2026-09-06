@@ -21,6 +21,7 @@ mod migrations {
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering as CmpOrdering;
 use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -567,10 +568,26 @@ impl Repository {
             |row| row.get(0),
         )?;
 
+        // `capture_at` is not populated for files that only have a date from
+        // their directory/name. Use that date first and the newest member file
+        // time as a tie breaker. Unknown dates are deliberately kept at the
+        // end in both directions instead of SQLite's default NULL placement.
+        let latest_file_modified =
+            "(SELECT MAX(f.modified_at) FROM media_files f WHERE f.media_item_id = m.id)";
         let order = match query.sort {
-            MediaSort::Oldest => "m.capture_at ASC, m.id ASC",
-            MediaSort::Name => "m.display_name COLLATE NOCASE ASC, m.id ASC",
-            MediaSort::Newest => "m.capture_at DESC, m.id DESC",
+            MediaSort::Oldest => format!(
+                "CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
+                 m.capture_date ASC, m.capture_at ASC,
+                 {latest_file_modified} ASC,
+                 m.display_name COLLATE NATURAL_NOCASE ASC, m.id ASC"
+            ),
+            MediaSort::Name => "m.display_name COLLATE NATURAL_NOCASE ASC, m.id ASC".to_owned(),
+            MediaSort::Newest => format!(
+                "CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
+                 m.capture_date DESC, m.capture_at DESC,
+                 {latest_file_modified} DESC,
+                 m.display_name COLLATE NATURAL_NOCASE DESC, m.id DESC"
+            ),
         };
         let item_sql = format!(
             "SELECT m.id, m.library_id, m.logical_key, m.kind, m.display_name,
@@ -949,7 +966,54 @@ fn configure_connection(connection: &Connection) -> DbResult<()> {
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;",
     )?;
+    connection
+        .create_collation("NATURAL_NOCASE", natural_name_compare)
+        .map_err(DbError::Sqlite)?;
     Ok(())
+}
+
+/// Compare names the way a file browser normally does: numeric portions are
+/// compared by value, while text portions are compared case-insensitively.
+/// This keeps `IMG_2` before `IMG_10` and remains deterministic for pagination.
+fn natural_name_compare(left: &str, right: &str) -> CmpOrdering {
+    let left = natural_name_chunks(left);
+    let right = natural_name_chunks(right);
+
+    for (left_chunk, right_chunk) in left.iter().zip(right.iter()) {
+        let (left_number, left_value) = left_chunk;
+        let (right_number, right_value) = right_chunk;
+        let ordering = if *left_number && *right_number {
+            let left_trimmed = left_value.trim_start_matches('0');
+            let right_trimmed = right_value.trim_start_matches('0');
+            left_trimmed
+                .len()
+                .cmp(&right_trimmed.len())
+                .then_with(|| left_trimmed.cmp(right_trimmed))
+                .then_with(|| left_value.len().cmp(&right_value.len()))
+        } else {
+            left_value.cmp(right_value)
+        };
+        if ordering != CmpOrdering::Equal {
+            return ordering;
+        }
+    }
+
+    left.len().cmp(&right.len())
+}
+
+fn natural_name_chunks(value: &str) -> Vec<(bool, String)> {
+    let mut chunks: Vec<(bool, String)> = Vec::new();
+    for character in value.to_lowercase().chars() {
+        let is_number = character.is_ascii_digit();
+        if let Some((last_is_number, last_value)) = chunks.last_mut() {
+            if *last_is_number == is_number {
+                last_value.push(character);
+                continue;
+            }
+        }
+        chunks.push((is_number, character.to_string()));
+    }
+    chunks
 }
 
 fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
@@ -1948,6 +2012,51 @@ mod tests {
                 .as_deref(),
             Some("comfortable")
         );
+    }
+
+    #[test]
+    fn media_query_sorts_dates_and_file_names_stably() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        for (id, name, date) in [
+            ("photo-old", "IMG_10.JPG", "2026-01-01"),
+            ("photo-middle", "IMG_2.JPG", "2026-01-02"),
+            ("photo-new", "IMG_1.JPG", "2026-01-03"),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.display_name = name.to_owned();
+            media.capture_date = Some(date.to_owned());
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let names = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                sort: MediaSort::Name,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|media| media.display_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["IMG_1.JPG", "IMG_2.JPG", "IMG_10.JPG"]);
+
+        let newest = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                sort: MediaSort::Newest,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|media| media.id)
+            .collect::<Vec<_>>();
+        assert_eq!(newest, ["photo-new", "photo-middle", "photo-old"]);
     }
 
     #[test]
