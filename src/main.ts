@@ -96,7 +96,9 @@ const state: AppState = {
 const appRoot = document.querySelector<HTMLElement>("#app");
 if (!appRoot) throw new Error("找不到应用容器");
 const app: HTMLElement = appRoot;
-let searchTimer: number | undefined;
+// Keep the text being composed separate from the submitted query so typing
+// never refreshes the media grid. This also preserves unsent text on redraws.
+let searchDraft = "";
 let previewRequest = 0;
 // Image decoding is intentionally serialized in the backend to cap memory, but
 // cache hits are cheap. A wider queue makes warm-cache grids populate in one
@@ -330,7 +332,7 @@ function render(): void {
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><label class="search-box"><span>⌕</span><input id="search-input" value="${escapeHtml(state.search)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd></label><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${renderStatusBanner()}<div class="toolbar"><div class="filter-row">${renderKindFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
     <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}`;
   bindEvents();
@@ -353,7 +355,11 @@ function bindEvents(): void {
   app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = (button.dataset.kind || undefined) as MediaKind | undefined; void refreshMedia(); }));
   app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => { state.favoriteOnly = !state.favoriteOnly; void refreshMedia(); });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
-  searchInput?.addEventListener("input", () => { state.search = searchInput.value; window.clearTimeout(searchTimer); searchTimer = window.setTimeout(() => void refreshMedia(), 250); });
+  searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
+  app.querySelector<HTMLButtonElement>("#search-button")?.addEventListener("click", () => {
+    state.search = searchDraft.trim();
+    void refreshMedia();
+  });
   app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => { state.sort = (event.target as HTMLSelectElement).value as SortMode; void refreshMedia(); });
   app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => { state.density = Number((event.target as HTMLInputElement).value) as Density; render(); });
   app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
