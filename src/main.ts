@@ -51,6 +51,7 @@ interface AppState {
   previewIndex: number | null;
   selectedIds: Set<string>;
   favorites: Set<string>;
+  favoritePendingIds: Set<string>;
   deleting: boolean;
   backupOpen: boolean;
   backupSources: BackupVolumeDto[];
@@ -82,6 +83,7 @@ const state: AppState = {
   previewIndex: null,
   selectedIds: new Set(),
   favorites: new Set(),
+  favoritePendingIds: new Set(),
   deleting: false,
   backupOpen: false,
   backupSources: [],
@@ -184,13 +186,28 @@ function toggleSelection(id: string): void {
 }
 
 async function toggleFavorite(id: string): Promise<void> {
+  if (state.favoritePendingIds.has(id)) return;
+  const wasFavorite = state.favorites.has(id);
+  state.favoritePendingIds.add(id);
+  render();
   try {
-    const details = await getMediaItem(id);
-    await setFavorite(id, !details.favorite);
-    if (details.favorite) state.favorites.delete(id); else state.favorites.add(id);
-    render();
+    await setFavorite(id, !wasFavorite);
+    if (wasFavorite) {
+      state.favorites.delete(id);
+      // An item removed from the current "favorites" result should disappear
+      // immediately instead of leaving a stale card until the next refresh.
+      if (state.favoriteOnly) {
+        state.page.items = state.page.items.filter((item) => item.id !== id);
+        state.page.total = Math.max(0, state.page.total - 1);
+        state.selectedIds.delete(id);
+      }
+    } else {
+      state.favorites.add(id);
+    }
   } catch (error) {
     state.error = error instanceof Error ? error.message : "更新收藏失败";
+  } finally {
+    state.favoritePendingIds.delete(id);
     render();
   }
 }
@@ -239,8 +256,11 @@ function renderDateNavigation(): string {
 
 function renderCard(item: MediaItemDto, index: number): string {
   const isVideo = item.kind === "video";
-  return `<article class="media-card ${state.selectedIds.has(item.id) ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="button" aria-label="打开${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${state.selectedIds.has(item.id) ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="选择${escapeHtml(item.displayName)}">${state.selectedIds.has(item.id) ? "✓" : ""}</button><button class="card-favorite ${state.favorites.has(item.id) ? "is-favorite" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="收藏${escapeHtml(item.displayName)}">★</button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}</div>
+  const selected = state.selectedIds.has(item.id);
+  const favorite = state.favorites.has(item.id);
+  const favoritePending = state.favoritePendingIds.has(item.id);
+  return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
+    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><span aria-hidden="true">✓</span></button><button class="card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><span aria-hidden="true">★</span></button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span></div></div>
   </article>`;
 }
@@ -307,7 +327,8 @@ function renderStatusBanner(): string {
 
 function renderSelectionToolbar(): string {
   if (!state.page.total) return "";
-  return `<div class="selection-toolbar"><button class="text-button" id="select-current" type="button">${state.selectedIds.size >= state.page.total ? "取消全选" : "当前结果全选"}</button><span>${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项` : "可选择媒体进行管理"}</span>${state.selectedIds.size ? `<button class="danger-button" id="delete-selected" type="button">${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+  const allSelected = state.selectedIds.size >= state.page.total;
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项` : "选择媒体后可批量管理"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderLibraryEmpty(): string {
@@ -376,6 +397,7 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
   app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
+  app.querySelector<HTMLButtonElement>("#clear-selection")?.addEventListener("click", () => { state.selectedIds.clear(); render(); });
   app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void deleteSelected());
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
   app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
