@@ -340,7 +340,12 @@ function render(): void {
 function renderPreview(): string {
   const item = state.page.items[state.previewIndex ?? 0];
   if (!item) return "";
-  return `<div class="modal-backdrop" id="preview-modal"><div class="preview-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}"><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button><div class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${kindLabel(item.kind)} · ${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}</span></div></div></div></div>`;
+  const position = (state.previewIndex ?? 0) + 1;
+  return `<div class="modal-backdrop" id="preview-modal"><div class="preview-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}">
+    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></header>
+    <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
+    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}</span></div><span class="modal-hint">使用 ← → 切换</span></footer>
+  </div></div>`;
 }
 
 function bindEvents(): void {
