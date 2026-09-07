@@ -59,6 +59,7 @@ interface AppState {
   backupConflictPolicy: ConflictPolicy;
   backupProgress: BackupProgressDto | null;
   backupJobId: string | null;
+  libraryFormOpen: boolean;
 }
 
 const state: AppState = {
@@ -89,6 +90,7 @@ const state: AppState = {
   backupConflictPolicy: "skip_same",
   backupProgress: null,
   backupJobId: null,
+  libraryFormOpen: false,
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -293,12 +295,17 @@ function renderLibraryEmpty(): string {
   return "";
 }
 
+function renderLibrarySwitcher(): string {
+  if (!state.libraryFormOpen || !state.library) return "";
+  return `<form id="library-form" class="library-form library-change-form"><label for="library-path">媒体库目录</label><input id="library-path" required value="${escapeHtml(state.rootPath ?? state.library.rootPath)}" placeholder="例如：D:\\照片" aria-label="媒体库路径" /><div class="library-form-actions"><button class="text-button" id="library-cancel-button" type="button">取消</button><button class="primary-button" type="submit">确认更换</button></div></form>`;
+}
+
 function render(): void {
   const hasItems = state.page.items.length > 0;
   app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
   app.innerHTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
     <div class="brand"><span class="brand-mark">C</span><div><strong>Camlib</strong><span>媒体库</span></div></div>
-    <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
+    <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
@@ -332,6 +339,8 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#backup-start-button")?.addEventListener("click", () => void startConfirmedBackup());
   app.querySelector<HTMLButtonElement>("#backup-cancel-button")?.addEventListener("click", () => void cancelCurrentBackup());
   app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
+  app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); app.querySelector<HTMLInputElement>("#library-path")?.focus(); });
+  app.querySelector<HTMLButtonElement>("#library-cancel-button")?.addEventListener("click", () => { state.libraryFormOpen = false; render(); });
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
   app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
@@ -469,7 +478,7 @@ async function deleteSelected(): Promise<void> {
 
 async function connectLibrary(path: string): Promise<void> {
   state.loading = true; state.error = null; render();
-  try { await setLibraryRoot(path); await bootstrap(); }
+  try { await setLibraryRoot(path); state.libraryFormOpen = false; await bootstrap(); }
   catch (error) { state.error = error instanceof Error ? error.message : "连接媒体库失败"; state.loading = false; render(); }
 }
 
