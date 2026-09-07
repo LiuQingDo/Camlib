@@ -373,7 +373,14 @@ function renderPreview(): string {
 
 function bindEvents(): void {
   app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => { state.datePrefix = button.dataset.prefix || undefined; void refreshMedia(); }));
-  app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => { state.kind = (button.dataset.kind || undefined) as MediaKind | undefined; void refreshMedia(); }));
+  app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => {
+    // Type tabs replace the current filter rather than combining with 收藏.
+    // Without resetting this flag, switching away from 收藏 kept querying only
+    // favorite items and made the other tabs appear unresponsive.
+    state.kind = (button.dataset.kind || undefined) as MediaKind | undefined;
+    state.favoriteOnly = false;
+    void refreshMedia();
+  }));
   app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => { state.favoriteOnly = !state.favoriteOnly; void refreshMedia(); });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
