@@ -262,12 +262,33 @@ function renderStatusBannerBase(): string {
   if (state.scanning && state.scanProgress) {
     const progress = state.scanProgress.total > 0 ? Math.round((state.scanProgress.processed / state.scanProgress.total) * 100) : 0;
     const phase = state.scanProgress.phase === "discovering" ? "发现文件" : state.scanProgress.phase === "indexing" ? "建立索引" : "整理结果";
-    return `<div class="scan-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span>正在扫描媒体库 · ${phase}</span><strong>${progress}%</strong></div><div class="progress-track"><span style="width:${progress}%"></span></div>${state.scanProgress.current ? `<div class="scan-current">${escapeHtml(state.scanProgress.current)}</div>` : ""}</div>`;
+    const status = state.scanProgress.total > 0 ? `正在扫描媒体库 · ${phase}` : `正在扫描媒体库 · 已发现 ${formatCount(state.scanProgress.processed)} 个文件`;
+    const progressLabel = state.scanProgress.total > 0 ? `${progress}%` : "发现中";
+    const trackClass = state.scanProgress.total > 0 ? "" : " is-indeterminate";
+    const trackWidth = state.scanProgress.total > 0 ? `${progress}%` : "35%";
+    return `<div class="scan-banner" id="scan-progress-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span data-scan-phase>${status}</span><strong data-scan-percent>${progressLabel}</strong></div><div class="progress-track${trackClass}"><span data-scan-track style="width:${trackWidth}"></span></div><div class="scan-current" data-scan-current>${state.scanProgress.current ? escapeHtml(state.scanProgress.current) : ""}</div></div>`;
   }
   if (state.availability === "disconnected") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。连接设备后点击重新扫描。</span></div><button class="text-button" id="rescan-button" type="button">重新扫描</button></div>`;
   if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>请重新设置一个可访问的媒体库目录。</span></div></div>`;
   if (state.error) return `<div class="notice-banner is-error"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span></div>`;
   return "";
+}
+
+function updateScanProgressView(): void {
+  const progress = state.scanProgress;
+  const banner = app.querySelector<HTMLElement>("#scan-progress-banner");
+  if (!progress || !banner) {
+    render();
+    return;
+  }
+  const percent = progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0;
+  const phase = progress.phase === "discovering" ? "发现文件" : progress.phase === "indexing" ? "建立索引" : "整理结果";
+  banner.querySelector<HTMLElement>("[data-scan-phase]")!.textContent = progress.total > 0 ? `正在扫描媒体库 · ${phase}` : `正在扫描媒体库 · 已发现 ${formatCount(progress.processed)} 个文件`;
+  banner.querySelector<HTMLElement>("[data-scan-percent]")!.textContent = progress.total > 0 ? `${percent}%` : "发现中";
+  const track = banner.querySelector<HTMLElement>("[data-scan-track]")!;
+  track.style.width = progress.total > 0 ? `${percent}%` : "35%";
+  track.parentElement!.classList.toggle("is-indeterminate", progress.total <= 0);
+  banner.querySelector<HTMLElement>("[data-scan-current]")!.textContent = progress.current ?? "";
 }
 
 function renderBackupPanel(): string {
@@ -578,7 +599,7 @@ void onScanProgress((progress) => {
   if (progress.state === "running" && (!state.scanProgress || progress.jobId !== state.scanProgress.jobId)) { state.scanning = true; state.scanProgress = progress; render(); return; }
   if (!state.scanProgress || progress.jobId !== state.scanProgress.jobId) return;
   state.scanProgress = progress;
-  if (progress.state === "completed" || progress.state === "cancelled" || progress.state === "failed") { state.scanning = false; if (progress.state === "failed") state.error = progress.error ?? "扫描失败"; void bootstrap(); } else render();
+  if (progress.state === "completed" || progress.state === "cancelled" || progress.state === "failed") { state.scanning = false; if (progress.state === "failed") state.error = progress.error ?? "扫描失败"; render(); void bootstrap(); } else updateScanProgressView();
 });
 void onBackupProgress((progress) => {
   if (!state.backupJobId || progress.jobId !== state.backupJobId) return;

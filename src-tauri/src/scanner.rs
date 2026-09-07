@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
@@ -225,7 +225,37 @@ fn run_scan(
 
     let mut discovered = Vec::new();
     let mut errors = Vec::new();
-    if let Err(error) = discover(&root, &root, &mut discovered, &mut errors, cancel) {
+    let mut last_discovery_progress = Instant::now();
+    let mut discovery_seq = 2_u64;
+    let mut report_discovery = |processed: usize, current: &str| {
+        if processed == 1 || last_discovery_progress.elapsed() >= Duration::from_millis(100) {
+            emit(
+                app,
+                ScanProgress {
+                    job_id: job_id.to_owned(),
+                    kind: "scan",
+                    seq: discovery_seq,
+                    phase: "discovering",
+                    state: "running",
+                    current: Some(current.to_owned()),
+                    processed: processed as i64,
+                    total: 0,
+                    errors: vec![],
+                    error: None,
+                },
+            );
+            discovery_seq += 1;
+            last_discovery_progress = Instant::now();
+        }
+    };
+    if let Err(error) = discover(
+        &root,
+        &root,
+        &mut discovered,
+        &mut errors,
+        cancel,
+        &mut report_discovery,
+    ) {
         errors.push(error);
     }
     if cancel.load(Ordering::Relaxed) {
@@ -293,6 +323,7 @@ fn run_scan(
     };
     let total = discovered.len() as i64;
     let mut groups = BTreeMap::<String, Vec<DiscoveredFile>>::new();
+    let mut last_progress_emit = Instant::now();
     for (index, file) in discovered.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             finish_run(
@@ -309,21 +340,28 @@ fn run_scan(
             emit_terminal(app, job_id, "cancelled", index as i64, total, 0, 0, None);
             return;
         }
-        emit(
-            app,
-            ScanProgress {
-                job_id: job_id.to_owned(),
-                kind: "scan",
-                seq: index as u64 + 2,
-                phase: "indexing",
-                state: "running",
-                current: Some(file.relative_path.clone()),
-                processed: index as i64,
-                total,
-                errors: vec![],
-                error: None,
-            },
-        );
+        // A progress event causes a UI update. Emitting one for every file
+        // overwhelms the WebView and IPC for large libraries, so keep the
+        // progress responsive without turning indexing into an event storm.
+        let is_first_or_last = index == 0 || index + 1 == discovered.len();
+        if is_first_or_last || last_progress_emit.elapsed() >= Duration::from_millis(100) {
+            emit(
+                app,
+                ScanProgress {
+                    job_id: job_id.to_owned(),
+                    kind: "scan",
+                    seq: index as u64 + 2,
+                    phase: "indexing",
+                    state: "running",
+                    current: Some(file.relative_path.clone()),
+                    processed: index as i64 + 1,
+                    total,
+                    errors: vec![],
+                    error: None,
+                },
+            );
+            last_progress_emit = Instant::now();
+        }
         let date = file.capture_date.as_deref().unwrap_or("unknown");
         groups
             .entry(format!("{date}:{}", file.stem.to_ascii_lowercase()))
@@ -451,6 +489,7 @@ fn discover(
     output: &mut Vec<DiscoveredFile>,
     errors: &mut Vec<String>,
     cancel: &AtomicBool,
+    report_progress: &mut dyn FnMut(usize, &str),
 ) -> Result<(), String> {
     let entries = fs::read_dir(directory).map_err(|error| format!("读取目录失败: {error}"))?;
     for entry in entries {
@@ -463,7 +502,7 @@ fn discover(
             .file_type()
             .map_err(|error| format!("读取文件类型失败: {error}"))?;
         if file_type.is_dir() {
-            if let Err(error) = discover(root, &path, output, errors, cancel) {
+            if let Err(error) = discover(root, &path, output, errors, cancel, report_progress) {
                 errors.push(error);
             }
             continue;
@@ -511,6 +550,7 @@ fn discover(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        report_progress(output.len() + 1, &relative_path);
         output.push(DiscoveredFile {
             capture_date: capture_date(&relative_path, &file_name),
             relative_path,
@@ -650,7 +690,15 @@ mod tests {
     ) -> (Vec<DiscoveredFile>, Vec<ScanGroup>) {
         let mut files = Vec::new();
         let mut errors = Vec::new();
-        discover(root, root, &mut files, &mut errors, &AtomicBool::new(false)).unwrap();
+        discover(
+            root,
+            root,
+            &mut files,
+            &mut errors,
+            &AtomicBool::new(false),
+            &mut |_processed, _current| {},
+        )
+        .unwrap();
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         let old = repository
             .list_scan_file_records("library-test")
