@@ -20,6 +20,7 @@ import {
   cancelBackup,
   onBackupProgress,
   startLibraryScan,
+  cancelLibraryScan,
   type BackupPreviewDto,
   type BackupVolumeDto,
   type BackupProgressDto,
@@ -280,15 +281,27 @@ function renderKindFilters(): string {
   return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button>`;
 }
 
+function scanStatusLabel(progress: ScanProgressDto): string {
+  if (progress.total > 0) {
+    const phase = progress.phase === "discovering" ? "发现文件" : progress.phase === "indexing" ? "建立索引" : "整理结果";
+    return `正在扫描媒体库 · ${phase}`;
+  }
+  if (progress.processed > 0) return `正在扫描媒体库 · 已发现 ${formatCount(progress.processed)} 个文件`;
+  return "正在扫描媒体库 · 发现文件";
+}
+
+function scanPercentLabel(progress: ScanProgressDto): string {
+  return progress.total > 0 ? `${Math.round((progress.processed / progress.total) * 100)}%` : "发现中";
+}
+
 function renderStatusBannerBase(): string {
   if (state.scanning && state.scanProgress) {
     const progress = state.scanProgress.total > 0 ? Math.round((state.scanProgress.processed / state.scanProgress.total) * 100) : 0;
-    const phase = state.scanProgress.phase === "discovering" ? "发现文件" : state.scanProgress.phase === "indexing" ? "建立索引" : "整理结果";
-    const status = state.scanProgress.total > 0 ? `正在扫描媒体库 · ${phase}` : `正在扫描媒体库 · 已发现 ${formatCount(state.scanProgress.processed)} 个文件`;
-    const progressLabel = state.scanProgress.total > 0 ? `${progress}%` : "发现中";
+    const status = scanStatusLabel(state.scanProgress);
+    const progressLabel = scanPercentLabel(state.scanProgress);
     const trackClass = state.scanProgress.total > 0 ? "" : " is-indeterminate";
     const trackWidth = state.scanProgress.total > 0 ? `${progress}%` : "35%";
-    return `<div class="scan-banner" id="scan-progress-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span data-scan-phase>${status}</span><strong data-scan-percent>${progressLabel}</strong></div><div class="progress-track${trackClass}"><span data-scan-track style="width:${trackWidth}"></span></div><div class="scan-current" data-scan-current>${state.scanProgress.current ? escapeHtml(state.scanProgress.current) : ""}</div></div>`;
+    return `<div class="scan-banner" id="scan-progress-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span data-scan-phase>${status}</span><strong data-scan-percent>${progressLabel}</strong><button class="text-button" id="scan-cancel-button" type="button">取消</button></div><div class="progress-track${trackClass}"><span data-scan-track style="width:${trackWidth}"></span></div><div class="scan-current" data-scan-current>${state.scanProgress.current ? escapeHtml(state.scanProgress.current) : ""}</div></div>`;
   }
   if (state.availability === "disconnected") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。连接设备后点击重新扫描。</span></div><button class="text-button" id="rescan-button" type="button">重新扫描</button></div>`;
   if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>请重新设置一个可访问的媒体库目录。</span></div></div>`;
@@ -303,12 +316,10 @@ function updateScanProgressView(): void {
     render();
     return;
   }
-  const percent = progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0;
-  const phase = progress.phase === "discovering" ? "发现文件" : progress.phase === "indexing" ? "建立索引" : "整理结果";
-  banner.querySelector<HTMLElement>("[data-scan-phase]")!.textContent = progress.total > 0 ? `正在扫描媒体库 · ${phase}` : `正在扫描媒体库 · 已发现 ${formatCount(progress.processed)} 个文件`;
-  banner.querySelector<HTMLElement>("[data-scan-percent]")!.textContent = progress.total > 0 ? `${percent}%` : "发现中";
+  banner.querySelector<HTMLElement>("[data-scan-phase]")!.textContent = scanStatusLabel(progress);
+  banner.querySelector<HTMLElement>("[data-scan-percent]")!.textContent = scanPercentLabel(progress);
   const track = banner.querySelector<HTMLElement>("[data-scan-track]")!;
-  track.style.width = progress.total > 0 ? `${percent}%` : "35%";
+  track.style.width = progress.total > 0 ? `${Math.round((progress.processed / progress.total) * 100)}%` : "35%";
   track.parentElement!.classList.toggle("is-indeterminate", progress.total <= 0);
   banner.querySelector<HTMLElement>("[data-scan-current]")!.textContent = progress.current ?? "";
 }
@@ -392,6 +403,7 @@ function bindEvents(): void {
   app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => { state.density = Number((event.target as HTMLInputElement).value) as Density; render(); });
   app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#scan-top-button")?.addEventListener("click", () => void scanLibrary());
+  app.querySelector<HTMLButtonElement>("#scan-cancel-button")?.addEventListener("click", () => void cancelCurrentScan());
   app.querySelector<HTMLButtonElement>("#backup-open-button")?.addEventListener("click", () => void openBackupPanel());
   app.querySelector<HTMLButtonElement>("#close-backup")?.addEventListener("click", () => { state.backupOpen = false; render(); });
   app.querySelector<HTMLButtonElement>("#backup-preview-button")?.addEventListener("click", () => void createBackupPreview());
@@ -613,8 +625,26 @@ async function cancelCurrentBackup(): Promise<void> {
 async function scanLibrary(): Promise<void> {
   if (!state.library || state.scanning) return;
   state.error = null; state.scanning = true; state.scanProgress = null; render();
-  try { const start = await startLibraryScan(state.library.id); state.scanProgress = { jobId: start.jobId, kind: "scan", seq: 0, phase: "discovering", state: "running", current: null, processed: 0, total: 0, errors: [], error: null }; render(); }
+  try {
+    const start = await startLibraryScan(state.library.id);
+    // Incremental rescans can emit running/completed before this response is
+    // stored. Never rewind a job that already reported, and never resurrect a
+    // job that already finished.
+    if (!state.scanning) return;
+    // Read through the state object so TypeScript does not keep the earlier
+    // `scanProgress = null` narrowing across the await.
+    const reported = state.scanProgress as ScanProgressDto | null;
+    if (reported && reported.jobId === start.jobId) return;
+    state.scanProgress = { jobId: start.jobId, kind: "scan", seq: 0, phase: "discovering", state: "running", current: null, processed: 0, total: 0, errors: [], error: null };
+    render();
+  }
   catch (error) { state.scanning = false; state.error = error instanceof Error ? error.message : "无法开始扫描"; render(); }
+}
+
+async function cancelCurrentScan(): Promise<void> {
+  if (!state.scanProgress || state.scanProgress.state !== "running") return;
+  try { await cancelLibraryScan(state.scanProgress.jobId); }
+  catch (error) { state.error = error instanceof Error ? error.message : "无法取消扫描"; render(); }
 }
 
 async function bootstrap(): Promise<void> {
@@ -636,10 +666,22 @@ window.addEventListener("keydown", (event) => {
 });
 
 void onScanProgress((progress) => {
-  if (progress.state === "running" && (!state.scanProgress || progress.jobId !== state.scanProgress.jobId)) { state.scanning = true; state.scanProgress = progress; render(); return; }
-  if (!state.scanProgress || progress.jobId !== state.scanProgress.jobId) return;
+  const terminal = progress.state === "completed" || progress.state === "cancelled" || progress.state === "failed";
+  if (terminal) {
+    // Fast scans finish before library_scan_start returns, so scanProgress may
+    // still be null. Accept that terminal event; drop only a different known job.
+    if (state.scanProgress && progress.jobId !== state.scanProgress.jobId) return;
+    if (!state.scanProgress && !state.scanning) return;
+    state.scanning = false;
+    state.scanProgress = progress;
+    if (progress.state === "failed") state.error = progress.error ?? "扫描失败";
+    render();
+    void bootstrap();
+    return;
+  }
+  if (!state.scanProgress || progress.jobId !== state.scanProgress.jobId) { state.scanning = true; state.scanProgress = progress; render(); return; }
   state.scanProgress = progress;
-  if (progress.state === "completed" || progress.state === "cancelled" || progress.state === "failed") { state.scanning = false; if (progress.state === "failed") state.error = progress.error ?? "扫描失败"; render(); void bootstrap(); } else updateScanProgressView();
+  updateScanProgressView();
 });
 void onBackupProgress((progress) => {
   if (!state.backupJobId || progress.jobId !== state.backupJobId) return;

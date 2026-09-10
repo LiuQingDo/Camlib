@@ -336,7 +336,10 @@ impl Repository {
                     exists_now: true,
                     last_scanned_at: now.to_owned(),
                 };
-                upsert_media_file_on(&transaction, &input)?;
+                // The logical item was upserted in this same transaction, so
+                // skipping the per-file existence probe keeps large rescans
+                // from issuing tens of thousands of redundant SELECTs.
+                upsert_media_file_on_unchecked(&transaction, &input)?;
                 stats.files_seen += 1;
             }
         }
@@ -1625,6 +1628,13 @@ fn upsert_media_item_on(connection: &Connection, input: &MediaItem) -> DbResult<
 fn upsert_media_file_on(connection: &Connection, input: &NewMediaFile) -> DbResult<()> {
     validate_media_file_input(input)?;
     ensure_media_item_library(connection, &input.media_item_id, &input.library_id)?;
+    upsert_media_file_on_unchecked(connection, input)
+}
+
+/// Insert/update a media file when the caller already guaranteed the parent
+/// logical item exists in the same transaction (scan snapshot apply path).
+fn upsert_media_file_on_unchecked(connection: &Connection, input: &NewMediaFile) -> DbResult<()> {
+    validate_media_file_input(input)?;
     let relative_path = validate_relative_path(&input.relative_path)?;
     let file_name = relative_path.rsplit('/').next().unwrap_or(&relative_path);
     let extension = Path::new(file_name)
