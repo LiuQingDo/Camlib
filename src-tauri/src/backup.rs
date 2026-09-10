@@ -77,6 +77,12 @@ pub struct BackupPreviewDto {
     pub target_root_path: String,
     pub conflict_policy: ConflictPolicy,
     pub ignore_extensions: Vec<String>,
+    // The complete plan is persisted in `backup_items` for execution and
+    // retry. The current UI only presents aggregate counts, so returning every
+    // item across IPC makes large camera cards needlessly stall the WebView.
+    // Kept for internal construction/debug; never sent to the frontend.
+    #[serde(skip_serializing, default)]
+    #[allow(dead_code)]
     pub items: Vec<BackupItemPreviewDto>,
     pub total_files: u64,
     pub total_bytes: u64,
@@ -319,8 +325,10 @@ fn preview_paths(
         error_summary,
     })?;
 
-    for (index, item) in items.iter().enumerate() {
-        repository.create_backup_item(NewBackupItem {
+    let backup_items = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| NewBackupItem {
             id: format!("{}-item-{index}", backup_run_id),
             backup_run_id: backup_run_id.clone(),
             source_relative: item.source_relative.clone(),
@@ -333,8 +341,9 @@ fn preview_paths(
             .to_owned(),
             copied_bytes: 0,
             error_message: item.reason.clone(),
-        })?;
-    }
+        })
+        .collect::<Vec<_>>();
+    repository.create_backup_items(&backup_items)?;
 
     Ok(BackupPreviewDto {
         id: preview_id,
@@ -1160,13 +1169,26 @@ fn plan_item(
         });
     };
     let destination_path = target_root.join(&destination_relative_path);
-    let status = if !destination_path.exists() {
-        BackupItemStatus::Ready
-    } else if files_equal(source_path, &destination_path)? {
-        BackupItemStatus::AlreadyExists
-    } else {
-        BackupItemStatus::Conflict
-    };
+    // `backup_camera.ps1` wrote files to `YYYY-MM-DD\\类型` before the
+    // current `YYYY\\MM\\YYYY-MM-DD\\类型` layout. Treat a byte-identical
+    // file in either layout as already backed up, but never mutate the legacy
+    // layout during a camera import.
+    let legacy_relative_path = PathBuf::from(capture_date.as_deref().expect("date is present"))
+        .join(kind)
+        .join(&file_name);
+    let legacy_destination_path = target_root.join(&legacy_relative_path);
+    let (destination_relative_path, status) =
+        if destination_path.exists() && same_size(metadata.len(), &destination_path)? {
+            (destination_relative_path, BackupItemStatus::AlreadyExists)
+        } else if legacy_destination_path.exists()
+            && same_size(metadata.len(), &legacy_destination_path)?
+        {
+            (legacy_relative_path, BackupItemStatus::AlreadyExists)
+        } else if destination_path.exists() {
+            (destination_relative_path, BackupItemStatus::Conflict)
+        } else {
+            (destination_relative_path, BackupItemStatus::Ready)
+        };
     Ok(BackupItemPreviewDto {
         source_relative,
         destination_relative: Some(path_to_string(&destination_relative_path)),
@@ -1181,27 +1203,16 @@ fn plan_item(
     })
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, BackupError> {
-    let left_metadata = fs::metadata(left).map_err(|error| BackupError::Io {
-        path: left.to_owned(),
-        source: error,
-    })?;
-    let right_metadata = fs::metadata(right).map_err(|error| BackupError::Io {
-        path: right.to_owned(),
-        source: error,
-    })?;
-    if left_metadata.len() != right_metadata.len() {
-        return Ok(false);
-    }
-    let left_bytes = fs::read(left).map_err(|error| BackupError::Io {
-        path: left.to_owned(),
-        source: error,
-    })?;
-    let right_bytes = fs::read(right).map_err(|error| BackupError::Io {
-        path: right.to_owned(),
-        source: error,
-    })?;
-    Ok(left_bytes == right_bytes)
+/// Match the original camera-backup policy: a file at the planned destination
+/// with the same size is considered already backed up. Preview stays metadata
+/// only, so a card containing large videos never needs to read them all again.
+fn same_size(expected_size: u64, candidate: &Path) -> Result<bool, BackupError> {
+    fs::metadata(candidate)
+        .map(|metadata| metadata.len() == expected_size)
+        .map_err(|error| BackupError::Io {
+            path: candidate.to_owned(),
+            source: error,
+        })
 }
 
 fn capture_date(file_name: &str, metadata: &fs::Metadata) -> Option<(String, String)> {
@@ -1614,6 +1625,56 @@ mod tests {
         assert_eq!(invalid_date_item.date_source.as_deref(), Some("file_time"));
         assert_eq!(preview.ignore_extensions, vec![".lrv"]);
         assert!(preview.space_sufficient == Some(true));
+    }
+
+    #[test]
+    fn preview_recognizes_byte_identical_legacy_backup_without_migrating_it() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let repository = Repository::open_in_memory().unwrap();
+        library(&repository, target.path());
+        let source_file = source.path().join("DCIM/100MEDIA/IMG_20240102_123456.JPG");
+        let legacy_file = target
+            .path()
+            .join("2024-01-02/照片/IMG_20240102_123456.JPG");
+        write(&source_file, b"legacy-copy");
+        write(&legacy_file, b"legacy-copy");
+
+        let preview = preview_paths(
+            &repository,
+            source_candidate(source.path()),
+            target.path().to_string_lossy().into_owned(),
+            "library-test".to_owned(),
+            ConflictPolicy::SkipSame,
+            None,
+            Some(u64::MAX),
+        )
+        .unwrap();
+
+        let item = preview
+            .items
+            .iter()
+            .find(|item| item.file_name == "IMG_20240102_123456.JPG")
+            .unwrap();
+        assert_eq!(item.status, BackupItemStatus::AlreadyExists);
+        assert_eq!(
+            item.destination_relative.as_deref(),
+            Some("2024-01-02\\照片\\IMG_20240102_123456.JPG")
+        );
+        assert!(legacy_file.exists());
+        assert!(!target
+            .path()
+            .join("2024/01/2024-01-02/照片/IMG_20240102_123456.JPG")
+            .exists());
+    }
+
+    #[test]
+    fn same_size_matches_the_original_fast_duplicate_policy() {
+        let directory = TempDir::new().unwrap();
+        let candidate = directory.path().join("candidate.bin");
+        write(&candidate, b"different");
+        assert!(same_size(9, &candidate).unwrap());
+        assert!(!same_size(8, &candidate).unwrap());
     }
 
     #[test]

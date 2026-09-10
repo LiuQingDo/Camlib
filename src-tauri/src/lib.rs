@@ -396,16 +396,24 @@ fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
 /// Build and persist a read-only backup preview. Copying is a separate command
 /// and requires the preview confirmation token.
 #[tauri::command]
-fn backup_preview(
+async fn backup_preview(
     request: BackupPreviewRequest,
     state: State<'_, InfrastructureState>,
 ) -> Result<BackupPreviewDto, String> {
-    state.with_infrastructure(|infrastructure| {
+    let (database_path, conflict_policy) = state.with_infrastructure(|infrastructure| {
+        Ok((
+            infrastructure.database_path(),
+            infrastructure.settings()?.backup_conflict_policy,
+        ))
+    })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repository = db::Repository::open(database_path).map_err(|error| error.to_string())?;
         let mut request = request;
-        request.conflict_policy = Some(infrastructure.settings()?.backup_conflict_policy);
-        backup::preview(infrastructure.repository(), request)
-            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(error.to_string()))
+        request.conflict_policy = Some(conflict_policy);
+        backup::preview(&repository, request).map_err(|error| error.to_string())
     })
+    .await
+    .map_err(|error| format!("备份预览任务异常结束: {error}"))?
 }
 
 /// Execute only the exact persisted preview that the user confirmed.

@@ -229,7 +229,6 @@ export interface BackupPreviewDto {
   targetRootPath: string;
   conflictPolicy: ConflictPolicy;
   ignoreExtensions: string[];
-  items: BackupItemPreviewDto[];
   totalFiles: number;
   totalBytes: number;
   readyFiles: number;

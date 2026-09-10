@@ -888,6 +888,40 @@ impl Repository {
         Ok(())
     }
 
+    /// Persist a backup plan atomically. Preview can contain thousands of
+    /// camera files, so committing each row independently is needlessly slow.
+    pub fn create_backup_items(&self, inputs: &[NewBackupItem]) -> DbResult<()> {
+        for input in inputs {
+            validate_non_empty("backup item id", &input.id)?;
+            validate_non_empty("backup run id", &input.backup_run_id)?;
+            validate_non_empty("source relative path", &input.source_relative)?;
+            validate_non_empty("status", &input.status)?;
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO backup_items
+                 (id, backup_run_id, source_relative, destination_relative, size_bytes,
+                  status, copied_bytes, error_message)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for input in inputs {
+                statement.execute(params![
+                    input.id,
+                    input.backup_run_id,
+                    input.source_relative,
+                    input.destination_relative,
+                    input.size_bytes,
+                    input.status,
+                    input.copied_bytes,
+                    input.error_message,
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn list_backup_items(&self, backup_run_id: &str) -> DbResult<Vec<BackupItem>> {
         let mut statement = self.connection.prepare(
             "SELECT id, backup_run_id, source_relative, destination_relative, size_bytes,
