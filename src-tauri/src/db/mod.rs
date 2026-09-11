@@ -670,6 +670,36 @@ impl Repository {
         Ok(())
     }
 
+    /// Apply the same favorite flag to many items in one transaction.
+    pub fn set_favorites_batch(
+        &self,
+        media_item_ids: &[String],
+        favorite: bool,
+        at: &str,
+    ) -> DbResult<usize> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut applied = 0usize;
+        for media_item_id in media_item_ids {
+            validate_non_empty("media_item_id", media_item_id)?;
+            if favorite {
+                let changed = transaction.execute(
+                    "INSERT INTO favorites (media_item_id, created_at) VALUES (?1, ?2)
+                     ON CONFLICT(media_item_id) DO NOTHING",
+                    params![media_item_id, at],
+                )?;
+                applied += changed;
+            } else {
+                let changed = transaction.execute(
+                    "DELETE FROM favorites WHERE media_item_id = ?1",
+                    [media_item_id],
+                )?;
+                applied += changed;
+            }
+        }
+        transaction.commit()?;
+        Ok(applied)
+    }
+
     /// Record the filesystem outcome separately from the logical item. This
     /// keeps partial failures and repeated-delete attempts auditable.
     pub fn record_deletion_log(&self, input: DeletionLogInput<'_>) -> DbResult<()> {
@@ -2098,6 +2128,55 @@ mod tests {
                 .as_deref(),
             Some("comfortable")
         );
+    }
+
+    #[test]
+    fn set_favorites_batch_is_transactional_and_idempotent() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+        repository
+            .upsert_media_item(item("photo-a", MediaKind::Photo))
+            .unwrap();
+        repository
+            .upsert_media_item(item("photo-b", MediaKind::Photo))
+            .unwrap();
+        repository
+            .set_favorite("photo-a", true, "2026-01-01T00:00:00Z")
+            .unwrap();
+        let applied = repository
+            .set_favorites_batch(
+                &["photo-a".into(), "photo-b".into()],
+                true,
+                "2026-01-02T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+        let page = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                favorite_only: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        let removed = repository
+            .set_favorites_batch(
+                &["photo-a".into(), "photo-b".into()],
+                false,
+                "2026-01-03T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        let page = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                favorite_only: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 0);
     }
 
     #[test]

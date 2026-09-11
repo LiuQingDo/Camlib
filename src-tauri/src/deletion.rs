@@ -28,6 +28,19 @@ pub struct DeleteResultDto {
     pub files_already_missing: usize,
     pub failed_files: usize,
     pub errors: Vec<String>,
+    /// Items whose files were all recycled or already missing.
+    pub deleted_item_ids: Vec<String>,
+    /// Items that still have at least one failed file.
+    pub failed_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProgressDto {
+    pub processed_files: usize,
+    pub total_files: usize,
+    pub current: String,
+    pub state: String,
 }
 
 pub fn preview(
@@ -91,28 +104,45 @@ pub fn delete_to_recycle_bin(
     library_id: &str,
     media_item_ids: &[String],
     thumbnail_cache_dir: &Path,
+    mut on_progress: impl FnMut(&DeleteProgressDto),
 ) -> Result<DeleteResultDto, String> {
     let root = library_root(repository, library_id)?;
     let mut seen_items = HashSet::new();
-    let mut result = DeleteResultDto {
-        media_count: 0,
-        files_recycled: 0,
-        files_already_missing: 0,
-        failed_files: 0,
-        errors: Vec::new(),
-    };
-
+    let mut work: Vec<(String, MediaItemDetails)> = Vec::new();
     for id in media_item_ids {
-        if !seen_items.insert(id) {
+        if !seen_items.insert(id.as_str()) {
             continue;
         }
-        result.media_count += 1;
         let details = repository
             .get_media_item_details(id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("媒体不存在: {id}"))?;
         ensure_item_library(&details, library_id)?;
+        work.push((id.clone(), details));
+    }
+
+    let total_files: usize = work.iter().map(|(_, details)| details.files.len()).sum();
+    let mut processed_files = 0usize;
+    let mut result = DeleteResultDto {
+        media_count: work.len(),
+        files_recycled: 0,
+        files_already_missing: 0,
+        failed_files: 0,
+        errors: Vec::new(),
+        deleted_item_ids: Vec::new(),
+        failed_item_ids: Vec::new(),
+    };
+
+    for (id, details) in &work {
+        let mut item_failed = false;
         for file in &details.files {
+            processed_files += 1;
+            on_progress(&DeleteProgressDto {
+                processed_files,
+                total_files,
+                current: file.relative_path.clone(),
+                state: "running".into(),
+            });
             let log_id = format!("delete-{}", NEXT_DELETE_ID.fetch_add(1, Ordering::Relaxed));
             let now = timestamp_now();
             if !file.exists_now {
@@ -136,6 +166,7 @@ pub fn delete_to_recycle_bin(
                 Ok(path) => path,
                 Err(error) => {
                     result.failed_files += 1;
+                    item_failed = true;
                     let message = format!("{}: {}", file.relative_path, error);
                     result.errors.push(message.clone());
                     repository
@@ -195,6 +226,7 @@ pub fn delete_to_recycle_bin(
                 }
                 Err(error) => {
                     result.failed_files += 1;
+                    item_failed = true;
                     let message = format!("回收站删除失败 {}: {}", file.relative_path, error);
                     result.errors.push(message.clone());
                     repository
@@ -215,10 +247,22 @@ pub fn delete_to_recycle_bin(
         repository
             .refresh_media_item_state(id)
             .map_err(|e| e.to_string())?;
+        if item_failed {
+            result.failed_item_ids.push(id.clone());
+        } else {
+            result.deleted_item_ids.push(id.clone());
+        }
         // Cache data is rebuildable. Remove only the library's cache subtree,
         // whose path is checked below, so stale thumbnails cannot survive.
         invalidate_library_thumbnail_cache(thumbnail_cache_dir, library_id)?;
     }
+
+    on_progress(&DeleteProgressDto {
+        processed_files,
+        total_files: total_files.max(processed_files),
+        current: String::new(),
+        state: "completed".into(),
+    });
     Ok(result)
 }
 
@@ -479,10 +523,18 @@ mod tests {
         assert_eq!(preview.media_count, 1);
         assert_eq!(preview.file_count, 2);
         assert_eq!(preview.summary.len(), 2);
-        let first =
-            delete_to_recycle_bin(&repository, "library-test", &["live-1".into()], &cache).unwrap();
+        let first = delete_to_recycle_bin(
+            &repository,
+            "library-test",
+            &["live-1".into()],
+            &cache,
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(first.files_recycled, 2, "{first:?}");
         assert_eq!(first.failed_files, 0);
+        assert_eq!(first.deleted_item_ids, vec!["live-1".to_owned()]);
+        assert!(first.failed_item_ids.is_empty());
         assert!(!root.path().join("photo.jpg").exists());
         assert!(!root.path().join("photo.mov").exists());
         assert_eq!(
@@ -499,6 +551,7 @@ mod tests {
             "library-test",
             &["live-1".into(), "live-1".into()],
             &cache,
+            |_| {},
         )
         .unwrap();
         assert_eq!(second.files_already_missing, 2);
@@ -536,6 +589,7 @@ mod tests {
             "library-test",
             &["live-partial".into()],
             &root.path().join("cache"),
+            |_| {},
         )
         .unwrap();
         assert_eq!(result.files_recycled, 1, "{result:?}");
@@ -544,6 +598,8 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("missing.mov")));
+        assert_eq!(result.deleted_item_ids, Vec::<String>::new());
+        assert_eq!(result.failed_item_ids, vec!["live-partial".to_owned()]);
         assert_eq!(repository.deletion_log_count("live-partial").unwrap(), 2);
         assert_eq!(
             repository

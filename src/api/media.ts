@@ -94,6 +94,15 @@ export interface DeleteResultDto {
   filesAlreadyMissing: number;
   failedFiles: number;
   errors: string[];
+  deletedItemIds: string[];
+  failedItemIds: string[];
+}
+
+export interface DeleteProgressDto {
+  processedFiles: number;
+  totalFiles: number;
+  current: string;
+  state: "running" | "completed";
 }
 
 export interface MediaQueryInput {
@@ -349,12 +358,23 @@ export function setFavorite(mediaItemId: string, favorite: boolean): Promise<voi
   return invoke<void>("favorite_set", { mediaItemId, favorite });
 }
 
+/** Apply the same favorite flag to many items in one backend transaction. */
+export function setFavoritesBatch(mediaItemIds: string[], favorite: boolean): Promise<number> {
+  return invoke<number>("favorite_set_batch", { mediaItemIds, favorite });
+}
+
 export function previewDelete(libraryId: string, mediaItemIds: string[]): Promise<DeletePreviewDto> {
   return invoke<DeletePreviewDto>("media_delete_preview", { libraryId, mediaItemIds });
 }
 
 export function deleteMediaItems(libraryId: string, mediaItemIds: string[]): Promise<DeleteResultDto> {
   return invoke<DeleteResultDto>("media_delete_items", { libraryId, mediaItemIds });
+}
+
+export function onDeleteProgress(
+  callback: (event: DeleteProgressDto) => void,
+): Promise<UnlistenFn> {
+  return listen<DeleteProgressDto>("delete-progress", (event) => callback(event.payload));
 }
 
 export function getMediaThumbnail(mediaItemId: string, width = 320): Promise<ThumbnailDto> {

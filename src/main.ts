@@ -1,5 +1,8 @@
 import {
   type DateFacetDto,
+  type DeletePreviewDto,
+  type DeleteProgressDto,
+  type DeleteResultDto,
   type LibraryDto,
   type MediaItemDto,
   type MediaKind,
@@ -11,9 +14,11 @@ import {
   getMediaThumbnail,
   listDateFacets,
   listLibraries,
+  onDeleteProgress,
   onScanProgress,
   queryMedia,
   setFavorite,
+  setFavoritesBatch,
   openMediaFolder,
   previewDelete,
   deleteMediaItems,
@@ -72,7 +77,13 @@ interface AppState {
   selectedIds: Set<string>;
   favorites: Set<string>;
   favoritePendingIds: Set<string>;
+  favoritesBusy: boolean;
+  lastSelectIndex: number | null;
   deleting: boolean;
+  deleteConfirm: { preview: DeletePreviewDto; ids: string[] } | null;
+  deleteProgress: DeleteProgressDto | null;
+  deleteResult: DeleteResultDto | null;
+  deleteNotice: string | null;
   backupOpen: boolean;
   backupSources: BackupVolumeDto[];
   backupPreview: BackupPreviewDto | null;
@@ -110,7 +121,13 @@ const state: AppState = {
   selectedIds: new Set(),
   favorites: new Set(),
   favoritePendingIds: new Set(),
+  favoritesBusy: false,
+  lastSelectIndex: null,
   deleting: false,
+  deleteConfirm: null,
+  deleteProgress: null,
+  deleteResult: null,
+  deleteNotice: null,
   backupOpen: false,
   backupSources: [],
   backupPreview: null,
@@ -367,16 +384,80 @@ function scrollToContentTop(): void {
   window.scrollTo?.(0, 0);
 }
 
-function toggleSelection(id: string): void {
+function bindSelectionToolbarEvents(): void {
+  app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
+  app.querySelector<HTMLButtonElement>("#clear-selection")?.addEventListener("click", () => {
+    state.selectedIds.clear();
+    state.lastSelectIndex = null;
+    applySelectionChrome();
+  });
+  app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void requestDeleteSelected());
+  app.querySelector<HTMLButtonElement>("#favorite-selected")?.addEventListener("click", () => void applyBatchFavorite(true));
+  app.querySelector<HTMLButtonElement>("#unfavorite-selected")?.addEventListener("click", () => void applyBatchFavorite(false));
+}
+
+/** Patch selection UI without rebuilding the grid (avoids thumbnail flicker). */
+function applySelectionChrome(): void {
+  app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
+    const id = card.dataset.id;
+    if (!id) return;
+    const selected = state.selectedIds.has(id);
+    card.classList.toggle("is-selected", selected);
+    const button = card.querySelector<HTMLButtonElement>(".card-select");
+    if (!button) return;
+    button.classList.toggle("is-checked", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    button.setAttribute("aria-label", selected ? "取消选择" : "选择");
+  });
+  const sticky = app.querySelector<HTMLElement>(".sticky-controls");
+  if (!sticky) return;
+  const nextHtml = renderSelectionToolbar();
+  const existing = sticky.querySelector<HTMLElement>(".selection-toolbar");
+  if (!nextHtml) {
+    existing?.remove();
+    return;
+  }
+  if (existing) existing.outerHTML = nextHtml;
+  else sticky.insertAdjacentHTML("beforeend", nextHtml);
+  bindSelectionToolbarEvents();
+}
+
+function updateFavoriteButton(id: string): void {
+  const favorite = state.favorites.has(id);
+  const pending = state.favoritePendingIds.has(id);
+  const button = [...app.querySelectorAll<HTMLButtonElement>("[data-favorite]")]
+    .find((entry) => entry.dataset.favorite === id);
+  if (!button) return;
+  button.classList.toggle("is-favorite", favorite);
+  button.classList.toggle("is-pending", pending);
+  button.disabled = pending;
+  button.setAttribute("aria-pressed", String(favorite));
+  button.setAttribute("aria-busy", String(pending));
+}
+
+function toggleSelection(id: string, index: number, range = false): void {
+  if (range && state.lastSelectIndex !== null) {
+    const start = Math.min(state.lastSelectIndex, index);
+    const end = Math.max(state.lastSelectIndex, index);
+    for (let i = start; i <= end; i += 1) {
+      const item = state.page.items[i];
+      if (item) state.selectedIds.add(item.id);
+    }
+    // The range end becomes the next anchor so chained Shift+clicks extend.
+    state.lastSelectIndex = index;
+    applySelectionChrome();
+    return;
+  }
   if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
-  render();
+  state.lastSelectIndex = index;
+  applySelectionChrome();
 }
 
 async function toggleFavorite(id: string): Promise<void> {
   if (state.favoritePendingIds.has(id)) return;
   const wasFavorite = state.favorites.has(id);
   state.favoritePendingIds.add(id);
-  render();
+  updateFavoriteButton(id);
   try {
     await setFavorite(id, !wasFavorite);
     if (wasFavorite) {
@@ -387,16 +468,73 @@ async function toggleFavorite(id: string): Promise<void> {
         state.page.items = state.page.items.filter((item) => item.id !== id);
         state.page.total = Math.max(0, state.page.total - 1);
         state.selectedIds.delete(id);
+        render();
+        return;
       }
     } else {
       state.favorites.add(id);
     }
+    updateFavoriteButton(id);
   } catch (error) {
     state.error = error instanceof Error ? error.message : "更新收藏失败";
+    render();
   } finally {
     state.favoritePendingIds.delete(id);
-    render();
+    updateFavoriteButton(id);
   }
+}
+
+async function applyBatchFavorite(favorite: boolean): Promise<void> {
+  if (!state.selectedIds.size || state.favoritesBusy) return;
+  const ids = [...state.selectedIds];
+  state.favoritesBusy = true;
+  state.error = null;
+  applySelectionChrome();
+  try {
+    await setFavoritesBatch(ids, favorite);
+    for (const id of ids) {
+      if (favorite) state.favorites.add(id);
+      else {
+        state.favorites.delete(id);
+        if (state.favoriteOnly) state.selectedIds.delete(id);
+      }
+      updateFavoriteButton(id);
+    }
+    if (!favorite && state.favoriteOnly) {
+      const removed = new Set(ids);
+      state.page.items = state.page.items.filter((item) => !removed.has(item.id));
+      state.page.total = Math.max(0, state.page.total - removed.size);
+    }
+    state.deleteNotice = favorite
+      ? `已收藏 ${formatCount(ids.length)} 项`
+      : `已取消收藏 ${formatCount(ids.length)} 项`;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "批量更新收藏失败";
+  } finally {
+    state.favoritesBusy = false;
+    if ((!favorite && state.favoriteOnly) || state.error) {
+      render();
+      return;
+    }
+    applySelectionChrome();
+    showTransientNotice(state.deleteNotice ?? "");
+    state.deleteNotice = null;
+  }
+}
+
+/** Lightweight success toast that does not rebuild the media grid. */
+function showTransientNotice(message: string): void {
+  if (!message) return;
+  app.querySelector("#batch-notice")?.remove();
+  const sticky = app.querySelector(".sticky-controls");
+  if (!sticky) return;
+  sticky.insertAdjacentHTML(
+    "afterend",
+    `<div class="notice-banner is-success" id="batch-notice" role="status"><span class="notice-icon">✓</span><span>${escapeHtml(message)}</span><button class="text-button" id="dismiss-batch-notice" type="button">关闭</button></div>`,
+  );
+  app.querySelector<HTMLButtonElement>("#dismiss-batch-notice")?.addEventListener("click", () => {
+    app.querySelector("#batch-notice")?.remove();
+  });
 }
 
 function groupedFacets(): Array<{ year: string; count: number; months: Array<{ month: string; count: number; dates: DateFacetDto[] }> }> {
@@ -557,7 +695,50 @@ function renderStatusBanner(): string {
 function renderSelectionToolbar(): string {
   if (!state.page.total) return "";
   const allSelected = state.selectedIds.size >= state.page.total;
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项` : "选择媒体后可批量管理"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+}
+
+function renderDeleteFeedback(): string {
+  if (state.deleteProgress && state.deleting) {
+    const progress = state.deleteProgress;
+    const percent = progress.totalFiles > 0
+      ? Math.round((progress.processedFiles / progress.totalFiles) * 100)
+      : 0;
+    const trackClass = progress.totalFiles > 0 ? "" : " is-indeterminate";
+    const trackWidth = progress.totalFiles > 0 ? `${percent}%` : "35%";
+    return `<div class="scan-banner delete-progress-banner" role="status" aria-live="polite"><div class="scan-copy"><span class="spinner"></span><span>正在移入 Windows 回收站</span><strong>${progress.totalFiles > 0 ? `${formatCount(progress.processedFiles)} / ${formatCount(progress.totalFiles)} 个文件` : "处理中…"}</strong></div><div class="progress-track${trackClass}"><span style="width:${trackWidth}"></span></div>${progress.current ? `<div class="scan-current">${escapeHtml(progress.current)}</div>` : ""}</div>`;
+  }
+  if (state.deleteResult) {
+    const result = state.deleteResult;
+    const hasFailures = result.failedFiles > 0;
+    const title = hasFailures ? "删除部分完成" : "已移入回收站";
+    const summary = `媒体 ${formatCount(result.mediaCount)} 项 · 成功回收 ${formatCount(result.filesRecycled)} 个文件 · 本就缺失 ${formatCount(result.filesAlreadyMissing)} · 失败 ${formatCount(result.failedFiles)}`;
+    const errors = result.errors.length
+      ? `<ul class="delete-error-list">${result.errors.slice(0, 12).map((error) => `<li>${escapeHtml(error)}</li>`).join("")}${result.errors.length > 12 ? `<li>…以及另外 ${formatCount(result.errors.length - 12)} 条错误</li>` : ""}</ul>`
+      : "";
+    return `<div class="notice-banner ${hasFailures ? "is-warning" : "is-success"}" role="status" aria-live="polite"><span class="notice-icon">${hasFailures ? "!" : "✓"}</span><div><strong>${title}</strong><span>${summary}</span>${errors}<span class="delete-recover-hint">文件在 Windows 回收站中，可随时恢复。</span></div><button class="text-button" id="dismiss-delete-result" type="button">知道了</button></div>`;
+  }
+  if (state.deleteNotice) {
+    return `<div class="notice-banner is-success" role="status" aria-live="polite"><span class="notice-icon">✓</span><span>${escapeHtml(state.deleteNotice)}</span><button class="text-button" id="dismiss-delete-notice" type="button">关闭</button></div>`;
+  }
+  return "";
+}
+
+function renderDeleteConfirm(): string {
+  const confirm = state.deleteConfirm;
+  if (!confirm) return "";
+  const { preview } = confirm;
+  const summaryLines = preview.summary.slice(0, 8);
+  const more = preview.summary.length > 8;
+  return `<div class="modal-backdrop confirm-backdrop" id="delete-confirm-modal" role="presentation"><div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+    <header class="confirm-header"><h2 id="delete-confirm-title">移入 Windows 回收站</h2><button class="icon-button" id="cancel-delete-confirm" type="button" aria-label="取消">×</button></header>
+    <div class="confirm-body">
+      <p class="confirm-lead">将把 <strong>${formatCount(preview.mediaCount)}</strong> 个媒体项（<strong>${formatCount(preview.fileCount)}</strong> 个文件，约 <strong>${formatSize(preview.totalSizeBytes)}</strong>）移入 <strong>Windows 回收站</strong>。</p>
+      <p class="confirm-recycle">文件不会被永久粉碎。你可以从系统回收站恢复原文件；Camlib 只从索引中标记为已删除。</p>
+      <div class="confirm-summary"><div class="confirm-summary-label">将处理的文件</div><ul>${summaryLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}${more ? `<li class="confirm-more">…以及另外 ${formatCount(preview.summary.length - 8)} 个文件</li>` : ""}</ul></div>
+    </div>
+    <footer class="confirm-actions"><button class="outline-button" id="cancel-delete-confirm-footer" type="button">取消</button><button class="danger-button confirm-danger" id="confirm-delete" type="button">移入回收站</button></footer>
+  </div></div>`;
 }
 
 function renderLibraryEmpty(): string {
@@ -574,6 +755,11 @@ function renderLibrarySwitcher(): string {
 }
 
 function render(): void {
+  // Full innerHTML rebuild resets the scroller. Keep the user's place unless a
+  // caller explicitly scrolls away (refreshMedia → scrollToContentTop).
+  const previousContent = app.querySelector<HTMLElement>(".content");
+  const previousScrollTop = previousContent?.scrollTop ?? 0;
+  const previousScrollLeft = previousContent?.scrollLeft ?? 0;
   const hasItems = state.page.items.length > 0;
   app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
   app.innerHTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
@@ -583,10 +769,15 @@ function render(): void {
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
-    ${renderStatusBanner()}<div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
-    <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}`;
+    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
+    <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}`;
   bindEvents();
   if (hasItems) observePreviews();
+  const nextContent = app.querySelector<HTMLElement>(".content");
+  if (nextContent) {
+    nextContent.scrollTop = previousScrollTop;
+    nextContent.scrollLeft = previousScrollLeft;
+  }
 }
 
 function renderPreview(): string {
@@ -761,16 +952,33 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#library-cancel-button")?.addEventListener("click", () => { state.libraryFormOpen = false; render(); });
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
-  app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
-  app.querySelector<HTMLButtonElement>("#clear-selection")?.addEventListener("click", () => { state.selectedIds.clear(); render(); });
-  app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void deleteSelected());
+  bindSelectionToolbarEvents();
+  app.querySelector<HTMLButtonElement>("#cancel-delete-confirm")?.addEventListener("click", cancelDeleteConfirm);
+  app.querySelector<HTMLButtonElement>("#cancel-delete-confirm-footer")?.addEventListener("click", cancelDeleteConfirm);
+  app.querySelector<HTMLButtonElement>("#confirm-delete")?.addEventListener("click", () => void runConfirmedDelete());
+  app.querySelector<HTMLElement>("#delete-confirm-modal")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) cancelDeleteConfirm();
+  });
+  app.querySelector<HTMLButtonElement>("#dismiss-delete-result")?.addEventListener("click", () => {
+    state.deleteResult = null;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>("#dismiss-delete-notice")?.addEventListener("click", () => {
+    state.deleteNotice = null;
+    render();
+  });
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
   app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
     const open = () => { state.previewIndex = Number(card.dataset.index); render(); void loadModalAsset(); };
     card.addEventListener("click", open);
     card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
-  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); toggleSelection(button.dataset.select!); }));
+  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const card = button.closest<HTMLElement>(".media-card");
+    const index = Number(card?.dataset.index ?? 0);
+    toggleSelection(button.dataset.select!, index, event.shiftKey);
+  }));
   app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); }));
   app.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1057,6 +1265,7 @@ async function refreshMedia(): Promise<void> {
     if (token !== mediaQueryToken) return;
     state.page = page;
     state.selectedIds.clear();
+    state.lastSelectIndex = null;
     state.favorites = new Set(state.page.items.filter((item) => item.favorite).map((item) => item.id));
   }
   catch (error) {
@@ -1093,7 +1302,12 @@ async function loadMore(): Promise<void> {
 
 async function selectCurrentResults(): Promise<void> {
   if (!state.library) return;
-  if (state.selectedIds.size >= state.page.total) { state.selectedIds.clear(); render(); return; }
+  if (state.selectedIds.size >= state.page.total) {
+    state.selectedIds.clear();
+    state.lastSelectIndex = null;
+    applySelectionChrome();
+    return;
+  }
   const token = mediaQueryToken;
   try {
     const ids = new Set<string>();
@@ -1105,29 +1319,94 @@ async function selectCurrentResults(): Promise<void> {
     }
     if (token !== mediaQueryToken) return;
     state.selectedIds = ids;
-    render();
+    state.lastSelectIndex = null;
+    applySelectionChrome();
   } catch (error) {
     if (token !== mediaQueryToken) return;
     state.error = error instanceof Error ? error.message : "选择当前结果失败"; render();
   }
 }
 
-async function deleteSelected(): Promise<void> {
-  if (!state.library || !state.selectedIds.size || state.deleting) return;
+function cancelDeleteConfirm(): void {
+  if (state.deleting) return;
+  state.deleteConfirm = null;
+  render();
+}
+
+function applyDeleteToGrid(result: DeleteResultDto, requestedIds: string[]): void {
+  const deleted = new Set(result.deletedItemIds);
+  const failed = new Set(result.failedItemIds);
+  // Drop fully recycled items from the grid immediately; keep partial failures
+  // visible so the user can inspect what is still on disk.
+  state.page.items = state.page.items.filter((item) => !deleted.has(item.id));
+  state.page.total = Math.max(0, state.page.total - deleted.size);
+  for (const id of requestedIds) {
+    state.selectedIds.delete(id);
+    state.favorites.delete(id);
+    if (deleted.has(id)) {
+      thumbnailRequests.delete(id);
+      modalThumbnailRequests.delete(id);
+      previewAssetCache.delete(id);
+    }
+  }
+  // Failed items remain selected so the user can retry after fixing the file.
+  for (const id of failed) {
+    if (requestedIds.includes(id)) state.selectedIds.add(id);
+  }
+  if (state.previewIndex !== null) {
+    const current = state.page.items[state.previewIndex];
+    if (!current) state.previewIndex = null;
+  }
+}
+
+async function requestDeleteSelected(): Promise<void> {
+  if (!state.library || !state.selectedIds.size || state.deleting || state.deleteConfirm) return;
   const ids = [...state.selectedIds];
-  state.deleting = true; render();
+  state.deleting = true;
+  state.deleteResult = null;
+  state.deleteNotice = null;
+  state.error = null;
+  render();
   try {
     const preview = await previewDelete(state.library.id, ids);
-    const summary = preview.summary.slice(0, 8).join("\n") + (preview.summary.length > 8 ? "\n…" : "");
-    const confirmed = window.confirm(`将 ${preview.mediaCount} 个媒体项（${preview.fileCount} 个文件，${formatSize(preview.totalSizeBytes)}）移入 Windows 回收站。\n\n文件摘要：\n${summary}\n\n此操作可从回收站恢复，是否继续？`);
-    if (!confirmed) return;
-    const result = await deleteMediaItems(state.library.id, ids);
-    if (result.errors.length) state.error = `已处理 ${result.filesRecycled} 个文件，但 ${result.failedFiles} 个文件失败：${result.errors.join("；")}`;
-    else state.error = null;
+    state.deleteConfirm = { preview, ids };
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "无法生成删除预览";
     state.selectedIds.clear();
-    await refreshMedia();
-  } catch (error) { state.error = error instanceof Error ? error.message : "删除媒体失败"; }
-  finally { state.deleting = false; render(); }
+  } finally {
+    state.deleting = false;
+    render();
+  }
+}
+
+async function runConfirmedDelete(): Promise<void> {
+  const confirm = state.deleteConfirm;
+  if (!state.library || !confirm || state.deleting) return;
+  state.deleting = true;
+  state.deleteConfirm = null;
+  state.deleteProgress = {
+    processedFiles: 0,
+    totalFiles: confirm.preview.fileCount,
+    current: "",
+    state: "running",
+  };
+  state.error = null;
+  render();
+  try {
+    const result = await deleteMediaItems(state.library.id, confirm.ids);
+    state.deleteResult = result;
+    state.deleteProgress = null;
+    applyDeleteToGrid(result, confirm.ids);
+    // Partial failures are explained by the result panel; do not stack a second error banner.
+    state.error = null;
+  } catch (error) {
+    state.deleteProgress = null;
+    state.error = error instanceof Error ? error.message : "删除媒体失败";
+  } finally {
+    state.deleting = false;
+    state.lastSelectIndex = null;
+    render();
+  }
 }
 
 async function connectLibrary(path: string): Promise<void> {
@@ -1293,6 +1572,18 @@ async function bootstrap(): Promise<void> {
 }
 
 window.addEventListener("keydown", (event) => {
+  if (state.deleteConfirm && !state.deleting) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelDeleteConfirm();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runConfirmedDelete();
+      return;
+    }
+  }
   if (state.previewIndex === null) {
     if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
       event.preventDefault();
@@ -1425,6 +1716,12 @@ void onScanProgress((progress) => {
   if (!state.scanProgress || progress.jobId !== state.scanProgress.jobId) { state.scanning = true; state.scanProgress = progress; render(); return; }
   state.scanProgress = progress;
   updateScanProgressView();
+});
+void onDeleteProgress((progress) => {
+  if (!state.deleting) return;
+  state.deleteProgress = progress;
+  if (progress.state === "completed") return;
+  render();
 });
 void onBackupProgress((progress) => {
   if (!state.backupJobId || progress.jobId !== state.backupJobId) return;

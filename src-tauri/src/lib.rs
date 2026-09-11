@@ -251,6 +251,27 @@ fn favorite_set(
 }
 
 #[tauri::command]
+fn favorite_set_batch(
+    media_item_ids: Vec<String>,
+    favorite: bool,
+    state: State<'_, InfrastructureState>,
+) -> Result<usize, String> {
+    let now = format!(
+        "unix-ms:{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .set_favorites_batch(&media_item_ids, favorite, &now)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
 fn media_delete_preview(
     library_id: String,
     media_item_ids: Vec<String>,
@@ -262,22 +283,36 @@ fn media_delete_preview(
     })
 }
 
+/// Recycle media by opaque IDs only. The worker re-resolves every file from
+/// SQLite and emits per-file progress so the UI can show partial outcomes.
 #[tauri::command]
-fn media_delete_items(
+async fn media_delete_items(
     library_id: String,
     media_item_ids: Vec<String>,
+    app: AppHandle,
     state: State<'_, InfrastructureState>,
 ) -> Result<deletion::DeleteResultDto, String> {
-    state.with_infrastructure(|infrastructure| {
+    let (database_path, thumbnail_cache_dir) = state.with_infrastructure(|infrastructure| {
         let settings = infrastructure.settings()?;
+        Ok((
+            infrastructure.database_path(),
+            PathBuf::from(settings.thumbnail_cache_dir),
+        ))
+    })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repository = db::Repository::open(database_path).map_err(|error| error.to_string())?;
         deletion::delete_to_recycle_bin(
-            infrastructure.repository(),
+            &repository,
             &library_id,
             &media_item_ids,
-            PathBuf::from(settings.thumbnail_cache_dir).as_path(),
+            thumbnail_cache_dir.as_path(),
+            |progress| {
+                let _ = app.emit("delete-progress", progress.clone());
+            },
         )
-        .map_err(infrastructure::InfrastructureError::InvalidPath)
     })
+    .await
+    .map_err(|error| format!("删除任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -642,6 +677,7 @@ pub fn run() {
             media_get,
             media_open_folder,
             favorite_set,
+            favorite_set_batch,
             media_delete_preview,
             media_delete_items,
             media_thumbnail,
