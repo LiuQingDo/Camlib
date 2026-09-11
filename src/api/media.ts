@@ -100,9 +100,14 @@ export interface MediaQueryInput {
   libraryId: string;
   kind?: MediaKind;
   favoriteOnly?: boolean;
+  burstOnly?: boolean;
   search?: string;
-  /** YYYY, YYYY-MM, or YYYY-MM-DD. */
+  /** YYYY, YYYY-MM, or YYYY-MM-DD. Mutually exclusive with date range in the UI. */
   datePrefix?: string;
+  /** Inclusive capture_date lower bound, YYYY-MM-DD. */
+  dateFrom?: string;
+  /** Inclusive capture_date upper bound, YYYY-MM-DD. */
+  dateTo?: string;
   offset?: number;
   limit?: number;
   sort?: "newest" | "oldest" | "name";
@@ -308,6 +313,11 @@ export function listDateFacets(libraryId: string): Promise<DateFacetDto[]> {
 
 export function getMediaItem(mediaItemId: string): Promise<MediaItemDetailsDto> {
   return invoke<MediaItemDetailsDto>("media_get", { mediaItemId });
+}
+
+/** Reveal the media file in Explorer. Backend resolves the path from the id. */
+export function openMediaFolder(mediaItemId: string): Promise<void> {
+  return invoke<void>("media_open_folder", { mediaItemId });
 }
 
 export function setFavorite(mediaItemId: string, favorite: boolean): Promise<void> {

@@ -299,7 +299,7 @@ impl Repository {
                 height: None,
                 duration_ms: None,
                 total_size_bytes: total_size,
-                burst_group: None,
+                burst_group: group.burst_group.clone(),
                 metadata_json: None,
                 scan_state: if group.ambiguous {
                     ScanState::Ambiguous
@@ -551,6 +551,9 @@ impl Repository {
             conditions
                 .push("EXISTS (SELECT 1 FROM favorites f WHERE f.media_item_id = m.id)".to_owned());
         }
+        if query.burst_only {
+            conditions.push("m.burst_group IS NOT NULL".to_owned());
+        }
         if let Some(search) = query.search.filter(|value| !value.trim().is_empty()) {
             conditions.push(format!(
                 "m.display_name LIKE ?{} ESCAPE '\\'",
@@ -564,6 +567,15 @@ impl Repository {
                 values.len() + 1
             ));
             values.push(format!("{}%", escape_like(&date_prefix)));
+        }
+        // Inclusive `YYYY-MM-DD` string bounds; NULL capture dates never match.
+        if let Some(date_from) = query.date_from.filter(|value| !value.trim().is_empty()) {
+            conditions.push(format!("m.capture_date >= ?{}", values.len() + 1));
+            values.push(date_from.trim().to_owned());
+        }
+        if let Some(date_to) = query.date_to.filter(|value| !value.trim().is_empty()) {
+            conditions.push(format!("m.capture_date <= ?{}", values.len() + 1));
+            values.push(date_to.trim().to_owned());
         }
         let where_clause = conditions.join(" AND ");
         let count_sql = format!("SELECT COUNT(*) FROM media_items m WHERE {where_clause}");
@@ -1290,6 +1302,8 @@ pub struct ScanGroup {
     pub capture_at: Option<String>,
     pub capture_date: Option<String>,
     pub ambiguous: bool,
+    /// Shared id for items in the same burst cluster; `None` when not a burst.
+    pub burst_group: Option<String>,
     pub files: Vec<ScanGroupFile>,
 }
 
@@ -1473,13 +1487,23 @@ pub struct NewBackupItem {
     pub error_message: Option<String>,
 }
 
+/// List-query filters for `media_items`.
+///
+/// Date filters compose as AND:
+/// - `date_prefix`: `YYYY` / `YYYY-MM` / `YYYY-MM-DD` LIKE prefix (sidebar).
+/// - `date_from` / `date_to`: inclusive `capture_date` bounds (`YYYY-MM-DD`).
+///   Rows with a NULL `capture_date` are excluded when either bound is set.
+/// Frontend normally keeps prefix and range mutually exclusive in the UI.
 #[derive(Debug, Clone, Default)]
 pub struct MediaQuery {
     pub library_id: String,
     pub kind: Option<MediaKind>,
     pub favorite_only: bool,
+    pub burst_only: bool,
     pub search: Option<String>,
     pub date_prefix: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
     pub offset: i64,
     pub limit: i64,
     pub sort: MediaSort,
@@ -2119,6 +2143,89 @@ mod tests {
             .map(|media| media.id)
             .collect::<Vec<_>>();
         assert_eq!(newest, ["photo-new", "photo-middle", "photo-old"]);
+    }
+
+    #[test]
+    fn media_query_supports_date_prefix_range_and_burst_filters() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        for (id, date, burst) in [
+            ("early", Some("2025-12-31"), None),
+            ("start", Some("2026-01-01"), Some("burst-a")),
+            ("mid", Some("2026-01-02"), Some("burst-a")),
+            ("end", Some("2026-01-15"), None),
+            ("late", Some("2026-02-01"), None),
+            ("unknown", None, None),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.capture_date = date.map(str::to_owned);
+            media.burst_group = burst.map(str::to_owned);
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let ids = |query: MediaQuery| -> Vec<String> {
+            repository
+                .query_media(query)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|media| media.id)
+                .collect()
+        };
+
+        // Prefix matches a year / month / day without an explicit range.
+        assert_eq!(
+            ids(MediaQuery {
+                library_id: "library-1".into(),
+                date_prefix: Some("2026-01".into()),
+                limit: 10,
+                ..Default::default()
+            }),
+            ["end", "mid", "start"]
+        );
+        // Inclusive range: start and end dates included; outside and NULL excluded.
+        assert_eq!(
+            ids(MediaQuery {
+                library_id: "library-1".into(),
+                date_from: Some("2026-01-01".into()),
+                date_to: Some("2026-01-15".into()),
+                limit: 10,
+                ..Default::default()
+            }),
+            ["end", "mid", "start"]
+        );
+        // Open-ended lower bound.
+        assert_eq!(
+            ids(MediaQuery {
+                library_id: "library-1".into(),
+                date_from: Some("2026-01-16".into()),
+                limit: 10,
+                ..Default::default()
+            }),
+            ["late"]
+        );
+        // Burst-only keeps items with a non-null burst_group.
+        assert_eq!(
+            ids(MediaQuery {
+                library_id: "library-1".into(),
+                burst_only: true,
+                limit: 10,
+                ..Default::default()
+            }),
+            ["mid", "start"]
+        );
+        // Burst + range compose as AND.
+        assert_eq!(
+            ids(MediaQuery {
+                library_id: "library-1".into(),
+                burst_only: true,
+                date_from: Some("2026-01-02".into()),
+                limit: 10,
+                ..Default::default()
+            }),
+            ["mid"]
+        );
     }
 
     #[test]

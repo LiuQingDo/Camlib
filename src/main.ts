@@ -3,6 +3,7 @@ import {
   type LibraryDto,
   type MediaItemDto,
   type MediaKind,
+  type MediaQueryInput,
   type MediaPageDto,
   getMediaPreview,
   getMediaThumbnail,
@@ -11,6 +12,7 @@ import {
   onScanProgress,
   queryMedia,
   setFavorite,
+  openMediaFolder,
   previewDelete,
   deleteMediaItems,
   discoverBackupSources,
@@ -50,7 +52,14 @@ interface AppState {
   search: string;
   kind: MediaKind | undefined;
   favoriteOnly: boolean;
+  burstOnly: boolean;
   datePrefix: string | undefined;
+  dateFrom: string | undefined;
+  dateTo: string | undefined;
+  /** Years whose month list is visible in the sidebar. */
+  expandedYears: Set<string>;
+  /** Months whose day list is visible in the sidebar. */
+  expandedMonths: Set<string>;
   sort: SortMode;
   density: Density;
   loading: boolean;
@@ -83,7 +92,12 @@ const state: AppState = {
   search: "",
   kind: undefined,
   favoriteOnly: false,
+  burstOnly: false,
   datePrefix: undefined,
+  dateFrom: undefined,
+  dateTo: undefined,
+  expandedYears: new Set(),
+  expandedMonths: new Set(),
   sort: "newest",
   density: 3,
   loading: true,
@@ -135,6 +149,9 @@ const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getM
 // by decoding very large textures at their native dimensions.
 const modalThumbnailWidth = 1600;
 const modalThumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
+// Bumps on every full refresh so in-flight load-more/select-all pages from a
+// previous filter cannot append into the new result set.
+let mediaQueryToken = 0;
 
 function pumpThumbnailQueue(): void {
   while (activeThumbnailRequests < thumbnailConcurrency && thumbnailQueue.length) {
@@ -193,6 +210,68 @@ function formatSize(bytes: number): string { return bytes < 1024 * 1024 ? `${Mat
 function kindLabel(kind: MediaKind): string { return kind === "photo" ? "照片" : kind === "video" ? "视频" : "实况"; }
 function selectedPrefix(prefix: string | undefined, value: string): string { return prefix === value ? "is-selected" : ""; }
 function facetTotal(): number { return state.facets.reduce((total, facet) => total + facet.count, 0); }
+
+function hasDateFilter(): boolean {
+  return Boolean(state.datePrefix || state.dateFrom || state.dateTo);
+}
+
+function hasAnyFilter(): boolean {
+  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly);
+}
+
+function formatRangeLabel(): string {
+  if (state.dateFrom && state.dateTo) return `${state.dateFrom} ~ ${state.dateTo}`;
+  if (state.dateFrom) return `自 ${state.dateFrom}`;
+  if (state.dateTo) return `至 ${state.dateTo}`;
+  return "";
+}
+
+function primaryDateLabel(): string {
+  if (state.datePrefix) return formatDate(state.datePrefix);
+  if (state.dateFrom || state.dateTo) return formatRangeLabel();
+  return "";
+}
+
+function currentQueryFields(): Pick<
+  MediaQueryInput,
+  "libraryId" | "kind" | "favoriteOnly" | "burstOnly" | "search" | "datePrefix" | "dateFrom" | "dateTo" | "sort"
+> {
+  if (!state.library) throw new Error("媒体库未就绪");
+  return {
+    libraryId: state.library.id,
+    kind: state.kind,
+    favoriteOnly: state.favoriteOnly,
+    burstOnly: state.burstOnly,
+    search: state.search || undefined,
+    datePrefix: state.datePrefix,
+    dateFrom: state.dateFrom,
+    dateTo: state.dateTo,
+    sort: state.sort,
+  };
+}
+
+function resetSidebarExpansionForSelection(): void {
+  if (state.datePrefix) {
+    const year = state.datePrefix.slice(0, 4);
+    state.expandedYears = new Set([year]);
+    if (state.datePrefix.length >= 7) {
+      state.expandedMonths = new Set([state.datePrefix.slice(0, 7)]);
+    } else {
+      state.expandedMonths = new Set();
+    }
+    return;
+  }
+  // Default: show only the newest year's months, days stay closed.
+  const newestYear = groupedFacets()[0]?.year;
+  state.expandedYears = newestYear ? new Set([newestYear]) : new Set();
+  state.expandedMonths = new Set();
+}
+
+function scrollToContentTop(): void {
+  const content = app.querySelector<HTMLElement>(".content");
+  if (content) content.scrollTop = 0;
+  window.scrollTo?.(0, 0);
+}
 
 function toggleSelection(id: string): void {
   if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
@@ -257,14 +336,27 @@ function groupedFacets(): Array<{ year: string; count: number; months: Array<{ m
 function renderDateNavigation(): string {
   if (!state.facets.length) return `<div class="nav-empty">扫描后会在这里显示年月</div>`;
   return `<div class="date-tree">
-    <button class="date-link all-link ${state.datePrefix ? "" : "is-selected"}" data-prefix="" type="button"><span>全部媒体</span><span>${formatCount(facetTotal())}</span></button>
-    ${groupedFacets().map((yearGroup) => `<section class="year-group">
-      <button class="date-link year-link ${selectedPrefix(state.datePrefix, yearGroup.year)}" data-prefix="${yearGroup.year}" type="button"><span>${yearGroup.year} 年</span><span>${formatCount(yearGroup.count)}</span></button>
-      <div class="month-list">${yearGroup.months.map((monthGroup) => {
+    <button class="date-link all-link ${!hasDateFilter() ? "is-selected" : ""}" data-prefix="" type="button"><span>全部媒体</span><span>${formatCount(facetTotal())}</span></button>
+    ${groupedFacets().map((yearGroup) => {
+      const yearExpanded = state.expandedYears.has(yearGroup.year);
+      return `<section class="year-group ${yearExpanded ? "is-expanded" : ""}">
+      <div class="year-row">
+        <button class="icon-button tree-toggle" type="button" data-year-toggle="${yearGroup.year}" aria-label="${yearExpanded ? "折叠" : "展开"} ${yearGroup.year} 年" aria-expanded="${yearExpanded}">${yearExpanded ? "▾" : "▸"}</button>
+        <button class="date-link year-link ${selectedPrefix(state.datePrefix, yearGroup.year)}" data-prefix="${yearGroup.year}" type="button"><span>${yearGroup.year} 年</span><span>${formatCount(yearGroup.count)}</span></button>
+      </div>
+      ${yearExpanded ? `<div class="month-list">${yearGroup.months.map((monthGroup) => {
         const monthPrefix = `${yearGroup.year}-${monthGroup.month}`;
-        return `<div class="month-group"><button class="date-link month-link ${selectedPrefix(state.datePrefix, monthPrefix)}" data-prefix="${monthPrefix}" type="button"><span>${Number(monthGroup.month)} 月</span><span>${formatCount(monthGroup.count)}</span></button><div class="day-list">${monthGroup.dates.map((facet) => `<button class="day-link ${selectedPrefix(state.datePrefix, facet.date)}" data-prefix="${facet.date}" type="button"><span>${Number(facet.date.slice(-2))} 日</span><span>${facet.count}</span></button>`).join("")}</div></div>`;
-      }).join("")}</div>
-    </section>`).join("")}
+        const monthExpanded = state.expandedMonths.has(monthPrefix);
+        return `<div class="month-group ${monthExpanded ? "is-expanded" : ""}">
+          <div class="month-row">
+            <button class="icon-button tree-toggle" type="button" data-month-toggle="${monthPrefix}" aria-label="${monthExpanded ? "折叠" : "展开"} ${Number(monthGroup.month)} 月" aria-expanded="${monthExpanded}">${monthExpanded ? "▾" : "▸"}</button>
+            <button class="date-link month-link ${selectedPrefix(state.datePrefix, monthPrefix)}" data-prefix="${monthPrefix}" type="button"><span>${Number(monthGroup.month)} 月</span><span>${formatCount(monthGroup.count)}</span></button>
+          </div>
+          ${monthExpanded ? `<div class="day-list">${monthGroup.dates.map((facet) => `<button class="day-link ${selectedPrefix(state.datePrefix, facet.date)}" data-prefix="${facet.date}" type="button"><span>${Number(facet.date.slice(-2))} 日</span><span>${facet.count}</span></button>`).join("")}</div>` : ""}
+        </div>`;
+      }).join("")}</div>` : ""}
+    </section>`;
+    }).join("")}
   </div>`;
 }
 
@@ -276,7 +368,7 @@ function renderCard(item: MediaItemDto, index: number): string {
   const favorite = state.favorites.has(item.id);
   const favoritePending = state.favoritePendingIds.has(item.id);
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><span aria-hidden="true">✓</span></button><button class="card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><span aria-hidden="true">★</span></button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}</div>
+    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><span aria-hidden="true">✓</span></button><button class="card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><span aria-hidden="true">★</span></button><button class="card-folder" data-open-folder="${escapeHtml(item.id)}" type="button" aria-label="打开${escapeHtml(item.displayName)}所在文件夹" title="打开所在文件夹"><span aria-hidden="true">▣</span></button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span></div></div>
   </article>`;
 }
@@ -292,8 +384,25 @@ function renderMediaGrid(): string {
 }
 
 function renderKindFilters(): string {
-  const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !state.favoriteOnly ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
-  return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button>`;
+  // Type tabs are exclusive with 收藏/连拍 secondary filters, matching the
+  // original 收藏 rule so switching tabs always replaces the whole filter set.
+  const secondaryActive = state.favoriteOnly || state.burstOnly;
+  const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
+  return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
+}
+
+function renderDateRangeControls(): string {
+  const presets = [
+    { id: "month", label: "本月" },
+    { id: "year", label: "今年" },
+    { id: "days30", label: "最近30天" },
+  ];
+  return `<div class="date-range" aria-label="日期区间">
+    <label><span>从</span><input type="date" id="date-from" value="${escapeHtml(state.dateFrom ?? "")}" aria-label="开始日期" /></label>
+    <label><span>到</span><input type="date" id="date-to" value="${escapeHtml(state.dateTo ?? "")}" aria-label="结束日期" /></label>
+    ${presets.map((preset) => `<button class="filter-chip range-preset" type="button" data-range-preset="${preset.id}">${preset.label}</button>`).join("")}
+    ${(state.dateFrom || state.dateTo) ? `<button class="filter-chip" type="button" id="clear-date-range">清除区间</button>` : ""}
+  </div>`;
 }
 
 function scanStatusLabel(progress: ScanProgressDto): string {
@@ -361,7 +470,7 @@ function renderLibraryEmpty(): string {
   if (state.loading) return `<div class="empty-state"><span class="empty-icon spinner large"></span><h2>正在读取媒体库</h2><p>正在从 Tauri 后端加载索引。</p></div>`;
   if (state.availability === "unconfigured") return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会建立可搜索的索引。</p><div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div></div>`;
   if (!state.library) return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
-  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
+  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${hasAnyFilter() ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${hasAnyFilter() ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
   return "";
 }
 
@@ -379,8 +488,8 @@ function render(): void {
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
-    ${renderStatusBanner()}<div class="toolbar"><div class="filter-row">${renderKindFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
+    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    ${renderStatusBanner()}<div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
     <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}`;
   bindEvents();
   if (hasItems) observePreviews();
@@ -393,21 +502,114 @@ function renderPreview(): string {
   return `<div class="modal-backdrop" id="preview-modal"><div class="preview-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}">
     <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></header>
     <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
-    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}</span></div><span class="modal-hint">使用 ← → 切换</span></footer>
+    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">使用 ← → 切换</span></div></footer>
   </div></div>`;
 }
 
 function bindEvents(): void {
-  app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => { state.datePrefix = button.dataset.prefix || undefined; void refreshMedia(); }));
-  app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => {
-    // Type tabs replace the current filter rather than combining with 收藏.
-    // Without resetting this flag, switching away from 收藏 kept querying only
-    // favorite items and made the other tabs appear unresponsive.
-    state.kind = (button.dataset.kind || undefined) as MediaKind | undefined;
-    state.favoriteOnly = false;
+  app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => {
+    const prefix = button.dataset.prefix || undefined;
+    state.datePrefix = prefix;
+    // Prefix and range are exclusive in the UI so the title stays unambiguous.
+    state.dateFrom = undefined;
+    state.dateTo = undefined;
+    if (prefix) {
+      const year = prefix.slice(0, 4);
+      state.expandedYears.add(year);
+      if (prefix.length >= 7) state.expandedMonths.add(prefix.slice(0, 7));
+    } else {
+      resetSidebarExpansionForSelection();
+    }
     void refreshMedia();
   }));
-  app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => { state.favoriteOnly = !state.favoriteOnly; void refreshMedia(); });
+  app.querySelectorAll<HTMLButtonElement>("[data-year-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const year = button.dataset.yearToggle!;
+    if (state.expandedYears.has(year)) state.expandedYears.delete(year);
+    else state.expandedYears.add(year);
+    render();
+  }));
+  app.querySelectorAll<HTMLButtonElement>("[data-month-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const month = button.dataset.monthToggle!;
+    if (state.expandedMonths.has(month)) state.expandedMonths.delete(month);
+    else state.expandedMonths.add(month);
+    render();
+  }));
+  app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => {
+    // Type tabs replace the whole filter set rather than stacking with 收藏/连拍.
+    // Without resetting these flags, switching away kept querying only the
+    // secondary subset and made the other tabs appear unresponsive.
+    state.kind = (button.dataset.kind || undefined) as MediaKind | undefined;
+    state.favoriteOnly = false;
+    state.burstOnly = false;
+    void refreshMedia();
+  }));
+  app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => {
+    // 收藏 / 连拍 are exclusive secondary tabs: selecting one clears the other.
+    if (state.favoriteOnly) state.favoriteOnly = false;
+    else { state.favoriteOnly = true; state.burstOnly = false; }
+    void refreshMedia();
+  });
+  app.querySelector<HTMLButtonElement>("#burst-filter")?.addEventListener("click", () => {
+    if (state.burstOnly) state.burstOnly = false;
+    else { state.burstOnly = true; state.favoriteOnly = false; }
+    void refreshMedia();
+  });
+  const applyDateInputs = () => {
+    const from = app.querySelector<HTMLInputElement>("#date-from")?.value.trim();
+    const to = app.querySelector<HTMLInputElement>("#date-to")?.value.trim();
+    state.dateFrom = from || undefined;
+    state.dateTo = to || undefined;
+    if (state.dateFrom || state.dateTo) {
+      // Range wins over sidebar prefix so the two cannot fight in the title.
+      state.datePrefix = undefined;
+    }
+    void refreshMedia();
+  };
+  app.querySelector<HTMLInputElement>("#date-from")?.addEventListener("change", applyDateInputs);
+  app.querySelector<HTMLInputElement>("#date-to")?.addEventListener("change", applyDateInputs);
+  app.querySelector<HTMLButtonElement>("#clear-date-range")?.addEventListener("click", () => {
+    state.dateFrom = undefined;
+    state.dateTo = undefined;
+    void refreshMedia();
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-range-preset]").forEach((button) => button.addEventListener("click", () => {
+    const preset = button.dataset.rangePreset;
+    const today = new Date();
+    const toIso = (date: Date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    };
+    if (preset === "month") {
+      state.dateFrom = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+      state.dateTo = toIso(today);
+    } else if (preset === "year") {
+      state.dateFrom = `${today.getFullYear()}-01-01`;
+      state.dateTo = toIso(today);
+    } else if (preset === "days30") {
+      const start = new Date(today);
+      start.setDate(start.getDate() - 29);
+      state.dateFrom = toIso(start);
+      state.dateTo = toIso(today);
+    } else {
+      return;
+    }
+    state.datePrefix = undefined;
+    void refreshMedia();
+  }));
+  app.querySelector<HTMLButtonElement>("#clear-all-filters")?.addEventListener("click", () => {
+    state.search = "";
+    searchDraft = "";
+    state.kind = undefined;
+    state.favoriteOnly = false;
+    state.burstOnly = false;
+    state.datePrefix = undefined;
+    state.dateFrom = undefined;
+    state.dateTo = undefined;
+    resetSidebarExpansionForSelection();
+    void refreshMedia();
+  });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
   searchInput?.addEventListener("keydown", (event) => {
@@ -473,10 +675,24 @@ function bindEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); toggleSelection(button.dataset.select!); }));
   app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); }));
+  app.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void openFolderForItem(button.dataset.openFolder!);
+  }));
   app.querySelector<HTMLButtonElement>("#close-preview")?.addEventListener("click", closePreview);
   app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
+}
+
+async function openFolderForItem(mediaItemId: string): Promise<void> {
+  try {
+    await openMediaFolder(mediaItemId);
+    state.error = null;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "打开所在文件夹失败";
+    render();
+  }
 }
 
 function observePreviews(): void {
@@ -551,40 +767,66 @@ function movePreview(delta: number): void { if (state.previewIndex === null || !
 
 async function refreshMedia(): Promise<void> {
   if (!state.library) { render(); return; }
+  const token = ++mediaQueryToken;
   state.loading = true; state.error = null; render();
   try {
-    state.page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, limit: 120, sort: state.sort });
+    const page = await queryMedia({ ...currentQueryFields(), limit: 120 });
+    if (token !== mediaQueryToken) return;
+    state.page = page;
     state.selectedIds.clear();
     state.favorites = new Set(state.page.items.filter((item) => item.favorite).map((item) => item.id));
   }
-  catch (error) { state.error = error instanceof Error ? error.message : "读取媒体索引失败"; }
-  finally { state.loading = false; render(); }
+  catch (error) {
+    if (token !== mediaQueryToken) return;
+    state.error = error instanceof Error ? error.message : "读取媒体索引失败";
+  }
+  finally {
+    if (token === mediaQueryToken) {
+      state.loading = false;
+      render();
+      // A filter change starts a new result list; keep the viewport at the top
+      // so the user does not land mid-page on unrelated items.
+      scrollToContentTop();
+    }
+  }
 }
 
 async function loadMore(): Promise<void> {
   if (!state.library || state.page.items.length >= state.page.total) return;
+  const token = mediaQueryToken;
   try {
-    const next = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset: state.page.items.length, limit: 120, sort: state.sort });
+    const next = await queryMedia({ ...currentQueryFields(), offset: state.page.items.length, limit: 120 });
+    // Discard pages that finished after a filter switch.
+    if (token !== mediaQueryToken) return;
     state.page.items.push(...next.items);
     next.items.forEach((item) => { if (item.favorite) state.favorites.add(item.id); });
     render();
   }
-  catch (error) { state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render(); }
+  catch (error) {
+    if (token !== mediaQueryToken) return;
+    state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render();
+  }
 }
 
 async function selectCurrentResults(): Promise<void> {
   if (!state.library) return;
   if (state.selectedIds.size >= state.page.total) { state.selectedIds.clear(); render(); return; }
+  const token = mediaQueryToken;
   try {
     const ids = new Set<string>();
     for (let offset = 0; offset < state.page.total; offset += 500) {
-      const page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset, limit: 500, sort: state.sort });
+      const page = await queryMedia({ ...currentQueryFields(), offset, limit: 500 });
+      if (token !== mediaQueryToken) return;
       page.items.forEach((item) => ids.add(item.id));
       if (!page.items.length) break;
     }
+    if (token !== mediaQueryToken) return;
     state.selectedIds = ids;
     render();
-  } catch (error) { state.error = error instanceof Error ? error.message : "选择当前结果失败"; render(); }
+  } catch (error) {
+    if (token !== mediaQueryToken) return;
+    state.error = error instanceof Error ? error.message : "选择当前结果失败"; render();
+  }
 }
 
 async function deleteSelected(): Promise<void> {
@@ -759,6 +1001,7 @@ async function bootstrap(): Promise<void> {
     state.libraries = libraries; state.availability = infra.library_status.availability; state.rootPath = infra.library_status.root_path; state.library = libraries.find((library) => library.rootPath === infra.library_status.root_path) ?? libraries[0] ?? null;
     if (state.library && state.availability === "available") {
       state.facets = await listDateFacets(state.library.id);
+      resetSidebarExpansionForSelection();
       await refreshMedia();
       void maybeAutoScan();
     }

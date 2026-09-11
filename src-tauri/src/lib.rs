@@ -103,8 +103,11 @@ struct MediaQueryInput {
     library_id: String,
     kind: Option<MediaKind>,
     favorite_only: Option<bool>,
+    burst_only: Option<bool>,
     search: Option<String>,
     date_prefix: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
     offset: Option<i64>,
     limit: Option<i64>,
     sort: Option<String>,
@@ -137,8 +140,11 @@ fn media_query(
                 library_id: query.library_id,
                 kind: query.kind,
                 favorite_only: query.favorite_only.unwrap_or(false),
+                burst_only: query.burst_only.unwrap_or(false),
                 search: query.search,
                 date_prefix: query.date_prefix,
+                date_from: query.date_from,
+                date_to: query.date_to,
                 offset: query.offset.unwrap_or(0),
                 limit: query.limit.unwrap_or(120),
                 sort,
@@ -174,6 +180,53 @@ fn media_get(
                 infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
             })
     })
+}
+
+/// Open Explorer with the media file selected. Only an opaque media id is
+/// accepted; the absolute path is resolved from the library root on disk.
+#[tauri::command]
+fn media_open_folder(
+    media_item_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), String> {
+    let (details, root) = state.with_infrastructure(|infrastructure| {
+        let details = infrastructure
+            .repository()
+            .get_media_item_details(&media_item_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+            })?;
+        let library = infrastructure
+            .repository()
+            .get_library(&details.item.library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        Ok((details, PathBuf::from(library.root_path)))
+    })?;
+
+    // Prefer a present photo/single file so Live Photos open on the still.
+    let candidate = details
+        .files
+        .iter()
+        .filter(|file| file.exists_now)
+        .min_by_key(|file| match file.role {
+            db::MediaFileRole::Single => 0,
+            db::MediaFileRole::LivePhoto => 1,
+            db::MediaFileRole::LiveVideo => 2,
+        })
+        .or_else(|| details.files.first())
+        .ok_or_else(|| "媒体没有可打开的文件".to_owned())?;
+
+    if !candidate.exists_now {
+        return Err("媒体文件已离线或不存在，无法打开所在文件夹".to_owned());
+    }
+
+    let resolved = deletion::resolve_media_file(&root, &candidate.relative_path)?;
+    tauri_plugin_opener::reveal_item_in_dir(&resolved)
+        .map_err(|error| format!("打开资源管理器失败: {error}"))
 }
 
 #[tauri::command]
@@ -587,6 +640,7 @@ pub fn run() {
             media_query,
             media_date_facets,
             media_get,
+            media_open_folder,
             favorite_set,
             media_delete_preview,
             media_delete_items,

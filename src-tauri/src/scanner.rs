@@ -464,6 +464,7 @@ fn plan_groups(
                 capture_at: None,
                 capture_date: photo.capture_date.clone(),
                 ambiguous: false,
+                burst_group: None,
                 files: vec![
                     scan_file(photo, MediaFileRole::LivePhoto, &old_files),
                     scan_file(video, MediaFileRole::LiveVideo, &old_files),
@@ -484,12 +485,140 @@ fn plan_groups(
                     capture_at: None,
                     capture_date: file.capture_date.clone(),
                     ambiguous,
+                    burst_group: None,
                     files: vec![scan_file(&file, MediaFileRole::Single, &old_files)],
                 });
             }
         }
     }
+    assign_burst_groups(&mut scan_groups);
     scan_groups
+}
+
+/// Mark consecutive logical items as a burst when they share a capture date and
+/// parent directory, their timestamps fall within three seconds of the previous
+/// item, and the cluster has at least three members.
+const BURST_WINDOW_MS: i64 = 3_000;
+const BURST_MIN_COUNT: usize = 3;
+
+fn assign_burst_groups(groups: &mut [ScanGroup]) {
+    let mut clusters: BTreeMap<String, Vec<(usize, i64)>> = BTreeMap::new();
+    for (index, group) in groups.iter().enumerate() {
+        let Some(date) = group.capture_date.as_deref() else {
+            continue;
+        };
+        let directory = group
+            .files
+            .first()
+            .map(|file| {
+                file.relative_path
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent.to_owned())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let Some(time) = group_time_millis(group) else {
+            continue;
+        };
+        clusters
+            .entry(format!("{date}|{directory}"))
+            .or_default()
+            .push((index, time));
+    }
+    for (cluster_key, mut entries) in clusters {
+        entries.sort_by_key(|(_, time)| *time);
+        let mut start = 0;
+        while start < entries.len() {
+            let mut end = start + 1;
+            while end < entries.len() && entries[end].1 - entries[end - 1].1 <= BURST_WINDOW_MS {
+                end += 1;
+            }
+            if end - start >= BURST_MIN_COUNT {
+                let group_id = format!("burst:{cluster_key}:{}", entries[start].1);
+                for index in start..end {
+                    groups[entries[index].0].burst_group = Some(group_id.clone());
+                }
+            }
+            start = end;
+        }
+    }
+}
+
+fn group_time_millis(group: &ScanGroup) -> Option<i64> {
+    if let Some(time) = filename_timestamp_millis(&group.display_name) {
+        return Some(time);
+    }
+    if let Some(time) = filename_timestamp_millis(&group.logical_key) {
+        return Some(time);
+    }
+    group
+        .files
+        .iter()
+        .filter_map(|file| modified_at_millis(&file.modified_at))
+        .min()
+}
+
+fn filename_timestamp_millis(name: &str) -> Option<i64> {
+    // Strip separators so `yyyyMMdd_HHmmss` and `IMG-2026-01-05-10-00-00` both
+    // collapse to a digit run. Prefer the last plausible 14-digit datetime.
+    let compact: String = name
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    if compact.len() >= 14 {
+        for offset in (0..=compact.len() - 14).rev() {
+            if let Some(value) = parse_datetime_digits(&compact[offset..offset + 14], 14) {
+                return Some(value);
+            }
+        }
+    }
+    if compact.len() >= 8 {
+        if let Some(value) = parse_datetime_digits(&compact[..8], 8) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_datetime_digits(token: &str, length: usize) -> Option<i64> {
+    let year: i32 = token[0..4].parse().ok()?;
+    let month: u32 = token[4..6].parse().ok()?;
+    let day: u32 = token[6..8].parse().ok()?;
+    if !(1970..=2100).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (hour, minute, second) = if length >= 14 {
+        (
+            token[8..10].parse().ok()?,
+            token[10..12].parse().ok()?,
+            token[12..14].parse().ok()?,
+        )
+    } else {
+        (0, 0, 0)
+    };
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    // Approximate UTC epoch milliseconds — only relative gaps matter for bursts.
+    let days = days_from_civil(year, month, day)?;
+    Some((days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64) * 1_000)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if day == 0 {
+        return None;
+    }
+    let y = year as i64 - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn modified_at_millis(value: &str) -> Option<i64> {
+    value.strip_prefix("unix-ms:")?.parse().ok()
 }
 
 fn scan_file(
@@ -873,6 +1002,51 @@ mod tests {
     }
 
     #[test]
+    fn plan_groups_marks_nearby_sequences_as_bursts() {
+        let temp = tempfile::tempdir().unwrap();
+        let day = temp.path().join("2026-01-05");
+        fs::create_dir_all(&day).unwrap();
+        // Three photos within three seconds → one burst cluster.
+        fs::write(day.join("20260105_100000.JPG"), b"a").unwrap();
+        fs::write(day.join("20260105_100001.JPG"), b"b").unwrap();
+        fs::write(day.join("20260105_100002.JPG"), b"c").unwrap();
+        // A later isolated photo is not a burst.
+        fs::write(day.join("20260105_120000.JPG"), b"d").unwrap();
+        // Two items only → not a burst even if adjacent.
+        fs::write(day.join("20260105_120010.JPG"), b"e").unwrap();
+        fs::write(day.join("20260105_120011.JPG"), b"f").unwrap();
+
+        let repository = Repository::open_in_memory().unwrap();
+        repository
+            .create_library(test_library(temp.path()))
+            .unwrap();
+        let (_, groups) = discovered_groups(temp.path(), &repository);
+        let burst_count = groups
+            .iter()
+            .filter(|group| group.burst_group.is_some())
+            .count();
+        assert_eq!(burst_count, 3, "expected the first three photos to share a burst");
+        let burst_ids: std::collections::HashSet<_> = groups
+            .iter()
+            .filter_map(|group| group.burst_group.as_deref())
+            .collect();
+        assert_eq!(burst_ids.len(), 1);
+
+        repository
+            .apply_scan_snapshot("library-test", 1, "unix-ms:2", &groups)
+            .unwrap();
+        let burst_page = repository
+            .query_media(MediaQuery {
+                library_id: "library-test".into(),
+                burst_only: true,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(burst_page.total, 3);
+    }
+
+    #[test]
     fn removed_member_is_missing_and_failed_commit_rolls_back() {
         let temp = tempfile::tempdir().unwrap();
         let day = temp.path().join("2026-01-02");
@@ -923,6 +1097,7 @@ mod tests {
             capture_at: None,
             capture_date: None,
             ambiguous: false,
+            burst_group: None,
             files: vec![ScanGroupFile {
                 relative_path: "../outside.jpg".to_owned(),
                 role: MediaFileRole::Single,
