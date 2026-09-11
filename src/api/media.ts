@@ -129,9 +129,34 @@ export interface MediaSourceDto {
   mimeType: string;
 }
 
+export interface PreviewFileDto {
+  role: MediaFileRole;
+  fileName: string;
+  extension: string;
+  sizeBytes: number;
+  relativePath: string;
+  existsNow: boolean;
+}
+
+export interface PreviewMetaDto {
+  displayName: string;
+  captureAt: string | null;
+  captureDate: string | null;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  totalSizeBytes: number;
+  burstGroup: string | null;
+  favorite: boolean;
+  scanState: ScanState;
+  files: PreviewFileDto[];
+  tags: string[];
+}
+
 export interface MediaPreviewDto {
   kind: MediaKind;
   sources: MediaSourceDto[];
+  meta: PreviewMetaDto;
 }
 
 export interface PreviewJobStartDto {

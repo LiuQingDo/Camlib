@@ -5,7 +5,9 @@
 //! small range-aware protocol registry so the webview never receives the
 //! complete video in an IPC response.
 
-use crate::db::{MediaFile, MediaFileRole, MediaItemDetails, MediaKind, Repository};
+use crate::db::{
+    MediaFile, MediaFileRole, MediaItemDetails, MediaKind, Repository, ScanState,
+};
 use image::{DynamicImage, ImageReader};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -47,11 +49,42 @@ pub struct MediaSourceDto {
     pub mime_type: String,
 }
 
+/// Compact file row for the preview metadata panel. Relative paths only.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewFileDto {
+    pub role: String,
+    pub file_name: String,
+    pub extension: String,
+    pub size_bytes: i64,
+    pub relative_path: String,
+    pub exists_now: bool,
+}
+
+/// Item-level facts the modal needs without a second `media_get` round-trip.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewMetaDto {
+    pub display_name: String,
+    pub capture_at: Option<String>,
+    pub capture_date: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub total_size_bytes: i64,
+    pub burst_group: Option<String>,
+    pub favorite: bool,
+    pub scan_state: String,
+    pub files: Vec<PreviewFileDto>,
+    pub tags: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaPreviewDto {
     pub kind: MediaKind,
     pub sources: Vec<MediaSourceDto>,
+    pub meta: PreviewMetaDto,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -601,6 +634,45 @@ fn find_winget_ffmpeg() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+pub fn preview_meta(details: &MediaItemDetails) -> PreviewMetaDto {
+    PreviewMetaDto {
+        display_name: details.item.display_name.clone(),
+        capture_at: details.item.capture_at.clone(),
+        capture_date: details.item.capture_date.clone(),
+        width: details.item.width,
+        height: details.item.height,
+        duration_ms: details.item.duration_ms,
+        total_size_bytes: details.item.total_size_bytes,
+        burst_group: details.item.burst_group.clone(),
+        favorite: details.favorite,
+        scan_state: match details.item.scan_state {
+            ScanState::Present => "present",
+            ScanState::Missing => "missing",
+            ScanState::Ambiguous => "ambiguous",
+            ScanState::Error => "error",
+        }
+        .to_owned(),
+        files: details
+            .files
+            .iter()
+            .map(|file| PreviewFileDto {
+                role: match file.role {
+                    MediaFileRole::LivePhoto => "live_photo",
+                    MediaFileRole::LiveVideo => "live_video",
+                    MediaFileRole::Single => "single",
+                }
+                .to_owned(),
+                file_name: file.file_name.clone(),
+                extension: file.extension.clone(),
+                size_bytes: file.size_bytes,
+                relative_path: file.relative_path.clone(),
+                exists_now: file.exists_now,
+            })
+            .collect(),
+        tags: details.tags.iter().map(|tag| tag.name.clone()).collect(),
+    }
+}
+
 pub fn preview_sources(
     details: &MediaItemDetails,
     root: &Path,
@@ -635,6 +707,7 @@ pub fn preview_sources(
     Ok(MediaPreviewDto {
         kind: details.item.kind.clone(),
         sources,
+        meta: preview_meta(details),
     })
 }
 
@@ -878,7 +951,53 @@ fn emit_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{MediaFile, MediaItem, Tag};
     use image::GenericImageView;
+
+    fn sample_item(kind: MediaKind, display_name: &str) -> MediaItem {
+        MediaItem {
+            id: "item-1".to_owned(),
+            library_id: "lib-1".to_owned(),
+            logical_key: "2026/01/IMG_0001".to_owned(),
+            kind,
+            display_name: display_name.to_owned(),
+            capture_at: Some("unix-ms:1700000000000".to_owned()),
+            capture_date: Some("2026-01-15".to_owned()),
+            width: Some(4032),
+            height: Some(3024),
+            duration_ms: Some(3200),
+            total_size_bytes: 4_500_000,
+            burst_group: None,
+            metadata_json: None,
+            scan_state: ScanState::Present,
+            first_seen_at: "unix-ms:1".to_owned(),
+            last_seen_at: "unix-ms:2".to_owned(),
+            favorite: true,
+        }
+    }
+
+    fn sample_file(role: MediaFileRole, relative: &str, extension: &str, size: i64) -> MediaFile {
+        MediaFile {
+            id: format!("file-{relative}"),
+            media_item_id: "item-1".to_owned(),
+            library_id: "lib-1".to_owned(),
+            role,
+            relative_path: relative.to_owned(),
+            file_name: Path::new(relative)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            extension: extension.to_owned(),
+            size_bytes: size,
+            modified_at: "unix-ms:3".to_owned(),
+            content_hash: None,
+            hash_algorithm: None,
+            file_identity: None,
+            exists_now: true,
+            last_scanned_at: "unix-ms:4".to_owned(),
+        }
+    }
 
     #[test]
     fn cache_key_contains_path_size_mtime_and_dimensions() {
@@ -931,5 +1050,79 @@ mod tests {
             &library, relative, &source, &target
         ));
         assert_eq!(fs::read(target).unwrap(), b"jpeg thumbnail");
+    }
+
+    #[test]
+    fn preview_sources_expose_meta_and_live_roles_from_temp_media() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        let photo_rel = "2026/01/IMG_0001.HEIC";
+        let video_rel = "2026/01/IMG_0001.MOV";
+        for relative in [photo_rel, video_rel] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"media-bytes").unwrap();
+        }
+
+        let details = MediaItemDetails {
+            item: sample_item(MediaKind::Live, "IMG_0001"),
+            files: vec![
+                sample_file(MediaFileRole::LivePhoto, photo_rel, "HEIC", 2_000_000),
+                sample_file(MediaFileRole::LiveVideo, video_rel, "MOV", 2_500_000),
+            ],
+            favorite: true,
+            tags: vec![Tag {
+                id: "tag-1".to_owned(),
+                name: "旅行".to_owned(),
+                color: None,
+                created_at: "unix-ms:5".to_owned(),
+            }],
+        };
+
+        let registry = MediaStreamRegistry::default();
+        let dto = preview_sources(&details, &root, &registry).expect("preview should succeed");
+        assert_eq!(dto.kind, MediaKind::Live);
+        assert_eq!(dto.sources.len(), 2);
+        assert_eq!(dto.sources[0].role, "photo");
+        assert_eq!(dto.sources[1].role, "video");
+        assert!(dto.sources[0].url.contains("http") || dto.sources[0].url.contains("camlib://"));
+        assert_eq!(dto.meta.display_name, "IMG_0001");
+        assert_eq!(dto.meta.width, Some(4032));
+        assert_eq!(dto.meta.height, Some(3024));
+        assert_eq!(dto.meta.duration_ms, Some(3200));
+        assert_eq!(dto.meta.total_size_bytes, 4_500_000);
+        assert_eq!(dto.meta.capture_date.as_deref(), Some("2026-01-15"));
+        assert!(dto.meta.favorite);
+        assert_eq!(dto.meta.scan_state, "present");
+        assert_eq!(dto.meta.files.len(), 2);
+        assert_eq!(dto.meta.files[0].role, "live_photo");
+        assert_eq!(dto.meta.files[1].role, "live_video");
+        assert_eq!(dto.meta.tags, vec!["旅行".to_owned()]);
+        // Metadata panel must never leak an absolute filesystem path.
+        for file in &dto.meta.files {
+            assert!(!file.relative_path.contains(':'));
+            assert!(Path::new(&file.relative_path).is_relative());
+        }
+    }
+
+    #[test]
+    fn preview_sources_fail_when_all_files_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+        let mut details = MediaItemDetails {
+            item: sample_item(MediaKind::Photo, "IMG_x"),
+            files: vec![sample_file(
+                MediaFileRole::Single,
+                "2026/01/gone.jpg",
+                "jpg",
+                10,
+            )],
+            favorite: false,
+            tags: vec![],
+        };
+        details.files[0].exists_now = false;
+        let registry = MediaStreamRegistry::default();
+        assert!(preview_sources(&details, &root, &registry).is_err());
     }
 }

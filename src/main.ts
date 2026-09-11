@@ -5,6 +5,8 @@ import {
   type MediaKind,
   type MediaQueryInput,
   type MediaPageDto,
+  type MediaPreviewDto,
+  type PreviewMetaDto,
   getMediaPreview,
   getMediaThumbnail,
   listDateFacets,
@@ -126,7 +128,6 @@ const app: HTMLElement = appRoot;
 // Keep the text being composed separate from the submitted query so typing
 // never refreshes the media grid. This also preserves unsent text on redraws.
 let searchDraft = "";
-let previewRequest = 0;
 // Bootstrap re-runs after every scan terminal event. Auto-scan must only fire
 // for the first successful launch of this session so completion cannot loop.
 let startupAutoScanStarted = false;
@@ -149,6 +150,16 @@ const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getM
 // by decoding very large textures at their native dimensions.
 const modalThumbnailWidth = 1600;
 const modalThumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
+// Neighbor preview prefetch: cache the IPC response and warm only a couple of
+// futures so rapid arrow navigation never piles up unbounded work.
+const previewAssetCache = new Map<string, Promise<MediaPreviewDto>>();
+const previewPrefetchQueue: string[] = [];
+const previewPrefetchLimit = 2;
+let activePreviewPrefetches = 0;
+let previewRequest = 0;
+// Modal UI flags that must survive partial DOM updates (not full re-renders).
+let previewInfoOpen = false;
+let livePlaying = false;
 // Bumps on every full refresh so in-flight load-more/select-all pages from a
 // previous filter cannot append into the new result set.
 let mediaQueryToken = 0;
@@ -193,6 +204,89 @@ function loadModalThumbnail(id: string): Promise<Awaited<ReturnType<typeof getMe
   modalThumbnailRequests.set(id, request);
   void request.catch(() => modalThumbnailRequests.delete(id));
   return request;
+}
+
+function requestPreview(id: string): Promise<MediaPreviewDto> {
+  const pending = previewAssetCache.get(id);
+  if (pending) return pending;
+  const request = getMediaPreview(id);
+  previewAssetCache.set(id, request);
+  void request.catch(() => previewAssetCache.delete(id));
+  return request;
+}
+
+function pumpPreviewPrefetch(): void {
+  while (activePreviewPrefetches < previewPrefetchLimit && previewPrefetchQueue.length) {
+    const id = previewPrefetchQueue.shift();
+    if (!id || previewAssetCache.has(id)) continue;
+    activePreviewPrefetches += 1;
+    const request = getMediaPreview(id);
+    previewAssetCache.set(id, request);
+    void request
+      .catch(() => previewAssetCache.delete(id))
+      .finally(() => {
+        activePreviewPrefetches -= 1;
+        pumpPreviewPrefetch();
+      });
+  }
+}
+
+function neighborIds(index: number): string[] {
+  const items = state.page.items;
+  if (!items.length || index < 0 || index >= items.length) return [];
+  const total = items.length;
+  const candidates = [index - 1, index + 1, index - 2, index + 2].map(
+    (offset) => (offset + total * 2) % total,
+  );
+  const seen = new Set<number>();
+  const ids: string[] = [];
+  for (const neighbor of candidates) {
+    if (neighbor === index || seen.has(neighbor)) continue;
+    seen.add(neighbor);
+    const id = items[neighbor]?.id;
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function prefetchPreviewNeighbors(index: number): void {
+  for (const id of neighborIds(index)) {
+    if (previewAssetCache.has(id) || previewPrefetchQueue.includes(id)) continue;
+    previewPrefetchQueue.push(id);
+    // Warm the large modal still in parallel so photo previews pop instantly.
+    void loadModalThumbnail(id).catch(() => undefined);
+  }
+  pumpPreviewPrefetch();
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}:${String(seconds).padStart(2, "0")}` : `${seconds}秒`;
+}
+
+function formatCaptureAt(value: string | null): string | null {
+  if (!value) return null;
+  if (value.startsWith("unix-ms:")) {
+    const ms = Number(value.slice("unix-ms:".length));
+    if (Number.isFinite(ms)) {
+      const date = new Date(ms);
+      if (!Number.isNaN(date.getTime())) return date.toLocaleString("zh-CN");
+    }
+  }
+  return value;
+}
+
+function formatDimensions(meta: PreviewMetaDto): string {
+  if (meta.width && meta.height) return `${meta.width} × ${meta.height}`;
+  return "尺寸未知";
+}
+
+function fileRoleLabel(role: string): string {
+  if (role === "live_photo") return "实况照片";
+  if (role === "live_video") return "实况视频";
+  return "主文件";
 }
 
 function escapeHtml(value: string): string {
@@ -501,8 +595,11 @@ function renderPreview(): string {
   const position = (state.previewIndex ?? 0) + 1;
   return `<div class="modal-backdrop" id="preview-modal"><div class="preview-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}">
     <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></header>
-    <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
-    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">使用 ← → 切换</span></div></footer>
+    <div class="modal-body">
+      <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
+      <aside class="modal-meta ${previewInfoOpen ? "" : "is-hidden"}" id="modal-meta" aria-label="媒体信息" aria-hidden="${previewInfoOpen ? "false" : "true"}"><div class="meta-placeholder">加载中…</div></aside>
+    </div>
+    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">← → 切换 · Space 播放 · F 全屏 · I 信息 · L 实况</span></div></footer>
   </div></div>`;
 }
 
@@ -683,6 +780,7 @@ function bindEvents(): void {
   app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
+  app.querySelector<HTMLButtonElement>("#preview-info-toggle")?.addEventListener("click", () => togglePreviewInfo());
 }
 
 async function openFolderForItem(mediaItemId: string): Promise<void> {
@@ -695,6 +793,43 @@ async function openFolderForItem(mediaItemId: string): Promise<void> {
   }
 }
 
+function applyThumbnailToCard(id: string, asset: Awaited<ReturnType<typeof getMediaThumbnail>>): void {
+  const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
+  const item = state.page.items.find((entry) => entry.id === id);
+  if (!target || !item) return;
+  target.classList.add("has-preview");
+  target.querySelector(".preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
+  const existing = target.querySelector("img");
+  if (existing) {
+    existing.src = asset.url;
+  } else {
+    const image = document.createElement("img");
+    image.src = asset.url;
+    image.alt = "";
+    image.decoding = "async";
+    target.prepend(image);
+  }
+  if (item.kind === "video" && !target.querySelector(".video-overlay")) {
+    const overlay = document.createElement("span");
+    overlay.className = "video-overlay";
+    overlay.textContent = "▶";
+    target.append(overlay);
+  }
+}
+
+function markThumbnailRetryable(id: string): void {
+  const target = app.querySelector<HTMLElement>(`[data-preview="${CSS.escape(id)}"]`);
+  if (!target) return;
+  delete target.dataset.loaded;
+  target.querySelector(".preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
+  if (!target.querySelector(".preview-fallback-row")) {
+    target.insertAdjacentHTML(
+      "afterbegin",
+      `<div class="preview-fallback-row"><span class="preview-fallback">预览失败</span><button class="preview-retry" type="button" data-retry-thumbnail="${escapeHtml(id)}">重试</button></div>`,
+    );
+  }
+}
+
 function observePreviews(): void {
   const cards = [...app.querySelectorAll<HTMLElement>("[data-preview]")];
   const load = (card: HTMLElement, highPriority = false) => {
@@ -702,28 +837,9 @@ function observePreviews(): void {
     card.dataset.loaded = "true";
     const id = card.dataset.preview;
     if (!id) return;
-    void loadThumbnail(id, highPriority).then((asset) => {
-      const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
-      const item = state.page.items.find((entry) => entry.id === id);
-      if (!target || !item) return;
-      target.classList.add("has-preview");
-      target.querySelector(".preview-loading, .video-placeholder")?.remove();
-      const image = document.createElement("img");
-      image.src = asset.url;
-      image.alt = "";
-      image.decoding = "async";
-      target.prepend(image);
-      if (item.kind === "video" && !target.querySelector(".video-overlay")) {
-        const overlay = document.createElement("span");
-        overlay.className = "video-overlay";
-        overlay.textContent = "▶";
-        target.append(overlay);
-      }
-    }).catch(() => {
-      const target = app.querySelector<HTMLElement>(`[data-preview="${CSS.escape(id)}"]`);
-      target?.querySelector(".preview-loading, .video-placeholder")?.remove();
-      target?.insertAdjacentHTML("afterbegin", `<span class="preview-fallback">预览不可用</span>`);
-    });
+    void loadThumbnail(id, highPriority)
+      .then((asset) => applyThumbnailToCard(id, asset))
+      .catch(() => markThumbnailRetryable(id));
   };
   // Start the actual viewport synchronously and put it ahead of work left over
   // from a previous filter/page. The observer then prefetches the next rows.
@@ -737,33 +853,200 @@ function observePreviews(): void {
   } else cards.slice(0, 24).forEach((card) => load(card));
 }
 
+function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): string {
+  if (!meta) return `<div class="meta-placeholder">元数据加载中…</div>`;
+  const rows: Array<[string, string]> = [
+    ["类型", kindLabel(item.kind)],
+    ["尺寸", formatDimensions(meta)],
+    ["大小", formatSize(meta.totalSizeBytes)],
+  ];
+  if (meta.durationMs != null && meta.durationMs > 0) rows.push(["时长", formatDuration(meta.durationMs)]);
+  const captureAt = formatCaptureAt(meta.captureAt);
+  if (captureAt) rows.push(["拍摄时间", captureAt]);
+  if (meta.captureDate) rows.push(["拍摄日期", formatDate(meta.captureDate)]);
+  rows.push(["状态", meta.scanState === "present" ? "在库" : meta.scanState === "missing" ? "离线" : meta.scanState === "ambiguous" ? "待确认" : "错误"]);
+  if (meta.burstGroup) rows.push(["连拍组", meta.burstGroup]);
+  if (meta.favorite) rows.push(["收藏", "是"]);
+  if (meta.tags.length) rows.push(["标签", meta.tags.join("、")]);
+  const files = meta.files.map((file) => `<li class="meta-file ${file.existsNow ? "" : "is-missing"}"><span class="meta-file-role">${fileRoleLabel(file.role)}</span><span class="meta-file-name" title="${escapeHtml(file.relativePath)}">${escapeHtml(file.fileName)}</span><span class="meta-file-size">${formatSize(file.sizeBytes)}</span>${file.existsNow ? "" : `<span class="meta-file-state">缺失</span>`}</li>`).join("");
+  return `<div class="meta-panel-body">
+    <h3>媒体信息</h3>
+    <dl class="meta-list">${rows.map(([label, value]) => `<div class="meta-row"><dt>${label}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join("")}</dl>
+    <h4>关联文件</h4>
+    <ul class="meta-files">${files}</ul>
+  </div>`;
+}
+
+function renderVideoStatusOverlay(): string {
+  return `<div class="video-status is-buffering" id="video-buffer" hidden><span class="spinner"></span><span>缓冲中…</span></div>
+  <div class="video-status is-error" id="video-error" hidden><strong>视频无法播放</strong><span>文件可能损坏，或当前磁盘暂时不可读</span><button type="button" class="outline-button" id="video-retry">重试</button></div>`;
+}
+
+function bindVideoElement(video: HTMLVideoElement): void {
+  const buffer = app.querySelector<HTMLElement>("#video-buffer");
+  const errorBox = app.querySelector<HTMLElement>("#video-error");
+  const hideOverlays = () => {
+    if (buffer) buffer.hidden = true;
+    if (errorBox) errorBox.hidden = true;
+  };
+  video.addEventListener("waiting", () => { if (buffer) buffer.hidden = false; });
+  video.addEventListener("playing", hideOverlays);
+  video.addEventListener("canplay", () => { if (buffer) buffer.hidden = true; });
+  video.addEventListener("error", () => {
+    if (buffer) buffer.hidden = true;
+    if (errorBox) errorBox.hidden = false;
+  });
+}
+
 async function loadModalAsset(): Promise<void> {
-  const item = state.previewIndex === null ? undefined : state.page.items[state.previewIndex];
+  const index = state.previewIndex;
+  const item = index === null ? undefined : state.page.items[index];
   if (!item) return;
   const request = ++previewRequest;
+  livePlaying = false;
+  if (index !== null) prefetchPreviewNeighbors(index);
   try {
-    const preview = await getMediaPreview(item.id);
+    const preview = await requestPreview(item.id);
     if (request !== previewRequest || state.previewIndex === null) return;
     const media = app.querySelector<HTMLElement>("#modal-media");
+    const metaPanel = app.querySelector<HTMLElement>("#modal-meta");
     if (!media) return;
+    if (metaPanel) metaPanel.innerHTML = renderMetaPanel(preview.meta, item);
     const photo = preview.sources.find((source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")));
     const video = preview.sources.find((source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")));
-    const photoPreview = photo ? await loadModalThumbnail(item.id) : undefined;
+    const photoPreview = photo ? await loadModalThumbnail(item.id).catch(() => undefined) : undefined;
     if (request !== previewRequest || state.previewIndex === null) return;
     if (item.kind === "live" && photo && video) {
-      media.innerHTML = `<div class="live-preview"><img src="${photoPreview?.url ?? photo.url}" alt="${escapeHtml(item.displayName)}" /><video src="${video.url}" controls autoplay muted loop playsinline></video></div>`;
+      media.innerHTML = `<div class="live-preview" data-live-playing="false">
+        <img class="live-still" src="${photoPreview?.url ?? photo.url}" alt="${escapeHtml(item.displayName)}" />
+        <video class="live-motion" src="${video.url}" muted loop playsinline preload="metadata" hidden></video>
+        <div class="live-controls">
+          <button type="button" class="live-toggle" id="live-toggle" aria-pressed="false">实况</button>
+          <span class="live-caption">默认显示静帧 · 点击「实况」或按 L / 长按画面播放短片</span>
+        </div>
+      </div>`;
+      const liveVideo = media.querySelector<HTMLVideoElement>("video.live-motion");
+      if (liveVideo) {
+        bindVideoElement(liveVideo);
+        liveVideo.addEventListener("ended", () => setLivePlaying(false));
+      }
     } else if (video) {
-      media.innerHTML = `<video src="${video.url}" controls autoplay playsinline></video>`;
+      media.innerHTML = `<div class="video-stage"><video src="${video.url}" controls playsinline preload="metadata"></video>${renderVideoStatusOverlay()}</div>`;
+      const el = media.querySelector<HTMLVideoElement>("video");
+      if (el) {
+        bindVideoElement(el);
+        void el.play().catch(() => undefined);
+      }
     } else if (photoPreview) {
       media.innerHTML = `<img src="${photoPreview.url}" alt="${escapeHtml(item.displayName)}" />`;
     } else {
-      media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`;
+      media.innerHTML = `<div class="preview-error"><span>当前文件不可用</span><button type="button" class="outline-button" id="preview-retry-media">重试</button></div>`;
     }
-  } catch { const media = app.querySelector<HTMLElement>("#modal-media"); if (request === previewRequest && media) media.innerHTML = `<span class="preview-fallback">当前文件不可用</span>`; }
+  } catch {
+    if (request !== previewRequest) return;
+    const media = app.querySelector<HTMLElement>("#modal-media");
+    if (media) {
+      media.innerHTML = `<div class="preview-error"><span>当前文件不可用</span><button type="button" class="outline-button" id="preview-retry-media">重试</button></div>`;
+    }
+  }
 }
 
-function closePreview(): void { state.previewIndex = null; render(); }
-function movePreview(delta: number): void { if (state.previewIndex === null || !state.page.items.length) return; state.previewIndex = (state.previewIndex + delta + state.page.items.length) % state.page.items.length; render(); void loadModalAsset(); }
+function setLivePlaying(playing: boolean): void {
+  livePlaying = playing;
+  const root = app.querySelector<HTMLElement>("#modal-media .live-preview");
+  if (!root) return;
+  const video = root.querySelector<HTMLVideoElement>("video.live-motion");
+  const still = root.querySelector<HTMLImageElement>("img.live-still");
+  const toggle = root.querySelector<HTMLButtonElement>("#live-toggle");
+  root.dataset.livePlaying = playing ? "true" : "false";
+  toggle?.setAttribute("aria-pressed", String(playing));
+  toggle?.classList.toggle("is-active", playing);
+  if (!video) return;
+  if (playing) {
+    video.hidden = false;
+    if (still) still.classList.add("is-under");
+    if (video.ended || video.currentTime === 0) video.currentTime = 0;
+    void video.play().catch(() => setLivePlaying(false));
+  } else {
+    video.pause();
+    video.hidden = true;
+    still?.classList.remove("is-under");
+  }
+}
+
+function toggleLivePreview(): void {
+  const root = app.querySelector<HTMLElement>("#modal-media .live-preview");
+  if (!root) return;
+  setLivePlaying(!livePlaying);
+}
+
+function activePreviewVideo(): HTMLVideoElement | null {
+  const live = app.querySelector<HTMLVideoElement>("#modal-media video.live-motion");
+  if (live && livePlaying) return live;
+  return app.querySelector<HTMLVideoElement>("#modal-media .video-stage video");
+}
+
+function togglePreviewPlayback(): void {
+  const video = activePreviewVideo();
+  if (video) {
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+    return;
+  }
+  // Live Photo still: Space starts the motion clip.
+  if (app.querySelector("#modal-media .live-preview")) toggleLivePreview();
+}
+
+function togglePreviewMute(): void {
+  const video = activePreviewVideo() ?? app.querySelector<HTMLVideoElement>("#modal-media video");
+  if (!video) return;
+  video.muted = !video.muted;
+}
+
+function togglePreviewFullscreen(): void {
+  const video = activePreviewVideo() ?? app.querySelector<HTMLVideoElement>("#modal-media video");
+  if (!video) return;
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => undefined);
+    return;
+  }
+  void video.requestFullscreen().catch(() => undefined);
+}
+
+function togglePreviewInfo(): void {
+  previewInfoOpen = !previewInfoOpen;
+  const panel = app.querySelector<HTMLElement>("#modal-meta");
+  const button = app.querySelector<HTMLButtonElement>("#preview-info-toggle");
+  if (panel) {
+    panel.classList.toggle("is-hidden", !previewInfoOpen);
+    panel.setAttribute("aria-hidden", previewInfoOpen ? "false" : "true");
+  }
+  button?.setAttribute("aria-pressed", String(previewInfoOpen));
+}
+
+function closePreview(): void {
+  state.previewIndex = null;
+  livePlaying = false;
+  liveHoldActive = false;
+  if (liveHoldTimer !== null) {
+    window.clearTimeout(liveHoldTimer);
+    liveHoldTimer = null;
+  }
+  render();
+}
+
+function movePreview(delta: number): void {
+  if (state.previewIndex === null || !state.page.items.length) return;
+  state.previewIndex = (state.previewIndex + delta + state.page.items.length) % state.page.items.length;
+  livePlaying = false;
+  liveHoldActive = false;
+  if (liveHoldTimer !== null) {
+    window.clearTimeout(liveHoldTimer);
+    liveHoldTimer = null;
+  }
+  render();
+  void loadModalAsset();
+}
 
 async function refreshMedia(): Promise<void> {
   if (!state.library) { render(); return; }
@@ -1010,10 +1293,119 @@ async function bootstrap(): Promise<void> {
 }
 
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.previewIndex !== null) { closePreview(); return; }
-  if (state.previewIndex !== null && (event.key === "ArrowLeft" || event.key === "ArrowUp")) { event.preventDefault(); movePreview(-1); return; }
-  if (state.previewIndex !== null && (event.key === "ArrowRight" || event.key === "ArrowDown")) { event.preventDefault(); movePreview(1); return; }
-  if (event.key === "/" && document.activeElement?.tagName !== "INPUT") { event.preventDefault(); app.querySelector<HTMLInputElement>("#search-input")?.focus(); }
+  if (state.previewIndex === null) {
+    if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
+      event.preventDefault();
+      app.querySelector<HTMLInputElement>("#search-input")?.focus();
+    }
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable === true;
+  if (typing) return;
+  if (event.key === "Escape") {
+    // Fullscreen Escape should only leave fullscreen, not close the modal.
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    closePreview();
+    return;
+  }
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); movePreview(-1); return; }
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); movePreview(1); return; }
+  if (event.key === " " || event.key === "Spacebar") {
+    const tag = target?.tagName;
+    // Let focused controls keep their native Space activation; the video
+    // element already toggles playback when it has focus.
+    if (tag === "BUTTON" || tag === "A" || tag === "INPUT" || tag === "SELECT" || tag === "VIDEO" || tag === "SUMMARY" || tag === "LABEL") {
+      return;
+    }
+    event.preventDefault();
+    togglePreviewPlayback();
+    return;
+  }
+  if (event.key === "f" || event.key === "F") { event.preventDefault(); togglePreviewFullscreen(); return; }
+  if (event.key === "i" || event.key === "I") { event.preventDefault(); togglePreviewInfo(); return; }
+  if (event.key === "l" || event.key === "L") { event.preventDefault(); toggleLivePreview(); return; }
+  if (event.key === "m" || event.key === "M") { event.preventDefault(); togglePreviewMute(); return; }
+  if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
+    event.preventDefault();
+    app.querySelector<HTMLInputElement>("#search-input")?.focus();
+  }
+});
+
+// Delegated handlers survive full re-renders and must be bound only once.
+app.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  const retry = target.closest<HTMLElement>("[data-retry-thumbnail]");
+  if (retry?.dataset.retryThumbnail) {
+    event.preventDefault();
+    event.stopPropagation();
+    const card = retry.closest<HTMLElement>("[data-preview]");
+    const id = retry.dataset.retryThumbnail;
+    if (card) {
+      card.dataset.loaded = "true";
+      card.classList.remove("has-preview");
+      card.querySelector(".preview-fallback-row, .preview-fallback, .preview-retry")?.remove();
+      if (!card.querySelector(".preview-loading")) {
+        card.insertAdjacentHTML("afterbegin", `<span class="preview-loading">加载预览</span>`);
+      }
+    }
+    void loadThumbnail(id, true)
+      .then((asset) => applyThumbnailToCard(id, asset))
+      .catch(() => markThumbnailRetryable(id));
+    return;
+  }
+  if (target.closest("#preview-retry-media")) {
+    event.preventDefault();
+    void loadModalAsset();
+    return;
+  }
+  if (target.closest("#video-retry")) {
+    event.preventDefault();
+    void loadModalAsset();
+    return;
+  }
+  if (target.closest("#live-toggle")) {
+    event.preventDefault();
+    toggleLivePreview();
+    return;
+  }
+});
+
+// Long-press (or press-and-hold) on the Live Photo still plays motion while held.
+let liveHoldTimer: number | null = null;
+let liveHoldActive = false;
+app.addEventListener("pointerdown", (event) => {
+  const still = (event.target as HTMLElement | null)?.closest?.("#modal-media .live-still");
+  if (!still || livePlaying) return;
+  liveHoldTimer = window.setTimeout(() => {
+    liveHoldTimer = null;
+    liveHoldActive = true;
+    setLivePlaying(true);
+  }, 180);
+});
+app.addEventListener("pointerup", () => {
+  if (liveHoldTimer !== null) {
+    window.clearTimeout(liveHoldTimer);
+    liveHoldTimer = null;
+  }
+  if (liveHoldActive) {
+    liveHoldActive = false;
+    setLivePlaying(false);
+  }
+});
+app.addEventListener("pointercancel", () => {
+  if (liveHoldTimer !== null) {
+    window.clearTimeout(liveHoldTimer);
+    liveHoldTimer = null;
+  }
+  if (liveHoldActive) {
+    liveHoldActive = false;
+    setLivePlaying(false);
+  }
 });
 
 void onScanProgress((progress) => {
