@@ -308,6 +308,8 @@ impl Repository {
                 },
                 first_seen_at: now.to_owned(),
                 last_seen_at: now.to_owned(),
+                // Favorites live in their own table and are never rewritten by a scan.
+                favorite: false,
             };
             transaction.execute(
                 "UPDATE media_items SET logical_key = logical_key || '#legacy-' || id
@@ -503,7 +505,8 @@ impl Repository {
             .query_row(
                 "SELECT id, library_id, logical_key, kind, display_name, capture_at,
                         capture_date, width, height, duration_ms, total_size_bytes,
-                        burst_group, metadata_json, scan_state, first_seen_at, last_seen_at
+                        burst_group, metadata_json, scan_state, first_seen_at, last_seen_at,
+                        EXISTS (SELECT 1 FROM favorites fav WHERE fav.media_item_id = media_items.id)
                  FROM media_items WHERE id = ?1",
                 [id],
                 map_media_item,
@@ -596,7 +599,8 @@ impl Repository {
             "SELECT m.id, m.library_id, m.logical_key, m.kind, m.display_name,
                     m.capture_at, m.capture_date, m.width, m.height, m.duration_ms,
                     m.total_size_bytes, m.burst_group, m.metadata_json, m.scan_state,
-                    m.first_seen_at, m.last_seen_at
+                    m.first_seen_at, m.last_seen_at,
+                    EXISTS (SELECT 1 FROM favorites fav WHERE fav.media_item_id = m.id)
              FROM media_items m WHERE {where_clause}
              ORDER BY {order} LIMIT ?{} OFFSET ?{}",
             values.len() + 1,
@@ -1325,6 +1329,9 @@ pub struct MediaItem {
     pub scan_state: ScanState,
     pub first_seen_at: String,
     pub last_seen_at: String,
+    /// Projected from `favorites` so list queries need no N+1 follow-up.
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 pub type NewMediaItem = MediaItem;
@@ -1744,6 +1751,7 @@ fn map_media_item(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
         scan_state: parse_scan_state(row.get::<_, String>(13)?)?,
         first_seen_at: row.get(14)?,
         last_seen_at: row.get(15)?,
+        favorite: row.get::<_, i64>(16)? != 0,
     })
 }
 fn map_media_file(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
@@ -1903,6 +1911,7 @@ mod tests {
             scan_state: ScanState::Present,
             first_seen_at: "2026-01-01T00:00:00Z".into(),
             last_seen_at: "2026-01-01T00:00:00Z".into(),
+            favorite: false,
         }
     }
     fn file(id: &str, item_id: &str, role: MediaFileRole, path: &str) -> NewMediaFile {
@@ -2036,6 +2045,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(page.total, 1);
+        assert!(page.items[0].favorite);
+        let all = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(all.items.iter().all(|media| media.favorite));
         let searched = repository
             .query_media(MediaQuery {
                 library_id: "library-1".into(),

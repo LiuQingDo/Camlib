@@ -60,6 +60,29 @@ fn set_backup_conflict_policy(
     state.with_infrastructure(|infrastructure| infrastructure.set_backup_conflict_policy(policy))
 }
 
+/// Persist grid density and sort so the next launch restores the same feel.
+#[tauri::command]
+fn set_ui_prefs(
+    ui_density: Option<u8>,
+    ui_sort: Option<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    let sort = match ui_sort.as_deref() {
+        Some(value) => Some(infrastructure::UiSort::parse(value).map_err(|error| error.to_string())?),
+        None => None,
+    };
+    state.with_infrastructure(|infrastructure| infrastructure.set_ui_prefs(ui_density, sort))
+}
+
+/// Toggle the startup incremental scan. Default is enabled.
+#[tauri::command]
+fn set_auto_scan_on_startup(
+    enabled: bool,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    state.with_infrastructure(|infrastructure| infrastructure.set_auto_scan_on_startup(enabled))
+}
+
 /// Re-check the library root and its recorded volume identity.
 #[tauri::command]
 fn get_library_status(state: State<'_, InfrastructureState>) -> Result<LibraryStatus, String> {
@@ -526,6 +549,7 @@ pub fn run() {
     let protocol_streams = streams.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             let app_cache_dir = app.path().app_cache_dir()?;
@@ -555,6 +579,8 @@ pub fn run() {
             set_library_root,
             set_thumbnail_cache_dir,
             set_backup_conflict_policy,
+            set_ui_prefs,
+            set_auto_scan_on_startup,
             get_library_status,
             get_infrastructure_state,
             library_list,

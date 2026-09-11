@@ -6,11 +6,16 @@ export interface VolumeInfo {
   volume_id: string | null;
 }
 
+export type UiSortMode = "newest" | "oldest" | "name";
+
 export interface AppSettings {
   library_root: string | null;
   thumbnail_cache_dir: string;
   library_volume: VolumeInfo | null;
   backup_conflict_policy: "skip_same" | "rename" | "overwrite";
+  ui_density: number;
+  ui_sort: UiSortMode;
+  auto_scan_on_startup: boolean;
 }
 
 export type LibraryAvailability =
@@ -45,6 +50,17 @@ export function setThumbnailCacheDir(path: string): Promise<AppSettings> {
 
 export function setBackupConflictPolicy(policy: AppSettings["backup_conflict_policy"]): Promise<AppSettings> {
   return invoke<AppSettings>("set_backup_conflict_policy", { policy });
+}
+
+export function setUiPrefs(input: { uiDensity?: number; uiSort?: UiSortMode }): Promise<AppSettings> {
+  return invoke<AppSettings>("set_ui_prefs", {
+    uiDensity: input.uiDensity,
+    uiSort: input.uiSort,
+  });
+}
+
+export function setAutoScanOnStartup(enabled: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("set_auto_scan_on_startup", { enabled });
 }
 
 export function getLibraryStatus(): Promise<LibraryStatus> {

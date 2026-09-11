@@ -22,11 +22,63 @@ pub struct VolumeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UiSort {
+    Newest,
+    Oldest,
+    Name,
+}
+
+impl Default for UiSort {
+    fn default() -> Self {
+        Self::Newest
+    }
+}
+
+impl UiSort {
+    #[allow(dead_code)]
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+            Self::Name => "name",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, InfrastructureError> {
+        match value {
+            "newest" => Ok(Self::Newest),
+            "oldest" => Ok(Self::Oldest),
+            "name" => Ok(Self::Name),
+            other => Err(InfrastructureError::InvalidSettings(format!(
+                "排序方式无效: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub library_root: Option<String>,
     pub thumbnail_cache_dir: String,
     pub library_volume: Option<VolumeInfo>,
     pub backup_conflict_policy: ConflictPolicy,
+    /// Thumbnail density, 1 (small) ..= 5 (large).
+    #[serde(default = "default_ui_density")]
+    pub ui_density: u8,
+    #[serde(default)]
+    pub ui_sort: UiSort,
+    /// Automatically start an incremental scan when the library is available.
+    #[serde(default = "default_true")]
+    pub auto_scan_on_startup: bool,
+}
+
+fn default_ui_density() -> u8 {
+    3
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,6 +276,35 @@ impl Infrastructure {
         self.settings()
     }
 
+    pub fn set_ui_prefs(
+        &mut self,
+        ui_density: Option<u8>,
+        ui_sort: Option<UiSort>,
+    ) -> Result<AppSettings, InfrastructureError> {
+        if let Some(density) = ui_density {
+            if !(1..=5).contains(&density) {
+                return Err(InfrastructureError::InvalidSettings(
+                    "缩略图密度必须在 1 到 5 之间".to_owned(),
+                ));
+            }
+            self.store.settings.ui_density = density;
+        }
+        if let Some(sort) = ui_sort {
+            self.store.settings.ui_sort = sort;
+        }
+        self.store.save()?;
+        self.settings()
+    }
+
+    pub fn set_auto_scan_on_startup(
+        &mut self,
+        enabled: bool,
+    ) -> Result<AppSettings, InfrastructureError> {
+        self.store.settings.auto_scan_on_startup = enabled;
+        self.store.save()?;
+        self.settings()
+    }
+
     pub fn library_status(&mut self) -> Result<LibraryStatus, InfrastructureError> {
         let Some(root_text) = self.store.settings.library_root.clone() else {
             return Ok(LibraryStatus {
@@ -335,6 +416,9 @@ impl SettingsStore {
                 )?),
                 library_volume: None,
                 backup_conflict_policy: ConflictPolicy::SkipSame,
+                ui_density: default_ui_density(),
+                ui_sort: UiSort::default(),
+                auto_scan_on_startup: true,
             }
         };
 
@@ -375,6 +459,12 @@ struct DiskSettings {
     library_volume: Option<VolumeInfo>,
     #[serde(default)]
     backup_conflict_policy: Option<ConflictPolicy>,
+    #[serde(default = "default_ui_density")]
+    ui_density: u8,
+    #[serde(default)]
+    ui_sort: Option<UiSort>,
+    #[serde(default = "default_true")]
+    auto_scan_on_startup: bool,
 }
 
 impl DiskSettings {
@@ -394,6 +484,11 @@ impl DiskSettings {
                 ));
             }
         }
+        if !(1..=5).contains(&self.ui_density) {
+            return Err(InfrastructureError::InvalidSettings(
+                "缩略图密度必须在 1 到 5 之间".to_owned(),
+            ));
+        }
         Ok(AppSettings {
             library_root: self.library_root,
             thumbnail_cache_dir: self.thumbnail_cache_dir,
@@ -401,6 +496,9 @@ impl DiskSettings {
             backup_conflict_policy: self
                 .backup_conflict_policy
                 .unwrap_or(ConflictPolicy::SkipSame),
+            ui_density: self.ui_density,
+            ui_sort: self.ui_sort.unwrap_or_default(),
+            auto_scan_on_startup: self.auto_scan_on_startup,
         })
     }
 }
@@ -413,6 +511,9 @@ impl From<&AppSettings> for DiskSettings {
             thumbnail_cache_dir: settings.thumbnail_cache_dir.clone(),
             library_volume: settings.library_volume.clone(),
             backup_conflict_policy: Some(settings.backup_conflict_policy.clone()),
+            ui_density: settings.ui_density,
+            ui_sort: Some(settings.ui_sort.clone()),
+            auto_scan_on_startup: settings.auto_scan_on_startup,
         }
     }
 }
@@ -825,6 +926,9 @@ mod tests {
             thumbnail_cache_dir: path_to_string(&cache_path),
             library_volume: None,
             backup_conflict_policy: None,
+            ui_density: default_ui_density(),
+            ui_sort: None,
+            auto_scan_on_startup: true,
         };
         fs::write(
             &settings_path,
@@ -867,5 +971,39 @@ mod tests {
                 .as_ref()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn ui_prefs_and_auto_scan_survive_reload() {
+        let (temp_dir, mut infrastructure) = test_infrastructure();
+        let defaults = infrastructure.settings().unwrap();
+        assert_eq!(defaults.ui_density, 3);
+        assert_eq!(defaults.ui_sort, UiSort::Newest);
+        assert!(defaults.auto_scan_on_startup);
+
+        let updated = infrastructure
+            .set_ui_prefs(Some(5), Some(UiSort::Name))
+            .expect("set ui prefs");
+        assert_eq!(updated.ui_density, 5);
+        assert_eq!(updated.ui_sort, UiSort::Name);
+        let updated = infrastructure
+            .set_auto_scan_on_startup(false)
+            .expect("disable auto scan");
+        assert!(!updated.auto_scan_on_startup);
+
+        let settings_path = temp_dir.path().join("app-data").join("settings.json");
+        let reloaded = Infrastructure::open(settings_path, temp_dir.path().join("other-cache"))
+            .expect("reload infrastructure");
+        let settings = reloaded.settings().unwrap();
+        assert_eq!(settings.ui_density, 5);
+        assert_eq!(settings.ui_sort, UiSort::Name);
+        assert!(!settings.auto_scan_on_startup);
+    }
+
+    #[test]
+    fn rejects_invalid_ui_density() {
+        let (_temp_dir, mut infrastructure) = test_infrastructure();
+        assert!(infrastructure.set_ui_prefs(Some(0), None).is_err());
+        assert!(infrastructure.set_ui_prefs(Some(6), None).is_err());
     }
 }

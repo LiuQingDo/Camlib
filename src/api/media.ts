@@ -39,6 +39,7 @@ export interface MediaItemDto {
   scanState: ScanState;
   firstSeenAt: string;
   lastSeenAt: string;
+  favorite: boolean;
 }
 
 export interface MediaFileDto {

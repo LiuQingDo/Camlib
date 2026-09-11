@@ -5,7 +5,6 @@ import {
   type MediaKind,
   type MediaPageDto,
   getMediaPreview,
-  getMediaItem,
   getMediaThumbnail,
   listDateFacets,
   listLibraries,
@@ -26,10 +25,19 @@ import {
   type BackupProgressDto,
   type ConflictPolicy,
 } from "./api/media";
-import { getInfrastructureState, setBackupConflictPolicy, setLibraryRoot, type LibraryAvailability } from "./api/infrastructure";
+import {
+  getInfrastructureState,
+  setAutoScanOnStartup,
+  setBackupConflictPolicy,
+  setLibraryRoot,
+  setUiPrefs,
+  type LibraryAvailability,
+  type UiSortMode,
+} from "./api/infrastructure";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import type { ScanProgressDto } from "./api/media";
 
-type SortMode = "newest" | "oldest" | "name";
+type SortMode = UiSortMode;
 type Density = 1 | 2 | 3 | 4 | 5;
 
 interface AppState {
@@ -62,6 +70,7 @@ interface AppState {
   backupProgress: BackupProgressDto | null;
   backupJobId: string | null;
   libraryFormOpen: boolean;
+  autoScanOnStartup: boolean;
 }
 
 const state: AppState = {
@@ -94,6 +103,7 @@ const state: AppState = {
   backupProgress: null,
   backupJobId: null,
   libraryFormOpen: false,
+  autoScanOnStartup: true,
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -103,6 +113,9 @@ const app: HTMLElement = appRoot;
 // never refreshes the media grid. This also preserves unsent text on redraws.
 let searchDraft = "";
 let previewRequest = 0;
+// Bootstrap re-runs after every scan terminal event. Auto-scan must only fire
+// for the first successful launch of this session so completion cannot loop.
+let startupAutoScanStarted = false;
 // Image decoding is intentionally serialized in the backend to cap memory, but
 // cache hits are cheap. A wider queue makes warm-cache grids populate in one
 // short burst while the visible-first ordering protects cold-cache latency.
@@ -258,6 +271,8 @@ function renderDateNavigation(): string {
 function renderCard(item: MediaItemDto, index: number): string {
   const isVideo = item.kind === "video";
   const selected = state.selectedIds.has(item.id);
+  // `state.favorites` is seeded from the list query's `favorite` projection and
+  // updated optimistically on toggle — no per-card detail fetch.
   const favorite = state.favorites.has(item.id);
   const favoritePending = state.favoritePendingIds.has(item.id);
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
@@ -344,7 +359,7 @@ function renderSelectionToolbar(): string {
 
 function renderLibraryEmpty(): string {
   if (state.loading) return `<div class="empty-state"><span class="empty-icon spinner large"></span><h2>正在读取媒体库</h2><p>正在从 Tauri 后端加载索引。</p></div>`;
-  if (state.availability === "unconfigured") return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>输入一个本地媒体目录，Camlib 会建立可搜索的索引。</p><form id="library-form" class="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="primary-button" type="submit">连接媒体库</button></form></div>`;
+  if (state.availability === "unconfigured") return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会建立可搜索的索引。</p><div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div></div>`;
   if (!state.library) return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
   if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${state.search || state.kind || state.datePrefix || state.favoriteOnly ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
   return "";
@@ -352,7 +367,7 @@ function renderLibraryEmpty(): string {
 
 function renderLibrarySwitcher(): string {
   if (!state.libraryFormOpen || !state.library) return "";
-  return `<form id="library-form" class="library-form library-change-form"><label for="library-path">媒体库目录</label><input id="library-path" required value="${escapeHtml(state.rootPath ?? state.library.rootPath)}" placeholder="例如：D:\\照片" aria-label="媒体库路径" /><div class="library-form-actions"><button class="text-button" id="library-cancel-button" type="button">取消</button><button class="primary-button" type="submit">确认更换</button></div></form>`;
+  return `<div class="library-form library-change-form"><div class="library-form-actions"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><button class="text-button" id="library-cancel-button" type="button">取消</button></div><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required value="${escapeHtml(state.rootPath ?? state.library.rootPath)}" placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">确认更换</button></form></details></div>`;
 }
 
 function render(): void {
@@ -362,7 +377,7 @@ function render(): void {
     <div class="brand"><span class="brand-mark">C</span><div><strong>Camlib</strong><span>媒体库</span></div></div>
     <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
-    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
+    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${state.datePrefix ? `筛选 · ${formatDate(state.datePrefix)}` : "媒体总览"}</div><h1>${state.datePrefix ? formatDate(state.datePrefix) : "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span></div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${renderStatusBanner()}<div class="toolbar"><div class="filter-row">${renderKindFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}
@@ -395,14 +410,45 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => { state.favoriteOnly = !state.favoriteOnly; void refreshMedia(); });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
+  searchInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    state.search = searchDraft.trim();
+    void refreshMedia();
+  });
   app.querySelector<HTMLButtonElement>("#search-button")?.addEventListener("click", () => {
     state.search = searchDraft.trim();
     void refreshMedia();
   });
-  app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => { state.sort = (event.target as HTMLSelectElement).value as SortMode; void refreshMedia(); });
-  app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => { state.density = Number((event.target as HTMLInputElement).value) as Density; render(); });
+  app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => {
+    state.sort = (event.target as HTMLSelectElement).value as SortMode;
+    void persistUiPrefs({ uiSort: state.sort });
+    void refreshMedia();
+  });
+  // Keep density live while dragging; persist only on release so the settings
+  // file is not rewritten on every slider tick.
+  app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => {
+    state.density = Number((event.target as HTMLInputElement).value) as Density;
+    app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
+  });
+  app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("change", (event) => {
+    state.density = Number((event.target as HTMLInputElement).value) as Density;
+    void persistUiPrefs({ uiDensity: state.density });
+  });
   app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#scan-top-button")?.addEventListener("click", () => void scanLibrary());
+  app.querySelector<HTMLInputElement>("#auto-scan-toggle")?.addEventListener("change", (event) => {
+    const enabled = (event.target as HTMLInputElement).checked;
+    void (async () => {
+      try {
+        const settings = await setAutoScanOnStartup(enabled);
+        state.autoScanOnStartup = settings.auto_scan_on_startup;
+      } catch (error) {
+        state.error = error instanceof Error ? error.message : "保存启动扫描设置失败";
+        render();
+      }
+    })();
+  });
   app.querySelector<HTMLButtonElement>("#scan-cancel-button")?.addEventListener("click", () => void cancelCurrentScan());
   app.querySelector<HTMLButtonElement>("#backup-open-button")?.addEventListener("click", () => void openBackupPanel());
   app.querySelector<HTMLButtonElement>("#close-backup")?.addEventListener("click", () => { state.backupOpen = false; render(); });
@@ -411,7 +457,8 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#backup-start-button")?.addEventListener("click", () => void startConfirmedBackup());
   app.querySelector<HTMLButtonElement>("#backup-cancel-button")?.addEventListener("click", () => void cancelCurrentBackup());
   app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
-  app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); app.querySelector<HTMLInputElement>("#library-path")?.focus(); });
+  app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); });
+  app.querySelector<HTMLButtonElement>("#choose-folder-button")?.addEventListener("click", () => void chooseLibraryFolder());
   app.querySelector<HTMLButtonElement>("#library-cancel-button")?.addEventListener("click", () => { state.libraryFormOpen = false; render(); });
   app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
@@ -505,14 +552,23 @@ function movePreview(delta: number): void { if (state.previewIndex === null || !
 async function refreshMedia(): Promise<void> {
   if (!state.library) { render(); return; }
   state.loading = true; state.error = null; render();
-  try { state.page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, limit: 120, sort: state.sort }); state.selectedIds.clear(); const favoriteEntries = await Promise.all(state.page.items.map(async (item) => [item.id, (await getMediaItem(item.id)).favorite] as const)); state.favorites = new Set(favoriteEntries.filter(([, favorite]) => favorite).map(([id]) => id)); }
+  try {
+    state.page = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, limit: 120, sort: state.sort });
+    state.selectedIds.clear();
+    state.favorites = new Set(state.page.items.filter((item) => item.favorite).map((item) => item.id));
+  }
   catch (error) { state.error = error instanceof Error ? error.message : "读取媒体索引失败"; }
   finally { state.loading = false; render(); }
 }
 
 async function loadMore(): Promise<void> {
   if (!state.library || state.page.items.length >= state.page.total) return;
-  try { const next = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset: state.page.items.length, limit: 120, sort: state.sort }); state.page.items.push(...next.items); const favoriteEntries = await Promise.all(next.items.map(async (item) => [item.id, (await getMediaItem(item.id)).favorite] as const)); favoriteEntries.filter(([, favorite]) => favorite).forEach(([id]) => state.favorites.add(id)); render(); }
+  try {
+    const next = await queryMedia({ libraryId: state.library.id, kind: state.kind, favoriteOnly: state.favoriteOnly, search: state.search, datePrefix: state.datePrefix, offset: state.page.items.length, limit: 120, sort: state.sort });
+    state.page.items.push(...next.items);
+    next.items.forEach((item) => { if (item.favorite) state.favorites.add(item.id); });
+    render();
+  }
   catch (error) { state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render(); }
 }
 
@@ -551,8 +607,53 @@ async function deleteSelected(): Promise<void> {
 
 async function connectLibrary(path: string): Promise<void> {
   state.loading = true; state.error = null; render();
-  try { await setLibraryRoot(path); state.libraryFormOpen = false; await bootstrap(); }
+  try {
+    await setLibraryRoot(path);
+    state.libraryFormOpen = false;
+    // A newly registered root should get one automatic incremental scan.
+    startupAutoScanStarted = false;
+    await bootstrap();
+  }
   catch (error) { state.error = error instanceof Error ? error.message : "连接媒体库失败"; state.loading = false; render(); }
+}
+
+async function chooseLibraryFolder(): Promise<void> {
+  try {
+    const selected = await openFileDialog({
+      directory: true,
+      multiple: false,
+      title: "选择媒体库文件夹",
+    });
+    if (typeof selected === "string" && selected.trim()) {
+      await connectLibrary(selected);
+    }
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "打开文件夹选择器失败";
+    render();
+  }
+}
+
+async function persistUiPrefs(input: { uiDensity?: number; uiSort?: SortMode }): Promise<void> {
+  try {
+    const settings = await setUiPrefs(input);
+    state.density = clampDensity(settings.ui_density);
+    state.sort = settings.ui_sort;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "保存界面偏好失败";
+  }
+}
+
+async function maybeAutoScan(): Promise<void> {
+  if (startupAutoScanStarted) return;
+  if (!state.library || state.availability !== "available") return;
+  if (!state.autoScanOnStartup || state.scanning) return;
+  startupAutoScanStarted = true;
+  await scanLibrary();
+}
+
+function clampDensity(value: number): Density {
+  const clamped = Math.min(5, Math.max(1, Math.round(value || 3)));
+  return clamped as Density;
 }
 
 async function openBackupPanel(): Promise<void> {
@@ -652,8 +753,15 @@ async function bootstrap(): Promise<void> {
   try {
     const [infra, libraries] = await Promise.all([getInfrastructureState(), listLibraries()]);
     state.backupConflictPolicy = infra.settings.backup_conflict_policy;
+    state.density = clampDensity(infra.settings.ui_density);
+    state.sort = infra.settings.ui_sort;
+    state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
     state.libraries = libraries; state.availability = infra.library_status.availability; state.rootPath = infra.library_status.root_path; state.library = libraries.find((library) => library.rootPath === infra.library_status.root_path) ?? libraries[0] ?? null;
-    if (state.library && state.availability === "available") { state.facets = await listDateFacets(state.library.id); await refreshMedia(); }
+    if (state.library && state.availability === "available") {
+      state.facets = await listDateFacets(state.library.id);
+      await refreshMedia();
+      void maybeAutoScan();
+    }
     else { state.page = { items: [], total: 0, offset: 0, limit: 120 }; state.facets = []; state.loading = false; render(); }
   } catch (error) { state.loading = false; state.error = error instanceof Error ? error.message : "初始化媒体库失败"; render(); }
 }
