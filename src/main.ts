@@ -27,11 +27,16 @@ import {
   startBackup,
   cancelBackup,
   onBackupProgress,
+  retryFailedBackup,
+  listBackupHistory,
+  listBackupRunItems,
   startLibraryScan,
   cancelLibraryScan,
   type BackupPreviewDto,
   type BackupVolumeDto,
   type BackupProgressDto,
+  type BackupRunDto,
+  type BackupItemDto,
   type ConflictPolicy,
 } from "./api/media";
 import {
@@ -91,6 +96,16 @@ interface AppState {
   backupConflictPolicy: ConflictPolicy;
   backupProgress: BackupProgressDto | null;
   backupJobId: string | null;
+  backupSourceId: string | null;
+  backupTargetId: string | null;
+  backupIgnoreExtensions: string;
+  backupHistory: BackupRunDto[];
+  backupFailedItems: BackupItemDto[];
+  backupHistoryItems: BackupItemDto[];
+  backupExpandedRunId: string | null;
+  backupLastRunId: string | null;
+  backupRetrying: boolean;
+  firstSeenFrom: string | null;
   libraryFormOpen: boolean;
   autoScanOnStartup: boolean;
 }
@@ -135,6 +150,16 @@ const state: AppState = {
   backupConflictPolicy: "skip_same",
   backupProgress: null,
   backupJobId: null,
+  backupSourceId: null,
+  backupTargetId: null,
+  backupIgnoreExtensions: ".dng, .lrv",
+  backupHistory: [],
+  backupFailedItems: [],
+  backupHistoryItems: [],
+  backupExpandedRunId: null,
+  backupLastRunId: null,
+  backupRetrying: false,
+  firstSeenFrom: null,
   libraryFormOpen: false,
   autoScanOnStartup: true,
 };
@@ -317,7 +342,40 @@ function formatDate(date: string | null): string {
 }
 
 function formatCount(value: number): string { return new Intl.NumberFormat("zh-CN").format(value); }
-function formatSize(bytes: number): string { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
+function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "未知";
+  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 ** 4) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
+}
+function formatSpeed(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return "估算中";
+  return `${formatSize(bytesPerSec)}/秒`;
+}
+function formatEtaSeconds(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "估算中";
+  if (seconds < 60) return `约 ${Math.ceil(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  if (minutes < 60) return `约 ${minutes} 分 ${rest} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `约 ${hours} 小时 ${minutes % 60} 分`;
+}
+function conflictPolicyLabel(policy: ConflictPolicy): string {
+  return policy === "rename" ? "自动重命名" : policy === "overwrite" ? "覆盖目标" : "跳过冲突";
+}
+function backupStatusLabel(status: BackupRunDto["status"]): string {
+  if (status === "completed") return "成功";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "running") return "进行中";
+  return "预览";
+}
+function willCopyCount(preview: BackupPreviewDto): number {
+  return preview.readyFiles + (preview.conflictPolicy === "skip_same" ? 0 : preview.conflictFiles);
+}
 function kindLabel(kind: MediaKind): string { return kind === "photo" ? "照片" : kind === "video" ? "视频" : "实况"; }
 function selectedPrefix(prefix: string | undefined, value: string): string { return prefix === value ? "is-selected" : ""; }
 function facetTotal(): number { return state.facets.reduce((total, facet) => total + facet.count, 0); }
@@ -327,7 +385,7 @@ function hasDateFilter(): boolean {
 }
 
 function hasAnyFilter(): boolean {
-  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly);
+  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom);
 }
 
 function formatRangeLabel(): string {
@@ -338,6 +396,7 @@ function formatRangeLabel(): string {
 }
 
 function primaryDateLabel(): string {
+  if (state.firstSeenFrom) return "新导入";
   if (state.datePrefix) return formatDate(state.datePrefix);
   if (state.dateFrom || state.dateTo) return formatRangeLabel();
   return "";
@@ -345,7 +404,7 @@ function primaryDateLabel(): string {
 
 function currentQueryFields(): Pick<
   MediaQueryInput,
-  "libraryId" | "kind" | "favoriteOnly" | "burstOnly" | "search" | "datePrefix" | "dateFrom" | "dateTo" | "sort"
+  "libraryId" | "kind" | "favoriteOnly" | "burstOnly" | "search" | "datePrefix" | "dateFrom" | "dateTo" | "firstSeenFrom" | "sort"
 > {
   if (!state.library) throw new Error("媒体库未就绪");
   return {
@@ -357,6 +416,7 @@ function currentQueryFields(): Pick<
     datePrefix: state.datePrefix,
     dateFrom: state.dateFrom,
     dateTo: state.dateTo,
+    firstSeenFrom: state.firstSeenFrom ?? undefined,
     sort: state.sort,
   };
 }
@@ -684,8 +744,152 @@ function renderBackupPanel(): string {
   if (!state.backupOpen) return "";
   const preview = state.backupPreview;
   const progress = state.backupProgress;
-  const progressPercent = progress && progress.bytesTotal > 0 ? Math.round(progress.bytesProcessed / progress.bytesTotal * 100) : 0;
-  return `<section class="backup-panel" aria-label="相机备份预览"><div class="backup-heading"><div><strong>相机备份</strong><span>确认预览后才复制；相机源盘始终只读</span></div><button class="icon-button" id="close-backup" type="button" aria-label="关闭备份预览">×</button></div><div class="backup-form"><label><span>源相机盘</span><select id="backup-source" ${state.backupLoading || state.backupJobId ? "disabled" : ""}>${state.backupSources.length ? state.backupSources.map((source) => `<option value="${escapeHtml(source.id)}">${escapeHtml(source.volumeLabel || source.rootPath)} · ${escapeHtml(source.rootPath)}</option>`).join("") : "<option>未发现包含 DCIM 的可移动盘</option>"}</select></label><label><span>目标媒体库</span><select id="backup-target" ${state.backupJobId ? "disabled" : ""}>${state.libraries.map((library) => `<option value="${escapeHtml(library.id)}" ${library.id === state.library?.id ? "selected" : ""}>${escapeHtml(library.volumeLabel || library.rootPath)}</option>`).join("")}</select></label><label><span>冲突策略（设置）</span><select id="backup-conflict" ${state.backupLoading || state.backupJobId ? "disabled" : ""}><option value="skip_same" ${state.backupConflictPolicy === "skip_same" ? "selected" : ""}>跳过冲突</option><option value="rename" ${state.backupConflictPolicy === "rename" ? "selected" : ""}>自动重命名</option><option value="overwrite" ${state.backupConflictPolicy === "overwrite" ? "selected" : ""}>覆盖目标</option></select></label><label><span>忽略扩展名</span><input id="backup-ignore" value=".dng, .lrv" aria-label="忽略扩展名" ${state.backupJobId ? "disabled" : ""} /></label><button class="primary-button" id="backup-preview-button" type="button" ${state.backupLoading || state.backupJobId || !state.backupSources.length || !state.libraries.length ? "disabled" : ""}>${state.backupLoading ? "处理中…" : "生成预览"}</button></div>${preview ? `<div class="backup-summary"><span>素材 ${formatCount(preview.totalFiles)}</span><span>总大小 ${formatSize(preview.totalBytes)}</span><span>可导入 ${formatCount(preview.readyFiles)}</span><span>已存在 ${formatCount(preview.alreadyExistsFiles)}</span><span>冲突 ${formatCount(preview.conflictFiles)}</span><span>忽略 ${formatCount(preview.ignoredFiles)}</span><span class="${preview.spaceSufficient === false ? "is-danger" : ""}">空间 ${preview.freeBytes === null ? "不可用" : preview.spaceSufficient ? "充足" : "不足"}</span></div><div class="backup-note">${preview.spaceSufficient === false ? "目标盘剩余空间不足，预览已记录但不会执行复制。" : `预览记录 ${escapeHtml(preview.backupRunId)}；请确认后开始复制。`}</div><div class="backup-actions"><button class="primary-button" id="backup-start-button" type="button" ${state.backupJobId || state.backupLoading || preview.spaceSufficient === false ? "disabled" : ""}>确认预览并开始备份</button></div>` : ""}${progress ? `<div class="scan-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span>备份${progress.state === "completed" ? "完成" : progress.state === "cancelled" ? "已取消" : progress.state === "failed" ? "失败" : "中"}</span><strong>${progressPercent}%</strong></div><div class="progress-track"><span style="width:${progressPercent}%"></span></div><div class="scan-current">${escapeHtml(progress.currentFile || "准备中")} · ${progress.speedBytesPerSec} B/秒${progress.etaSeconds === null ? "" : ` · 剩余约 ${progress.etaSeconds} 秒`}</div>${progress.state === "running" ? `<button class="text-button" id="backup-cancel-button" type="button">取消备份</button>` : ""}${progress.error ? `<div class="backup-note is-danger">${escapeHtml(progress.error)}</div>` : ""}</div>` : ""}</section>`;
+  const running = Boolean(state.backupJobId) || progress?.state === "running";
+  // Keep step 3 visible while running or after a terminal event so the result
+  // card and retry actions stay next to the progress they describe.
+  const activeStep = running || (progress && progress.state !== "running") ? 3 : preview ? 2 : 1;
+  const progressPercent = progress && progress.bytesTotal > 0
+    ? Math.min(100, Math.max(0, Math.round(progress.bytesProcessed / progress.bytesTotal * 100)))
+    : 0;
+  const stepChip = (index: number, label: string): string =>
+    `<span class="backup-step${activeStep === index ? " is-active" : activeStep > index ? " is-done" : ""}">${index}. ${label}</span>`;
+
+  const sourceOptions = state.backupSources.length
+    ? state.backupSources.map((source) => {
+        const selected = (state.backupSourceId ?? state.backupSources[0]?.id) === source.id;
+        return `<option value="${escapeHtml(source.id)}" ${selected ? "selected" : ""}>${escapeHtml(source.volumeLabel || source.rootPath)} · ${escapeHtml(source.rootPath)}</option>`;
+      }).join("")
+    : "<option value=\"\">未发现包含 DCIM 的可移动盘</option>";
+  const targetOptions = state.libraries.map((library) => {
+    const selected = (state.backupTargetId ?? state.library?.id ?? state.libraries[0]?.id) === library.id;
+    return `<option value="${escapeHtml(library.id)}" ${selected ? "selected" : ""}>${escapeHtml(library.volumeLabel || library.rootPath)}</option>`;
+  }).join("");
+
+  const formDisabled = running || state.backupLoading;
+  const canPreview = !formDisabled && state.backupSources.length > 0 && state.libraries.length > 0;
+
+  let previewBlock = "";
+  if (preview) {
+    const willCopy = willCopyCount(preview);
+    const spaceOk = preview.spaceSufficient !== false;
+    const conflictNote = preview.conflictFiles > 0
+      ? preview.conflictPolicy === "skip_same"
+        ? `${formatCount(preview.conflictFiles)} 个同名冲突文件将按「跳过冲突」忽略`
+        : preview.conflictPolicy === "rename"
+          ? `${formatCount(preview.conflictFiles)} 个同名冲突文件将自动重命名后复制`
+          : `${formatCount(preview.conflictFiles)} 个同名冲突文件将覆盖目标中的旧文件`
+      : "无同名冲突";
+    previewBlock = `
+      <div class="backup-step-block">
+        <div class="backup-step-title">第 2 步 · 确认摘要</div>
+        <div class="backup-summary">
+          <span>将复制 <strong>${formatCount(willCopy)}</strong> 个文件</span>
+          <span>所需空间 <strong>${formatSize(preview.requiredBytes)}</strong></span>
+          <span class="${spaceOk ? "" : "is-danger"}">目标剩余 <strong>${preview.freeBytes === null ? "不可用" : formatSize(preview.freeBytes)}</strong></span>
+          <span>已存在跳过 ${formatCount(preview.alreadyExistsFiles)}</span>
+          <span>冲突 ${formatCount(preview.conflictFiles)}</span>
+          <span>忽略 ${formatCount(preview.ignoredFiles)}</span>
+          <span>素材总量 ${formatCount(preview.totalFiles)} · ${formatSize(preview.totalBytes)}</span>
+        </div>
+        <div class="backup-note${spaceOk ? "" : " is-danger"}">${!spaceOk
+          ? `目标盘空间不足：还需约 ${formatSize(Math.max(0, preview.requiredBytes - (preview.freeBytes ?? 0)))}。请更换目标盘或释放空间后再开始；预览已保存但不会执行复制。`
+          : `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。相机源盘始终只读，复制完成后会自动扫描入库。`}</div>
+        <div class="backup-actions">
+          <button class="primary-button" id="backup-start-button" type="button" ${running || state.backupLoading || !spaceOk || willCopy === 0 ? "disabled" : ""}>${willCopy === 0 ? "没有需要复制的文件" : spaceOk ? "确认并开始备份" : "空间不足，无法开始"}</button>
+        </div>
+      </div>`;
+  }
+
+  let progressBlock = "";
+  if (progress) {
+    const done = progress.state === "completed";
+    const failed = progress.state === "failed";
+    const cancelled = progress.state === "cancelled";
+    const title = done ? "备份完成" : failed ? "备份失败" : cancelled ? "备份已取消" : "正在备份";
+    const filesLabel = `${formatCount(progress.fileProcessed)} / ${formatCount(progress.fileTotal)} 个文件`;
+    const bytesLabel = `${formatSize(progress.bytesProcessed)} / ${formatSize(progress.bytesTotal)}`;
+    const liveMeta = progress.state === "running"
+      ? `${formatSpeed(progress.speedBytesPerSec)} · ${formatEtaSeconds(progress.etaSeconds)}`
+      : "";
+    const safePoint = progress.state === "running"
+      ? "取消会在安全点停止：当前临时文件不会提交；已复制完成的文件会保留。"
+      : cancelled
+        ? `已取消。已复制 ${formatCount(progress.fileProcessed)} 个文件保留在目标盘；可继续重试未完成项，或重新预览。`
+        : done
+          ? `已复制 ${formatCount(progress.fileProcessed)} 个文件（${formatSize(progress.bytesProcessed)}）。后台将自动扫描入库。`
+          : "可只重试失败文件，已成功的文件不会重复复制。";
+    progressBlock = `
+      <div class="scan-banner" role="status" aria-live="polite">
+        <div class="scan-copy">
+          ${progress.state === "running" ? `<span class="spinner"></span>` : ""}
+          <span>${title}</span>
+          <strong>${progress.state === "running" ? `${progressPercent}%` : filesLabel}</strong>
+          ${progress.state === "running" ? `<button class="text-button" id="backup-cancel-button" type="button">取消</button>` : ""}
+        </div>
+        <div class="progress-track${progress.state === "running" && progress.bytesTotal <= 0 ? " is-indeterminate" : ""}">
+          <span style="width:${progress.state === "running" && progress.bytesTotal <= 0 ? "35%" : `${progressPercent}%`}"></span>
+        </div>
+        <div class="scan-current">${escapeHtml(progress.currentFile || (progress.state === "running" ? "准备中" : ""))}${liveMeta ? ` · ${liveMeta}` : ""} · ${bytesLabel}</div>
+        <div class="backup-note">${safePoint}</div>
+        ${progress.error || failed ? `<div class="backup-note is-danger">${escapeHtml(progress.error || "备份过程中出现错误")}</div>` : ""}
+        ${(failed || cancelled) && state.backupLastRunId && state.backupFailedItems.length ? `
+          <div class="backup-actions">
+            <button class="primary-button" id="backup-retry-button" type="button" ${state.backupRetrying || running ? "disabled" : ""}>${state.backupRetrying ? "重试中…" : failed ? "重试失败文件" : "继续未完成文件"}</button>
+          </div>
+          <div class="backup-failed-list">${state.backupFailedItems.slice(0, 8).map((item) => `<div class="backup-failed-item"><span>${escapeHtml(item.sourceRelative)}</span><span>${escapeHtml(item.errorMessage || "未完成")}</span></div>`).join("")}${state.backupFailedItems.length > 8 ? `<div class="backup-failed-item"><span>…</span><span>共 ${formatCount(state.backupFailedItems.length)} 项</span></div>` : ""}</div>
+        ` : (failed || cancelled) && state.backupLastRunId ? `<div class="backup-note">没有可重试的文件项。可重新生成预览后再备份。</div>` : ""}
+        ${done && state.backupLastRunId ? `
+          <div class="backup-actions">
+            <button class="primary-button" id="backup-view-new" type="button">查看新导入</button>
+            <button class="text-button" id="backup-view-new-later" type="button">稍后再看</button>
+          </div>
+        ` : ""}
+      </div>`;
+  }
+
+  const historyRows = state.backupHistory.length
+    ? state.backupHistory.map((run) => {
+        const expanded = state.backupExpandedRunId === run.id;
+        const detail = expanded ? state.backupHistoryItems : [];
+        return `<div class="backup-history-item${expanded ? " is-expanded" : ""}">
+          <button type="button" class="backup-history-row" data-backup-run="${escapeHtml(run.id)}">
+            <span class="status">${backupStatusLabel(run.status)}</span>
+            <span class="time">${escapeHtml(formatCaptureAt(run.startedAt) || run.startedAt)}</span>
+            <span class="src">${escapeHtml(run.sourceRootPath)}</span>
+            <span class="nums">成功 ${formatCount(run.copiedFiles)} · 跳过 ${formatCount(run.skippedFiles)} · 失败 ${formatCount(run.failedFiles)} · ${formatSize(run.copiedBytes)}</span>
+          </button>
+          ${expanded ? `
+            ${run.errorSummary ? `<div class="backup-note is-danger">${escapeHtml(run.errorSummary)}</div>` : ""}
+            ${detail.length ? `<div class="backup-failed-list">${detail.slice(0, 10).map((item) => `<div class="backup-failed-item"><span>${escapeHtml(item.sourceRelative)}</span><span>${escapeHtml(item.errorMessage || "未完成")}</span></div>`).join("")}</div>` : `<div class="backup-note">该次没有失败/未完成文件。</div>`}
+          ` : ""}
+        </div>`;
+      }).join("")
+    : `<div class="backup-note">还没有备份记录。完成一次备份后会出现在这里。</div>`;
+
+  return `<section class="backup-panel" aria-label="相机备份">
+    <div class="backup-heading">
+      <div><strong>相机备份</strong><span>源盘只读 · 临时文件校验后提交</span></div>
+      <button class="icon-button" id="close-backup" type="button" aria-label="关闭备份面板">×</button>
+    </div>
+    <div class="backup-steps" aria-label="备份步骤">${stepChip(1, "选择")}${stepChip(2, "确认")}${stepChip(3, "执行")}</div>
+    <div class="backup-step-block">
+      <div class="backup-step-title">第 1 步 · 选择源盘与目标</div>
+      <div class="backup-form">
+        <label><span>源相机盘</span><select id="backup-source" ${formDisabled || !state.backupSources.length ? "disabled" : ""}>${sourceOptions}</select></label>
+        <label><span>目标媒体库</span><select id="backup-target" ${formDisabled || !state.libraries.length ? "disabled" : ""}>${targetOptions}</select></label>
+        <label><span>冲突策略</span><select id="backup-conflict" ${formDisabled ? "disabled" : ""}><option value="skip_same" ${state.backupConflictPolicy === "skip_same" ? "selected" : ""}>跳过冲突</option><option value="rename" ${state.backupConflictPolicy === "rename" ? "selected" : ""}>自动重命名</option><option value="overwrite" ${state.backupConflictPolicy === "overwrite" ? "selected" : ""}>覆盖目标</option></select></label>
+        <label><span>忽略扩展名</span><input id="backup-ignore" value="${escapeHtml(state.backupIgnoreExtensions)}" aria-label="忽略扩展名" ${formDisabled ? "disabled" : ""} /></label>
+        <button class="primary-button" id="backup-preview-button" type="button" ${canPreview ? "" : "disabled"}>${state.backupLoading ? "生成预览中…" : preview ? "刷新预览" : "生成预览"}</button>
+      </div>
+      ${!state.backupSources.length ? `<div class="backup-note">未检测到包含 DCIM 的可移动盘。请插入相机存储卡或 U 盘后重新打开。</div>` : ""}
+    </div>
+    ${previewBlock}
+    ${progressBlock}
+    <div class="backup-step-block">
+      <div class="backup-step-title">最近备份</div>
+      <div class="backup-history">${historyRows}</div>
+    </div>
+  </section>`;
 }
 
 function renderStatusBanner(): string {
@@ -769,6 +973,7 @@ function render(): void {
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
     <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}`;
   bindEvents();
@@ -895,6 +1100,7 @@ function bindEvents(): void {
     state.datePrefix = undefined;
     state.dateFrom = undefined;
     state.dateTo = undefined;
+    state.firstSeenFrom = null;
     resetSidebarExpansionForSelection();
     void refreshMedia();
   });
@@ -943,9 +1149,43 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#backup-open-button")?.addEventListener("click", () => void openBackupPanel());
   app.querySelector<HTMLButtonElement>("#close-backup")?.addEventListener("click", () => { state.backupOpen = false; render(); });
   app.querySelector<HTMLButtonElement>("#backup-preview-button")?.addEventListener("click", () => void createBackupPreview());
+  app.querySelector<HTMLSelectElement>("#backup-source")?.addEventListener("change", (event) => {
+    state.backupSourceId = (event.target as HTMLSelectElement).value || null;
+  });
+  app.querySelector<HTMLSelectElement>("#backup-target")?.addEventListener("change", (event) => {
+    state.backupTargetId = (event.target as HTMLSelectElement).value || null;
+  });
+  app.querySelector<HTMLInputElement>("#backup-ignore")?.addEventListener("change", (event) => {
+    state.backupIgnoreExtensions = (event.target as HTMLInputElement).value;
+  });
   app.querySelector<HTMLSelectElement>("#backup-conflict")?.addEventListener("change", (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy));
   app.querySelector<HTMLButtonElement>("#backup-start-button")?.addEventListener("click", () => void startConfirmedBackup());
   app.querySelector<HTMLButtonElement>("#backup-cancel-button")?.addEventListener("click", () => void cancelCurrentBackup());
+  app.querySelector<HTMLButtonElement>("#backup-retry-button")?.addEventListener("click", () => void retryCurrentBackup());
+  app.querySelector<HTMLButtonElement>("#backup-view-new")?.addEventListener("click", () => void viewNewImports());
+  app.querySelector<HTMLButtonElement>("#backup-view-new-later")?.addEventListener("click", () => {
+    state.backupProgress = state.backupProgress ? { ...state.backupProgress, state: "completed" } : null;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-backup-run]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const runId = button.dataset.backupRun;
+      if (!runId) return;
+      state.backupExpandedRunId = state.backupExpandedRunId === runId ? null : runId;
+      if (state.backupExpandedRunId) {
+        void listBackupRunItems(runId, true).then((items) => {
+          state.backupHistoryItems = items;
+          render();
+        }).catch((error) => {
+          state.error = error instanceof Error ? error.message : "读取备份明细失败";
+          render();
+        });
+      } else {
+        state.backupHistoryItems = [];
+      }
+      render();
+    });
+  });
   app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
   app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); });
   app.querySelector<HTMLButtonElement>("#choose-folder-button")?.addEventListener("click", () => void chooseLibraryFolder());
@@ -1460,13 +1700,29 @@ function clampDensity(value: number): Density {
   return clamped as Density;
 }
 
+async function loadBackupHistory(): Promise<void> {
+  try {
+    state.backupHistory = await listBackupHistory(8);
+  } catch {
+    // History is optional chrome; do not surface a hard error on open.
+    state.backupHistory = [];
+  }
+}
+
 async function openBackupPanel(): Promise<void> {
   state.backupOpen = true;
   state.backupPreview = null;
   state.backupLoading = true;
   render();
   try {
-    state.backupSources = await discoverBackupSources();
+    const [sources] = await Promise.all([discoverBackupSources(), loadBackupHistory()]);
+    state.backupSources = sources;
+    if (!state.backupSourceId || !sources.some((source) => source.id === state.backupSourceId)) {
+      state.backupSourceId = sources[0]?.id ?? null;
+    }
+    if (!state.backupTargetId || !state.libraries.some((library) => library.id === state.backupTargetId)) {
+      state.backupTargetId = state.library?.id ?? state.libraries[0]?.id ?? null;
+    }
   } catch (error) {
     state.error = error instanceof Error ? error.message : "发现相机盘失败";
   } finally {
@@ -1476,10 +1732,16 @@ async function openBackupPanel(): Promise<void> {
 }
 
 async function createBackupPreview(): Promise<void> {
-  const source = app.querySelector<HTMLSelectElement>("#backup-source")?.value;
-  const target = app.querySelector<HTMLSelectElement>("#backup-target")?.value;
+  const sourceSelect = app.querySelector<HTMLSelectElement>("#backup-source");
+  const targetSelect = app.querySelector<HTMLSelectElement>("#backup-target");
+  const ignoreInput = app.querySelector<HTMLInputElement>("#backup-ignore");
+  if (sourceSelect?.value) state.backupSourceId = sourceSelect.value;
+  if (targetSelect?.value) state.backupTargetId = targetSelect.value;
+  if (ignoreInput) state.backupIgnoreExtensions = ignoreInput.value;
+  const source = state.backupSourceId;
+  const target = state.backupTargetId;
   if (!source || !target) return;
-  const ignore = app.querySelector<HTMLInputElement>("#backup-ignore")?.value
+  const ignore = state.backupIgnoreExtensions
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
@@ -1510,13 +1772,22 @@ async function saveBackupConflict(policy: ConflictPolicy): Promise<void> {
 async function startConfirmedBackup(): Promise<void> {
   const preview = state.backupPreview;
   if (!preview || state.backupJobId) return;
-  const confirmed = window.confirm(`将按预览复制 ${formatCount(preview.readyFiles + (preview.conflictFiles && preview.conflictPolicy !== "skip_same" ? preview.conflictFiles : 0))} 个文件（${formatSize(preview.requiredBytes)}）。\n\n相机源文件不会被删除、移动或修改。是否开始备份？`);
+  if (preview.spaceSufficient === false) {
+    state.error = "目标盘空间不足，无法开始备份";
+    render();
+    return;
+  }
+  const confirmed = window.confirm(`将按预览复制 ${formatCount(willCopyCount(preview))} 个文件（${formatSize(preview.requiredBytes)}）。\n\n相机源文件不会被删除、移动或修改。是否开始备份？`);
   if (!confirmed) return;
-  state.backupLoading = true; state.error = null; render();
+  state.backupLoading = true; state.error = null;
+  state.backupLastRunId = preview.backupRunId;
+  state.backupProgress = null;
+  state.backupFailedItems = [];
+  render();
   try {
     const start = await startBackup(preview.backupRunId, preview.id);
     state.backupJobId = start.jobId;
-    state.backupProgress = null;
+    state.backupLastRunId = start.backupRunId;
   } catch (error) {
     state.error = error instanceof Error ? error.message : "无法开始备份";
   } finally { state.backupLoading = false; render(); }
@@ -1525,6 +1796,50 @@ async function startConfirmedBackup(): Promise<void> {
 async function cancelCurrentBackup(): Promise<void> {
   if (!state.backupJobId) return;
   try { await cancelBackup(state.backupJobId); } catch (error) { state.error = error instanceof Error ? error.message : "无法取消备份"; render(); }
+}
+
+async function retryCurrentBackup(): Promise<void> {
+  const runId = state.backupLastRunId;
+  if (!runId || state.backupJobId || state.backupRetrying) return;
+  state.backupRetrying = true;
+  state.error = null;
+  render();
+  try {
+    const start = await retryFailedBackup(runId);
+    state.backupJobId = start.jobId;
+    state.backupLastRunId = start.backupRunId;
+    state.backupProgress = null;
+    state.backupFailedItems = [];
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "重试备份失败";
+  } finally {
+    state.backupRetrying = false;
+    render();
+  }
+}
+
+async function viewNewImports(): Promise<void> {
+  // Prefer the finished backup's start time so items indexed before the run
+  // are not listed as "new".
+  const runId = state.backupLastRunId;
+  const startedAt = runId ? state.backupHistory.find((run) => run.id === runId)?.startedAt : undefined;
+  state.firstSeenFrom = startedAt && startedAt.startsWith("unix-ms:")
+    ? startedAt
+    : `unix-ms:${Date.now() - 15 * 60 * 1000}`;
+  state.datePrefix = undefined;
+  state.dateFrom = undefined;
+  state.dateTo = undefined;
+  state.kind = undefined;
+  state.favoriteOnly = false;
+  state.burstOnly = false;
+  state.search = "";
+  searchDraft = "";
+  state.backupOpen = false;
+  if (state.library && state.availability === "available") {
+    await refreshMedia();
+  } else {
+    render();
+  }
 }
 
 async function scanLibrary(): Promise<void> {
@@ -1724,9 +2039,23 @@ void onDeleteProgress((progress) => {
   render();
 });
 void onBackupProgress((progress) => {
-  if (!state.backupJobId || progress.jobId !== state.backupJobId) return;
+  // Accept a terminal event that raced with startBackup's response, but never
+  // adopt a different job's progress.
+  if (state.backupJobId && progress.jobId !== state.backupJobId) return;
+  if (!state.backupJobId && progress.state === "running") return;
   state.backupProgress = progress;
-  if (progress.state !== "running") { state.backupJobId = null; if (progress.state === "failed") state.error = progress.error ?? "备份失败"; }
+  if (progress.state === "running") {
+    render();
+    return;
+  }
+  state.backupJobId = null;
+  if (progress.state === "failed") state.error = progress.error ?? "备份失败";
+  void loadBackupHistory().then(() => render());
+  if (state.backupLastRunId) {
+    void listBackupRunItems(state.backupLastRunId, true)
+      .then((items) => { state.backupFailedItems = items; render(); })
+      .catch(() => { state.backupFailedItems = []; render(); });
+  }
   render();
 });
 void bootstrap();

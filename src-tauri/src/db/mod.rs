@@ -577,6 +577,20 @@ impl Repository {
             conditions.push(format!("m.capture_date <= ?{}", values.len() + 1));
             values.push(date_to.trim().to_owned());
         }
+        // Keep only media first indexed at/after a timestamp. Production writes
+        // `unix-ms:<millis>`; the filter accepts that form or a bare integer.
+        if let Some(first_seen_from) = query.first_seen_from.filter(|value| !value.trim().is_empty())
+        {
+            let raw = first_seen_from.trim();
+            let numeric = raw.strip_prefix("unix-ms:").unwrap_or(raw);
+            if let Ok(threshold) = numeric.parse::<i64>() {
+                conditions.push(format!(
+                    "m.first_seen_at LIKE 'unix-ms:%' AND CAST(SUBSTR(m.first_seen_at, 9) AS INTEGER) >= ?{}",
+                    values.len() + 1
+                ));
+                values.push(threshold.to_string());
+            }
+        }
         let where_clause = conditions.join(" AND ");
         let count_sql = format!("SELECT COUNT(*) FROM media_items m WHERE {where_clause}");
         let count_params = values.iter().map(String::as_str).collect::<Vec<_>>();
@@ -865,6 +879,26 @@ impl Repository {
         )?;
         self.get_backup_run(&id)?
             .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Recent backup history for the UI. Pure previews (never started) are
+    /// omitted so the list only shows real copy attempts.
+    pub fn list_backup_runs(&self, limit: i64) -> DbResult<Vec<BackupRun>> {
+        let limit = limit.clamp(1, 100);
+        let mut statement = self.connection.prepare(
+            "SELECT id, job_id, source_volume_id, source_root_path, target_library_id,
+                    status, conflict_policy, ignore_extensions, started_at, finished_at,
+                    total_files, copied_files, skipped_files, failed_files, total_bytes,
+                    copied_bytes, error_summary
+             FROM backup_runs
+             WHERE status != 'preview'
+             ORDER BY CAST(REPLACE(started_at, 'unix-ms:', '') AS INTEGER) DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit], map_backup_run)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn get_backup_run(&self, id: &str) -> DbResult<Option<BackupRun>> {
@@ -1534,6 +1568,9 @@ pub struct MediaQuery {
     pub date_prefix: Option<String>,
     pub date_from: Option<String>,
     pub date_to: Option<String>,
+    /// Keep media whose `first_seen_at` is at/after this timestamp
+    /// (`unix-ms:<millis>` or a bare integer). Used by post-backup import guide.
+    pub first_seen_from: Option<String>,
     pub offset: i64,
     pub limit: i64,
     pub sort: MediaSort,
@@ -2323,5 +2360,74 @@ mod tests {
         }
         let reopened = Repository::open(&database).unwrap();
         assert!(reopened.is_favorite("photo-reopen").unwrap());
+    }
+
+    #[test]
+    fn list_backup_runs_skips_previews_and_orders_newest_first() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        let insert = |id: &str, status: BackupStatus, started_at: &str| {
+            repository
+                .create_backup_run(NewBackupRun {
+                    id: id.into(),
+                    job_id: format!("job-{id}"),
+                    source_volume_id: Some("volume-a".into()),
+                    source_root_path: "E:\\".into(),
+                    target_library_id: "library-1".into(),
+                    status,
+                    conflict_policy: ConflictPolicy::SkipSame,
+                    ignore_extensions: "[\".dng\"]".into(),
+                    started_at: started_at.into(),
+                    finished_at: None,
+                    total_files: 2,
+                    copied_files: 1,
+                    skipped_files: 0,
+                    failed_files: 0,
+                    total_bytes: 10,
+                    copied_bytes: 5,
+                    error_summary: None,
+                })
+                .unwrap();
+        };
+        insert("preview-only", BackupStatus::Preview, "unix-ms:100");
+        insert("older-run", BackupStatus::Completed, "unix-ms:200");
+        insert("newer-run", BackupStatus::Failed, "unix-ms:300");
+
+        let runs = repository.list_backup_runs(10).unwrap();
+        let ids = runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, ["newer-run", "older-run"]);
+        assert_eq!(runs[0].failed_files, 0);
+    }
+
+    #[test]
+    fn media_query_filters_by_first_seen_from_unix_ms() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        for (id, first_seen) in [
+            ("old-import", "unix-ms:1000"),
+            ("backup-import", "unix-ms:2000"),
+            ("later-import", "unix-ms:3000"),
+            ("iso-import", "2026-01-01T00:00:00Z"),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.first_seen_at = first_seen.into();
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let ids = repository
+            .query_media(MediaQuery {
+                library_id: "library-1".into(),
+                first_seen_from: Some("unix-ms:2000".into()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|media| media.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["later-import", "backup-import"]);
     }
 }

@@ -108,6 +108,7 @@ struct MediaQueryInput {
     date_prefix: Option<String>,
     date_from: Option<String>,
     date_to: Option<String>,
+    first_seen_from: Option<String>,
     offset: Option<i64>,
     limit: Option<i64>,
     sort: Option<String>,
@@ -145,6 +146,7 @@ fn media_query(
                 date_prefix: query.date_prefix,
                 date_from: query.date_from,
                 date_to: query.date_to,
+                first_seen_from: query.first_seen_from,
                 offset: query.offset.unwrap_or(0),
                 limit: query.limit.unwrap_or(120),
                 sort,
@@ -598,15 +600,17 @@ fn backup_retry_failed(
         Ok(value.database_path())
     })?;
     let repository = db::Repository::open(&database_path).map_err(|error| error.to_string())?;
-    let failed = repository
+    // Cancelled runs keep unfinished work as `cancelled`; allow retrying those
+    // too so a partial cancel can resume without a fresh preview of copied files.
+    let retryable = repository
         .list_backup_items(&backup_run_id)
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter(|item| item.status == "failed")
+        .filter(|item| item.status == "failed" || item.status == "cancelled")
         .map(|item| item.id)
         .collect::<std::collections::HashSet<_>>();
-    let selected = item_ids.unwrap_or_else(|| failed.iter().cloned().collect());
-    if selected.is_empty() || selected.iter().any(|id| !failed.contains(id)) {
+    let selected = item_ids.unwrap_or_else(|| retryable.iter().cloned().collect());
+    if selected.is_empty() || selected.iter().any(|id| !retryable.contains(id)) {
         return Err("没有可重试的失败文件".to_owned());
     }
     let (job_id, cancel) = backups.start()?;
@@ -629,6 +633,43 @@ fn backup_retry_failed(
 #[tauri::command]
 fn backup_cancel(job_id: String, backups: State<'_, BackupManagerState>) -> Result<(), String> {
     backups.cancel(&job_id)
+}
+
+/// Recent backup attempts (completed / failed / cancelled), newest first.
+#[tauri::command]
+fn backup_history(
+    limit: Option<i64>,
+    state: State<'_, InfrastructureState>,
+) -> Result<Vec<db::BackupRun>, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .list_backup_runs(limit.unwrap_or(8))
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+/// Item-level detail for one backup run; used by the retry / history UI.
+#[tauri::command]
+fn backup_run_items(
+    backup_run_id: String,
+    only_retryable: Option<bool>,
+    state: State<'_, InfrastructureState>,
+) -> Result<Vec<db::BackupItem>, String> {
+    state.with_infrastructure(|infrastructure| {
+        let items = infrastructure
+            .repository()
+            .list_backup_items(&backup_run_id)
+            .map_err(infrastructure::InfrastructureError::database)?;
+        Ok(if only_retryable.unwrap_or(false) {
+            items
+                .into_iter()
+                .filter(|item| item.status == "failed" || item.status == "cancelled")
+                .collect()
+        } else {
+            items
+        })
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -690,7 +731,9 @@ pub fn run() {
             backup_preview,
             backup_start,
             backup_retry_failed,
-            backup_cancel
+            backup_cancel,
+            backup_history,
+            backup_run_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

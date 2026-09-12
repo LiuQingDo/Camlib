@@ -117,6 +117,8 @@ export interface MediaQueryInput {
   dateFrom?: string;
   /** Inclusive capture_date upper bound, YYYY-MM-DD. */
   dateTo?: string;
+  /** Keep media first indexed at/after this timestamp (`unix-ms:<ms>` or bare integer). */
+  firstSeenFrom?: string;
   offset?: number;
   limit?: number;
   sort?: "newest" | "oldest" | "name";
@@ -292,6 +294,19 @@ export interface BackupStartDto {
   backupRunId: string;
 }
 
+export type BackupItemState = "planned" | "copied" | "skipped" | "failed" | "cancelled";
+
+export interface BackupItemDto {
+  id: string;
+  backupRunId: string;
+  sourceRelative: string;
+  destinationRelative: string | null;
+  sizeBytes: number;
+  status: BackupItemState;
+  copiedBytes: number;
+  errorMessage: string | null;
+}
+
 export interface BackupProgressDto {
   jobId: string;
   kind: "backup";
@@ -327,6 +342,17 @@ export function retryFailedBackup(backupRunId: string, itemIds?: string[]): Prom
 
 export function cancelBackup(jobId: string): Promise<void> {
   return invoke<void>("backup_cancel", { jobId });
+}
+
+export function listBackupHistory(limit = 8): Promise<BackupRunDto[]> {
+  return invoke<BackupRunDto[]>("backup_history", { limit });
+}
+
+export function listBackupRunItems(
+  backupRunId: string,
+  onlyRetryable = false,
+): Promise<BackupItemDto[]> {
+  return invoke<BackupItemDto[]>("backup_run_items", { backupRunId, onlyRetryable });
 }
 
 export function onBackupProgress(callback: (event: BackupProgressDto) => void): Promise<UnlistenFn> {
