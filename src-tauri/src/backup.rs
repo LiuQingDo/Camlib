@@ -146,7 +146,7 @@ impl BackupManagerState {
         if !jobs.is_empty() {
             return Err("已有备份任务正在运行".to_owned());
         }
-        let job_id = format!("backup-{}", NEXT_BACKUP.fetch_add(1, Ordering::Relaxed));
+        let job_id = next_id("backup");
         let cancel = Arc::new(AtomicBool::new(false));
         jobs.insert(
             job_id.clone(),
@@ -790,6 +790,17 @@ fn finish(
             errors.clone(),
             summary.clone(),
         ),
+    );
+    let terminal = match status {
+        BackupStatus::Completed => "completed",
+        BackupStatus::Cancelled => "cancelled",
+        _ => "failed",
+    };
+    crate::system::notify_backup_terminal(
+        app,
+        terminal,
+        copied_files,
+        summary.as_deref().or_else(|| errors.first().map(String::as_str)),
     );
     Ok(status)
 }

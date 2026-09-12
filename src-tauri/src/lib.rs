@@ -4,13 +4,17 @@ mod deletion;
 mod infrastructure;
 mod media;
 mod scanner;
+mod system;
 
 use backup::{
     BackupManagerState, BackupPreviewDto, BackupPreviewRequest, BackupStartResponse,
     BackupVolumeDto,
 };
 use db::{MediaKind, MediaQuery, MediaSort};
-use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
+use infrastructure::{
+    AppSettings, CloseBehavior, Infrastructure, InfrastructureError, InfrastructureState,
+    LibraryAvailability, LibraryStatus,
+};
 use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
 use serde::{Deserialize, Serialize};
@@ -81,6 +85,25 @@ fn set_auto_scan_on_startup(
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, String> {
     state.with_infrastructure(|infrastructure| infrastructure.set_auto_scan_on_startup(enabled))
+}
+
+/// Toggle system notifications for scan/backup/disk events.
+#[tauri::command]
+fn set_notifications_enabled(
+    enabled: bool,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    state.with_infrastructure(|infrastructure| infrastructure.set_notifications_enabled(enabled))
+}
+
+/// Persist the window close behavior (quit vs minimize to tray).
+#[tauri::command]
+fn set_close_behavior(
+    behavior: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    let behavior = CloseBehavior::parse(&behavior).map_err(|error| error.to_string())?;
+    state.with_infrastructure(|infrastructure| infrastructure.set_close_behavior(behavior))
 }
 
 /// Persist backup ignore extensions used as the single default source for
@@ -244,6 +267,36 @@ fn open_app_directory(
 #[tauri::command]
 fn get_library_status(state: State<'_, InfrastructureState>) -> Result<LibraryStatus, String> {
     state.with_infrastructure(|infrastructure| infrastructure.library_status())
+}
+
+/// Block dangerous filesystem work while the library volume is unavailable.
+fn ensure_library_ready(
+    infrastructure: &mut Infrastructure,
+    library_id: &str,
+) -> Result<(), InfrastructureError> {
+    let exists = infrastructure.has_library(library_id)?;
+    if !exists {
+        return Err(InfrastructureError::InvalidPath(
+            "媒体库不存在".to_owned(),
+        ));
+    }
+    let status = infrastructure.library_status()?;
+    match status.availability {
+        LibraryAvailability::Available => Ok(()),
+        LibraryAvailability::Unconfigured => Err(InfrastructureError::InvalidPath(
+            "尚未配置媒体库".to_owned(),
+        )),
+        LibraryAvailability::Disconnected => Err(InfrastructureError::InvalidPath(
+            status
+                .reason
+                .unwrap_or_else(|| "媒体库已断开，请连接磁盘后重试".to_owned()),
+        )),
+        LibraryAvailability::Invalid => Err(InfrastructureError::InvalidPath(
+            status
+                .reason
+                .unwrap_or_else(|| "媒体库路径无效，请重新选择媒体库目录".to_owned()),
+        )),
+    }
 }
 
 /// Convenience DTO for bootstrapping the frontend in one invocation.
@@ -638,6 +691,7 @@ fn media_delete_preview(
     state: State<'_, InfrastructureState>,
 ) -> Result<deletion::DeletePreviewDto, String> {
     state.with_infrastructure(|infrastructure| {
+        ensure_library_ready(infrastructure, &library_id)?;
         deletion::preview(infrastructure.repository(), &library_id, &media_item_ids)
             .map_err(infrastructure::InfrastructureError::InvalidPath)
     })
@@ -653,6 +707,7 @@ async fn media_delete_items(
     state: State<'_, InfrastructureState>,
 ) -> Result<deletion::DeleteResultDto, String> {
     let (database_path, thumbnail_cache_dir) = state.with_infrastructure(|infrastructure| {
+        ensure_library_ready(infrastructure, &library_id)?;
         let settings = infrastructure.settings()?;
         Ok((
             infrastructure.database_path(),
@@ -759,6 +814,7 @@ fn thumbnail_rebuild_start(
     jobs: State<'_, PreviewJobManagerState>,
 ) -> Result<media::PreviewJobStartDto, String> {
     let (database_path, root, cache_dir, exists) = infrastructure.with_infrastructure(|value| {
+        ensure_library_ready(value, &library_id)?;
         let settings = value.settings()?;
         let library = value
             .repository()
@@ -832,6 +888,7 @@ fn library_scan_start(
     jobs: State<'_, ScanManagerState>,
 ) -> Result<ScanStartResponse, String> {
     let (database_path, exists) = infrastructure.with_infrastructure(|value| {
+        ensure_library_ready(value, &library_id)?;
         Ok((value.database_path(), value.has_library(&library_id)?))
     })?;
     if !exists {
@@ -1046,8 +1103,13 @@ pub fn run() {
     let streams = MediaStreamRegistry::default();
     let protocol_streams = streams.clone();
     tauri::Builder::default()
+        // Must register first: a second launch focuses the existing window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            system::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             let app_cache_dir = app.path().app_cache_dir()?;
@@ -1061,11 +1123,27 @@ pub fn run() {
                 database_path,
             )
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+
+            // Orphaned running rows from a previous process are shown as
+            // interrupted failures; this build does not resume jobs.
+            {
+                let repository = infrastructure.repository();
+                let now = system::timestamp_now();
+                let _ = repository.fail_interrupted_scan_runs(&now);
+                let _ = repository.fail_interrupted_backup_runs(&now);
+            }
+
             app.manage(InfrastructureState::new(infrastructure));
             app.manage(ScanManagerState::new());
             app.manage(BackupManagerState::new());
             app.manage(PreviewJobManagerState::new());
             app.manage(streams.clone());
+
+            if let Some(window) = app.get_webview_window("main") {
+                system::install_close_handler(&window, app.handle().clone());
+            }
+            system::setup_tray(app.handle());
+            system::spawn_volume_watch(app.handle().clone());
             Ok(())
         })
         .register_uri_scheme_protocol("camlib", move |_context, request| {
@@ -1080,6 +1158,8 @@ pub fn run() {
             set_backup_ignore_extensions,
             set_ui_prefs,
             set_auto_scan_on_startup,
+            set_notifications_enabled,
+            set_close_behavior,
             get_library_status,
             get_infrastructure_state,
             list_scan_runs,

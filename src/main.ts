@@ -58,19 +58,24 @@ import {
   setLibraryRoot,
   setThumbnailCacheDir,
   setUiPrefs,
+  setNotificationsEnabled,
+  setCloseBehavior,
   listScanRuns,
   getLibraryIndexSummary,
   getAppAbout,
   getThumbnailCacheStats,
   openAppDirectory,
   type AppAboutDto,
+  type CloseBehavior,
   type LibraryAvailability,
   type LibraryIndexSummaryDto,
+  type LibraryStatus,
   type ScanRunDto,
   type ThumbnailCacheStatsDto,
   type UiSortMode,
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import type { ScanProgressDto, PreviewProgressDto } from "./api/media";
 import {
   startThumbnailRebuild,
@@ -167,6 +172,10 @@ interface AppState {
   settingsBusy: boolean;
   libraryStatusReason: string | null;
   thumbnailCacheDir: string;
+  notificationsEnabled: boolean;
+  closeBehavior: CloseBehavior;
+  /** Dismissible note about the newest interrupted/failed run after restart. */
+  recentTaskNotice: string | null;
 }
 
 const state: AppState = {
@@ -247,15 +256,19 @@ const state: AppState = {
   settingsBusy: false,
   libraryStatusReason: null,
   thumbnailCacheDir: "",
+  notificationsEnabled: true,
+  closeBehavior: "minimize_to_tray",
+  recentTaskNotice: null,
 };
 
-type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "about";
+type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "library", label: "媒体库" },
   { id: "index", label: "扫描与索引" },
   { id: "thumbnails", label: "缩略图" },
   { id: "backup", label: "备份默认" },
+  { id: "system", label: "系统" },
   { id: "about", label: "关于" },
 ];
 
@@ -957,9 +970,10 @@ function renderStatusBannerBase(): string {
     const trackWidth = state.scanProgress.total > 0 ? `${progress}%` : "35%";
     return `<div class="scan-banner" id="scan-progress-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span data-scan-phase>${status}</span><strong data-scan-percent>${progressLabel}</strong><button class="text-button" id="scan-cancel-button" type="button">取消</button></div><div class="progress-track${trackClass}"><span data-scan-track style="width:${trackWidth}"></span></div><div class="scan-current" data-scan-current>${state.scanProgress.current ? escapeHtml(state.scanProgress.current) : ""}</div></div>`;
   }
-  if (state.availability === "disconnected") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。连接设备后点击重新扫描。</span></div><button class="text-button" id="rescan-button" type="button">重新扫描</button></div>`;
-  if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>请重新设置一个可访问的媒体库目录。</span></div></div>`;
+  if (state.availability === "disconnected") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。已禁用扫描、删除、缩略图重建与备份目标写入。请重新连接磁盘，或在设置中更换媒体库路径。</span></div><button class="text-button" id="rescan-button" type="button">重新检测</button></div>`;
+  if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>当前卷与记录的媒体库不一致。请在设置中重新选择可访问的媒体库目录。</span></div><button class="text-button" id="open-settings-from-banner" type="button">打开设置</button></div>`;
   if (state.error) return `<div class="notice-banner is-error"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span></div>`;
+  if (state.recentTaskNotice) return `<div class="notice-banner is-info"><span class="notice-icon">i</span><div><strong>最近任务</strong><span>${escapeHtml(state.recentTaskNotice)}</span></div><button class="text-button" id="dismiss-recent-task" type="button">知道了</button></div>`;
   return "";
 }
 
@@ -1003,7 +1017,7 @@ function renderBackupPanel(): string {
     return `<option value="${escapeHtml(library.id)}" ${selected ? "selected" : ""}>${escapeHtml(library.volumeLabel || library.rootPath)}</option>`;
   }).join("");
 
-  const formDisabled = running || state.backupLoading;
+  const formDisabled = running || state.backupLoading || state.availability !== "available";
   const canPreview = !formDisabled && state.backupSources.length > 0 && state.libraries.length > 0;
 
   let previewBlock = "";
@@ -1138,7 +1152,7 @@ function renderSelectionToolbar(): string {
   if (!state.page.total) return "";
   const allSelected = state.selectedIds.size >= state.page.total;
   const tagOptions = state.tags.map((tag) => `<option value="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</option>`).join("");
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderDeleteFeedback(): string {
@@ -1402,7 +1416,7 @@ function renderSettingsLibrarySection(): string {
       </dl>
       <div class="settings-actions">
         <button class="primary-button" type="button" id="settings-change-library">更换媒体库</button>
-        <button class="outline-button" type="button" id="settings-rescan-library" ${state.scanning || !library ? "disabled" : ""}>${state.scanning ? "扫描中…" : "重新扫描"}</button>
+        <button class="outline-button" type="button" id="settings-rescan-library" ${state.scanning || !library || state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "重新扫描"}</button>
         <button class="outline-button" type="button" id="settings-open-app-data">打开数据目录</button>
         <button class="outline-button" type="button" id="settings-open-thumbnail-cache">打开缓存目录</button>
       </div>
@@ -1427,8 +1441,8 @@ function renderSettingsIndexSection(): string {
       <div class="settings-note">最后扫描：${escapeHtml(formatCaptureAt(summary.lastScanAt) || "尚未扫描")} · 代数 ${summary.scanGeneration}</div>`
       : `<div class="settings-note">${state.library ? "加载索引摘要…" : "请先连接媒体库。"}</div>`}
       <div class="settings-actions">
-        <button class="outline-button" type="button" id="settings-incremental-scan" ${state.scanning || !state.library ? "disabled" : ""}>${state.scanning ? "扫描中…" : "增量扫描"}</button>
-        <button class="danger-button" type="button" id="settings-full-rebuild" ${state.scanning || !state.library ? "disabled" : ""}>全量重建索引</button>
+        <button class="outline-button" type="button" id="settings-incremental-scan" ${state.scanning || !state.library || state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "增量扫描"}</button>
+        <button class="danger-button" type="button" id="settings-full-rebuild" ${state.scanning || !state.library || state.availability !== "available" ? "disabled" : ""}>全量重建索引</button>
       </div>
       ${state.fullRebuildConfirm ? `<div class="settings-confirm">
         <p>全量重建会重新读取库内全部文件的元数据，比增量扫描更耗时。收藏、标签与评分会保留。是否继续？</p>
@@ -1467,7 +1481,7 @@ function renderSettingsThumbnailSection(): string {
         <div class="settings-actions">
           <button class="outline-button" type="button" id="settings-choose-thumbnail">选择文件夹…</button>
           <button class="primary-button" type="submit">保存目录</button>
-          <button class="outline-button" type="button" id="settings-rebuild-thumbnails" ${!state.library || state.thumbnailRebuilding ? "disabled" : ""}>${state.thumbnailRebuilding ? "重建中…" : "重建缩略图"}</button>
+          <button class="outline-button" type="button" id="settings-rebuild-thumbnails" ${!state.library || state.thumbnailRebuilding || state.availability !== "available" ? "disabled" : ""}>${state.thumbnailRebuilding ? "重建中…" : "重建缩略图"}</button>
         </div>
       </form>
       ${progress ? `<div class="settings-note">${progress.state === "running" ? `重建中：${formatCount(progress.processed)} / ${formatCount(progress.total)}` : progress.state === "completed" ? "缩略图重建完成。" : progress.state === "cancelled" ? "缩略图重建已取消。" : `缩略图重建失败：${escapeHtml(progress.error ?? "未知错误")}`}${progress.state === "running" && state.thumbnailJobId ? `<button class="text-button" type="button" id="settings-thumbnail-cancel">取消</button>` : ""}</div>` : ""}
@@ -1523,11 +1537,57 @@ function renderSettingsAboutSection(): string {
   </div>`;
 }
 
+function renderSettingsSystemSection(): string {
+  return `<div class="settings-section-body">
+    <div class="settings-status-card">
+      <h3>系统集成</h3>
+      <div class="settings-note">托盘与通知初始化失败不会影响主窗口。单实例启动：再次打开应用会聚焦已有窗口。</div>
+      <div class="settings-form">
+        <label><span>关闭窗口时</span><select id="settings-close-behavior" aria-label="关闭窗口行为">
+          <option value="minimize_to_tray" ${state.closeBehavior === "minimize_to_tray" ? "selected" : ""}>最小化到托盘</option>
+          <option value="quit" ${state.closeBehavior === "quit" ? "selected" : ""}>退出应用</option>
+        </select></label>
+        <label class="settings-checkbox"><input type="checkbox" id="settings-notifications" ${state.notificationsEnabled ? "checked" : ""} aria-label="启用系统通知" /><span>启用系统通知（扫描 / 备份 / 断盘）</span></label>
+        <div class="settings-actions">
+          <button class="primary-button" type="button" id="settings-save-system" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存系统设置"}</button>
+        </div>
+      </div>
+      <div class="settings-note">托盘图标支持左键显示主窗口；右键菜单可退出。关闭行为为「最小化到托盘」时，点击关闭按钮仅隐藏窗口。</div>
+    </div>
+    <div class="settings-status-card">
+      <h3>最近任务结果</h3>
+      ${renderRecentTasksSummary()}
+      <div class="settings-note">应用重启后不会恢复未完成任务，只展示 runs 表中的历史结果；中断的任务会标记为失败。</div>
+    </div>
+  </div>`;
+}
+
+function renderRecentTasksSummary(): string {
+  const scans = state.scanRuns.slice(0, 5);
+  const backups = state.backupHistory.slice(0, 5);
+  const scanRows = scans.length
+    ? scans.map((run) => `<div class="settings-scan-run">
+        <span class="run-status is-${run.status}">${scanRunStatusLabel(run.status)}</span>
+        <span>扫描 · ${escapeHtml(formatCaptureAt(run.startedAt) || run.startedAt)}</span>
+        <span>文件 ${formatCount(run.filesSeen)} · 新增 ${formatCount(run.itemsAdded)}</span>
+      </div>`).join("")
+    : `<div class="settings-note">还没有扫描记录。</div>`;
+  const backupRows = backups.length
+    ? backups.map((run) => `<div class="settings-scan-run">
+        <span class="run-status is-${run.status}">${backupStatusLabel(run.status)}</span>
+        <span>备份 · ${escapeHtml(formatCaptureAt(run.startedAt) || run.startedAt)}</span>
+        <span>成功 ${formatCount(run.copiedFiles)} · 失败 ${formatCount(run.failedFiles)}</span>
+      </div>`).join("")
+    : `<div class="settings-note">还没有备份记录。</div>`;
+  return `<div class="settings-scan-runs">${scanRows}${backupRows}</div>`;
+}
+
 function settingsSectionBodyHtml(): string {
   if (state.settingsSection === "library") return renderSettingsLibrarySection();
   if (state.settingsSection === "index") return renderSettingsIndexSection();
   if (state.settingsSection === "thumbnails") return renderSettingsThumbnailSection();
   if (state.settingsSection === "backup") return renderSettingsBackupSection();
+  if (state.settingsSection === "system") return renderSettingsSystemSection();
   return renderSettingsAboutSection();
 }
 
@@ -1542,7 +1602,7 @@ function renderSettingsPanel(): string {
       <header class="settings-header">
         <div>
           <h2 id="settings-title">设置</h2>
-          <span>库状态 · 索引 · 缩略图 · 备份默认 · 关于</span>
+          <span>库状态 · 索引 · 缩略图 · 备份 · 系统 · 关于</span>
         </div>
         <button class="icon-button" type="button" id="settings-close" aria-label="关闭设置">×</button>
       </header>
@@ -1592,9 +1652,9 @@ function render(): void {
     <div class="brand"><span class="brand-mark">C</span><div><strong>Camlib</strong><span>媒体库</span></div><button class="icon-button brand-settings" type="button" id="settings-button-top" title="设置" aria-label="打开设置">⚙</button></div>
     <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
-    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="扫描媒体库" id="scan-button" aria-label="扫描媒体库">⟳</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
+    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right">${renderRatingFilter()}<label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
     <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
@@ -1832,7 +1892,12 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); });
   app.querySelector<HTMLButtonElement>("#choose-folder-button")?.addEventListener("click", () => void chooseLibraryFolder());
   app.querySelector<HTMLButtonElement>("#library-cancel-button")?.addEventListener("click", () => { state.libraryFormOpen = false; render(); });
-  app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void scanLibrary());
+  app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void bootstrap());
+  app.querySelector<HTMLButtonElement>("#open-settings-from-banner")?.addEventListener("click", () => void openSettings("library"));
+  app.querySelector<HTMLButtonElement>("#dismiss-recent-task")?.addEventListener("click", () => {
+    state.recentTaskNotice = null;
+    render();
+  });
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
   bindSelectionToolbarEvents();
   app.querySelector<HTMLButtonElement>("#cancel-delete-confirm")?.addEventListener("click", cancelDeleteConfirm);
@@ -1956,6 +2021,7 @@ function bindSettingsBodyEvents(): void {
   app.querySelector<HTMLButtonElement>("#settings-rebuild-thumbnails")?.addEventListener("click", () => void runThumbnailRebuild());
   app.querySelector<HTMLButtonElement>("#settings-thumbnail-cancel")?.addEventListener("click", () => void cancelThumbnailRebuild());
   app.querySelector<HTMLButtonElement>("#settings-save-backup-defaults")?.addEventListener("click", () => void saveBackupDefaults());
+  app.querySelector<HTMLButtonElement>("#settings-save-system")?.addEventListener("click", () => void saveSystemSettings());
   app.querySelector<HTMLButtonElement>("#settings-open-backup-panel")?.addEventListener("click", () => {
     closeSettings();
     void openBackupPanel();
@@ -1964,7 +2030,8 @@ function bindSettingsBodyEvents(): void {
   app.querySelector<HTMLButtonElement>("#settings-open-thumbnail-cache")?.addEventListener("click", () => void openDirectory("thumbnail_cache"));
 }
 
-async function openSettings(): Promise<void> {
+async function openSettings(section?: SettingsSection): Promise<void> {
+  if (section) state.settingsSection = section;
   if (state.settingsOpen) return;
   state.settingsOpen = true;
   state.settingsLoading = true;
@@ -2019,6 +2086,17 @@ async function loadSettingsSectionData(): Promise<void> {
       state.backupIgnoreExtensions = extensionsToInput(infra.settings.backup_ignore_extensions);
       state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
       state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
+      state.notificationsEnabled = infra.settings.notifications_enabled;
+      state.closeBehavior = infra.settings.close_behavior;
+    }
+    if (state.settingsSection === "system") {
+      const [infra, backups] = await Promise.all([getInfrastructureState(), listBackupHistory(8)]);
+      state.notificationsEnabled = infra.settings.notifications_enabled;
+      state.closeBehavior = infra.settings.close_behavior;
+      state.backupHistory = backups;
+      if (state.library) {
+        state.scanRuns = await listScanRuns(state.library.id, 8);
+      }
     }
   } catch (error) {
     state.settingsError = error instanceof Error ? error.message : "加载设置失败";
@@ -2037,6 +2115,11 @@ async function openDirectory(which: "app_data" | "app_cache" | "thumbnail_cache"
 
 async function runSettingsScan(full: boolean): Promise<void> {
   if (!state.library || state.scanning) return;
+  if (state.availability !== "available") {
+    state.settingsError = state.libraryStatusReason || "媒体库不可用，请先连接磁盘";
+    updateSettingsPanel();
+    return;
+  }
   state.fullRebuildConfirm = false;
   state.settingsError = null;
   state.settingsNotice = full ? "正在全量重建索引…" : "正在增量扫描…";
@@ -2149,6 +2232,27 @@ async function saveBackupDefaults(): Promise<void> {
     state.settingsNotice = "备份默认项已保存";
   } catch (error) {
     state.settingsError = error instanceof Error ? error.message : "保存备份默认项失败";
+  } finally {
+    state.settingsBusy = false;
+    renderSettingsAware();
+  }
+}
+
+async function saveSystemSettings(): Promise<void> {
+  const behaviorSelect = app.querySelector<HTMLSelectElement>("#settings-close-behavior");
+  const notifications = app.querySelector<HTMLInputElement>("#settings-notifications");
+  const behavior = (behaviorSelect?.value as CloseBehavior | undefined) ?? state.closeBehavior;
+  const enabled = notifications?.checked ?? state.notificationsEnabled;
+  state.settingsBusy = true;
+  state.settingsError = null;
+  try {
+    await setCloseBehavior(behavior);
+    const settings = await setNotificationsEnabled(enabled);
+    state.closeBehavior = settings.close_behavior;
+    state.notificationsEnabled = settings.notifications_enabled;
+    state.settingsNotice = "系统设置已保存";
+  } catch (error) {
+    state.settingsError = error instanceof Error ? error.message : "保存系统设置失败";
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
@@ -2670,6 +2774,11 @@ function applyDeleteToGrid(result: DeleteResultDto, requestedIds: string[]): voi
 
 async function requestDeleteSelected(): Promise<void> {
   if (!state.library || !state.selectedIds.size || state.deleting || state.deleteConfirm) return;
+  if (state.availability !== "available") {
+    state.error = state.libraryStatusReason || "媒体库不可用，无法删除媒体";
+    render();
+    return;
+  }
   const ids = [...state.selectedIds];
   state.deleting = true;
   state.deleteResult = null;
@@ -2913,6 +3022,11 @@ async function viewNewImports(): Promise<void> {
 
 async function scanLibrary(): Promise<void> {
   if (!state.library || state.scanning) return;
+  if (state.availability !== "available") {
+    state.error = state.libraryStatusReason || "媒体库不可用，请先连接磁盘";
+    renderSettingsAware();
+    return;
+  }
   state.error = null; state.scanning = true; state.scanProgress = null; renderSettingsAware();
   try {
     const start = await startLibraryScan(state.library.id);
@@ -2939,14 +3053,29 @@ async function cancelCurrentScan(): Promise<void> {
 async function bootstrap(): Promise<void> {
   state.loading = true; state.error = null; renderSettingsAware();
   try {
-    const [infra, libraries] = await Promise.all([getInfrastructureState(), listLibraries()]);
+    const [infra, libraries, backups] = await Promise.all([
+      getInfrastructureState(),
+      listLibraries(),
+      listBackupHistory(8),
+    ]);
     state.backupConflictPolicy = infra.settings.backup_conflict_policy;
     state.backupIgnoreExtensions = extensionsToInput(infra.settings.backup_ignore_extensions);
     state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
     state.density = clampDensity(infra.settings.ui_density);
     state.sort = infra.settings.ui_sort;
     state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
+    state.notificationsEnabled = infra.settings.notifications_enabled;
+    state.closeBehavior = infra.settings.close_behavior;
+    state.backupHistory = backups;
     state.libraries = libraries; state.availability = infra.library_status.availability; state.rootPath = infra.library_status.root_path; state.libraryStatusReason = infra.library_status.reason; state.library = libraries.find((library) => library.rootPath === infra.library_status.root_path) ?? libraries[0] ?? null;
+    if (state.library) {
+      try {
+        state.scanRuns = await listScanRuns(state.library.id, 8);
+      } catch {
+        state.scanRuns = [];
+      }
+      state.recentTaskNotice = buildRecentTaskNotice(state.scanRuns, state.backupHistory);
+    }
     if (state.library && state.availability === "available") {
       state.facets = await listDateFacets(state.library.id);
       resetSidebarExpansionForSelection();
@@ -2956,6 +3085,22 @@ async function bootstrap(): Promise<void> {
     }
     else { state.page = { items: [], total: 0, offset: 0, limit: 120 }; state.facets = []; state.loading = false; renderSettingsAware(); }
   } catch (error) { state.loading = false; state.error = error instanceof Error ? error.message : "初始化媒体库失败"; renderSettingsAware(); }
+}
+
+/** Surface the newest interrupted/failed run once after restart. */
+function buildRecentTaskNotice(scans: ScanRunDto[], backups: BackupRunDto[]): string | null {
+  const lastScan = scans.find((run) => run.status === "failed" || run.status === "cancelled");
+  const lastBackup = backups.find((run) => run.status === "failed" || run.status === "cancelled");
+  const parts: string[] = [];
+  if (lastScan) {
+    const reason = lastScan.errorSummary || (lastScan.status === "cancelled" ? "已取消" : "未完成");
+    parts.push(`扫描 ${formatCaptureAt(lastScan.startedAt) || lastScan.startedAt}：${reason}`);
+  }
+  if (lastBackup) {
+    const reason = lastBackup.errorSummary || (lastBackup.status === "cancelled" ? "已取消" : "未完成");
+    parts.push(`备份 ${formatCaptureAt(lastBackup.startedAt) || lastBackup.startedAt}：${reason}`);
+  }
+  return parts.length ? `上次应用中断的任务已标记为失败。${parts.join(" · ")}` : null;
 }
 
 window.addEventListener("keydown", (event) => {
@@ -3190,3 +3335,19 @@ void onBackupProgress((progress) => {
   render();
 });
 void bootstrap();
+
+// Backend volume watcher: apply disconnect/reconnect without a manual refresh.
+void listen<LibraryStatus>("library-status", (event) => {
+  const status = event.payload;
+  const previous = state.availability;
+  state.availability = status.availability;
+  state.rootPath = status.root_path;
+  state.libraryStatusReason = status.reason;
+  if (previous === status.availability) return;
+  if (status.availability === "available") {
+    void bootstrap();
+    return;
+  }
+  state.scanning = false;
+  render();
+});

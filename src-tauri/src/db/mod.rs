@@ -214,6 +214,18 @@ impl Repository {
         Ok(())
     }
 
+    /// Mark orphaned running scan rows as failed after a process restart.
+    /// No job machinery is resumed — the UI just shows a clear terminal state.
+    pub fn fail_interrupted_scan_runs(&self, finished_at: &str) -> DbResult<usize> {
+        let changed = self.connection.execute(
+            "UPDATE scan_runs SET status = 'failed', finished_at = ?1,
+             error_summary = '应用退出时任务仍在进行，已标记为中断'
+             WHERE status = 'running'",
+            [finished_at],
+        )?;
+        Ok(changed)
+    }
+
     pub fn list_scan_file_records(&self, library_id: &str) -> DbResult<Vec<ScanFileRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT id, media_item_id, relative_path, size_bytes, modified_at, exists_now
@@ -1202,6 +1214,17 @@ impl Repository {
             .query_map([limit], map_backup_run)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Mark orphaned running backup rows as failed after a process restart.
+    pub fn fail_interrupted_backup_runs(&self, finished_at: &str) -> DbResult<usize> {
+        let changed = self.connection.execute(
+            "UPDATE backup_runs SET status = 'failed', finished_at = ?1,
+             error_summary = '应用退出时任务仍在进行，已标记为中断'
+             WHERE status = 'running'",
+            [finished_at],
+        )?;
+        Ok(changed)
     }
 
     pub fn get_backup_run(&self, id: &str) -> DbResult<Option<BackupRun>> {
@@ -3158,5 +3181,62 @@ mod tests {
             .map(|media| media.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, ["later-import", "backup-import"]);
+    }
+
+    #[test]
+    fn interrupted_scan_and_backup_runs_are_marked_failed_on_restart() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        repository
+            .begin_scan_run(NewScanRun {
+                id: "run-scan-orphan".into(),
+                library_id: "library-1".into(),
+                job_id: "job-scan".into(),
+                started_at: "unix-ms:100".into(),
+            })
+            .unwrap();
+        repository
+            .create_backup_run(NewBackupRun {
+                id: "run-backup-orphan".into(),
+                job_id: "job-backup".into(),
+                source_volume_id: None,
+                source_root_path: "E:\\".into(),
+                target_library_id: "library-1".into(),
+                status: BackupStatus::Running,
+                conflict_policy: ConflictPolicy::SkipSame,
+                ignore_extensions: "[]".into(),
+                started_at: "unix-ms:100".into(),
+                finished_at: None,
+                total_files: 1,
+                copied_files: 0,
+                skipped_files: 0,
+                failed_files: 0,
+                total_bytes: 0,
+                copied_bytes: 0,
+                error_summary: None,
+            })
+            .unwrap();
+
+        let scan_changed = repository.fail_interrupted_scan_runs("unix-ms:999").unwrap();
+        let backup_changed = repository.fail_interrupted_backup_runs("unix-ms:999").unwrap();
+        assert_eq!(scan_changed, 1);
+        assert_eq!(backup_changed, 1);
+
+        let scans = repository.list_scan_runs("library-1", 5).unwrap();
+        assert_eq!(scans[0].status, "failed");
+        assert!(scans[0]
+            .error_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("中断"));
+
+        let backups = repository.list_backup_runs(5).unwrap();
+        assert_eq!(backups[0].status, BackupStatus::Failed);
+        assert!(backups[0]
+            .error_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("中断"));
     }
 }

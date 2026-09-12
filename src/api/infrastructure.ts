@@ -8,6 +8,8 @@ export interface VolumeInfo {
 
 export type UiSortMode = "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
 
+export type CloseBehavior = "quit" | "minimize_to_tray";
+
 export interface AppSettings {
   library_root: string | null;
   thumbnail_cache_dir: string;
@@ -17,6 +19,8 @@ export interface AppSettings {
   ui_sort: UiSortMode;
   auto_scan_on_startup: boolean;
   backup_ignore_extensions: string[];
+  notifications_enabled: boolean;
+  close_behavior: CloseBehavior;
 }
 
 export type LibraryAvailability =
@@ -118,6 +122,14 @@ export function setUiPrefs(input: { uiDensity?: number; uiSort?: UiSortMode }): 
 
 export function setAutoScanOnStartup(enabled: boolean): Promise<AppSettings> {
   return invoke<AppSettings>("set_auto_scan_on_startup", { enabled });
+}
+
+export function setNotificationsEnabled(enabled: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("set_notifications_enabled", { enabled });
+}
+
+export function setCloseBehavior(behavior: CloseBehavior): Promise<AppSettings> {
+  return invoke<AppSettings>("set_close_behavior", { behavior });
 }
 
 export function getLibraryStatus(): Promise<LibraryStatus> {

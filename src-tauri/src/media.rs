@@ -20,7 +20,7 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::http::{header, Method, Request, Response, StatusCode};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -131,8 +131,12 @@ impl PreviewJobManagerState {
             .jobs
             .lock()
             .map_err(|_| "预览任务状态锁已损坏".to_owned())?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let job_id = format!(
-            "preview-{}",
+            "preview-{stamp}-{}",
             NEXT_PREVIEW_JOB.fetch_add(1, Ordering::Relaxed)
         );
         let cancel = Arc::new(AtomicBool::new(false));

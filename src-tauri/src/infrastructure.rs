@@ -81,6 +81,12 @@ pub struct AppSettings {
     /// backup preview when the request does not override them.
     #[serde(default = "default_backup_ignore_extensions")]
     pub backup_ignore_extensions: Vec<String>,
+    /// System notifications for scan/backup/disk events.
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    /// What the close button does when the tray icon is present.
+    #[serde(default)]
+    pub close_behavior: CloseBehavior,
 }
 
 fn default_ui_density() -> u8 {
@@ -93,6 +99,29 @@ fn default_true() -> bool {
 
 fn default_backup_ignore_extensions() -> Vec<String> {
     vec![".dng".to_owned(), ".lrv".to_owned()]
+}
+
+/// Window close action when the tray icon is available.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    /// Close the window and exit the process.
+    Quit,
+    /// Hide the window and keep running in the tray.
+    #[default]
+    MinimizeToTray,
+}
+
+impl CloseBehavior {
+    pub fn parse(value: &str) -> Result<Self, InfrastructureError> {
+        match value {
+            "quit" => Ok(Self::Quit),
+            "minimize_to_tray" => Ok(Self::MinimizeToTray),
+            other => Err(InfrastructureError::InvalidSettings(format!(
+                "关闭行为无效: {other}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -341,6 +370,24 @@ impl Infrastructure {
         self.settings()
     }
 
+    pub fn set_notifications_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<AppSettings, InfrastructureError> {
+        self.store.settings.notifications_enabled = enabled;
+        self.store.save()?;
+        self.settings()
+    }
+
+    pub fn set_close_behavior(
+        &mut self,
+        behavior: CloseBehavior,
+    ) -> Result<AppSettings, InfrastructureError> {
+        self.store.settings.close_behavior = behavior;
+        self.store.save()?;
+        self.settings()
+    }
+
     pub fn app_data_dir(&self) -> PathBuf {
         self.app_data_dir.clone()
     }
@@ -474,6 +521,8 @@ impl SettingsStore {
                 ui_sort: UiSort::default(),
                 auto_scan_on_startup: true,
                 backup_ignore_extensions: default_backup_ignore_extensions(),
+                notifications_enabled: true,
+                close_behavior: CloseBehavior::default(),
             }
         };
 
@@ -522,6 +571,10 @@ struct DiskSettings {
     auto_scan_on_startup: bool,
     #[serde(default = "default_backup_ignore_extensions")]
     backup_ignore_extensions: Vec<String>,
+    #[serde(default = "default_true")]
+    notifications_enabled: bool,
+    #[serde(default)]
+    close_behavior: CloseBehavior,
 }
 
 impl DiskSettings {
@@ -561,6 +614,8 @@ impl DiskSettings {
             } else {
                 self.backup_ignore_extensions
             },
+            notifications_enabled: self.notifications_enabled,
+            close_behavior: self.close_behavior,
         })
     }
 }
@@ -577,6 +632,8 @@ impl From<&AppSettings> for DiskSettings {
             ui_sort: Some(settings.ui_sort.clone()),
             auto_scan_on_startup: settings.auto_scan_on_startup,
             backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
+            notifications_enabled: settings.notifications_enabled,
+            close_behavior: settings.close_behavior,
         }
     }
 }
@@ -1060,6 +1117,8 @@ mod tests {
             ui_sort: None,
             auto_scan_on_startup: true,
             backup_ignore_extensions: default_backup_ignore_extensions(),
+            notifications_enabled: true,
+            close_behavior: CloseBehavior::default(),
         };
         fs::write(
             &settings_path,
@@ -1129,6 +1188,33 @@ mod tests {
         assert_eq!(settings.ui_density, 5);
         assert_eq!(settings.ui_sort, UiSort::Name);
         assert!(!settings.auto_scan_on_startup);
+    }
+
+    #[test]
+    fn system_settings_survive_reload() {
+        let (temp_dir, mut infrastructure) = test_infrastructure();
+        let defaults = infrastructure.settings().unwrap();
+        assert!(defaults.notifications_enabled);
+        assert_eq!(defaults.close_behavior, CloseBehavior::MinimizeToTray);
+
+        let updated = infrastructure
+            .set_notifications_enabled(false)
+            .expect("disable notifications");
+        assert!(!updated.notifications_enabled);
+        let updated = infrastructure
+            .set_close_behavior(CloseBehavior::Quit)
+            .expect("set close behavior");
+        assert_eq!(updated.close_behavior, CloseBehavior::Quit);
+        assert!(CloseBehavior::parse("quit").is_ok());
+        assert!(CloseBehavior::parse("minimize_to_tray").is_ok());
+        assert!(CloseBehavior::parse("explode").is_err());
+
+        let settings_path = temp_dir.path().join("app-data").join("settings.json");
+        let reloaded = Infrastructure::open(settings_path, temp_dir.path().join("other-cache"))
+            .expect("reload infrastructure");
+        let settings = reloaded.settings().unwrap();
+        assert!(!settings.notifications_enabled);
+        assert_eq!(settings.close_behavior, CloseBehavior::Quit);
     }
 
     #[test]

@@ -12,7 +12,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
+/// Process-local sequence only. Combined with wall-clock nanos in
+/// [`next_job_id`] so a restart cannot reuse `scan-1` / `run-scan-1` and
+/// collide with a previous session's `scan_runs` row.
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
+
+fn next_job_id() -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("scan-{stamp}-{}", NEXT_JOB.fetch_add(1, Ordering::Relaxed))
+}
 
 #[derive(Debug, Clone)]
 pub struct ScanManagerState {
@@ -40,7 +51,7 @@ impl ScanManagerState {
         if jobs.values().any(|job| job.library_id == library_id) {
             return Err("该媒体库已有扫描任务正在运行".to_owned());
         }
-        let job_id = format!("scan-{}", NEXT_JOB.fetch_add(1, Ordering::Relaxed));
+        let job_id = next_job_id();
         let cancel = Arc::new(AtomicBool::new(false));
         jobs.insert(
             job_id.clone(),
@@ -892,9 +903,10 @@ fn emit_terminal(
             } else {
                 vec![]
             },
-            error,
+            error: error.clone(),
         },
     );
+    crate::system::notify_scan_terminal(app, state, processed, error.as_deref());
 }
 
 fn emit(app: &AppHandle, progress: ScanProgress) {

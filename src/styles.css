@@ -139,6 +139,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 .notice-banner.is-warning .notice-icon { background:#8a5a12; }
 .notice-banner.is-warning { background:rgba(255,248,235,.62); }
 .notice-banner.is-success { background:rgba(236,248,240,.62); }
+.notice-banner.is-info .notice-icon { background:#2a4a7a; }
+.notice-banner.is-info { background:rgba(236,242,252,.62); }
 .delete-error-list { max-height:140px; margin:8px 0 0; padding:0 0 0 16px; overflow:auto; color:#5a4030; font-size:11px; line-height:1.55; }
 .delete-error-list li { margin:2px 0; word-break:break-all; }
 .delete-recover-hint { display:block; margin-top:6px; color:#6b6b6b; font-size:10px; }
@@ -1231,6 +1233,20 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 .settings-form select:focus {
   border-color:rgba(0,0,0,.22);
   box-shadow:0 0 0 3px rgba(0,0,0,.06);
+}
+.settings-form label.settings-checkbox {
+  flex-direction:row;
+  align-items:center;
+  gap:8px;
+  font-size:12px;
+  font-weight:600;
+  letter-spacing:0;
+  text-transform:none;
+}
+.settings-form label.settings-checkbox input {
+  width:16px;
+  height:16px;
+  flex:0 0 auto;
 }
 .settings-ffmpeg {
   display:flex;
