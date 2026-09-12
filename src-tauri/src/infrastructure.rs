@@ -71,6 +71,10 @@ pub struct AppSettings {
     /// Automatically start an incremental scan when the library is available.
     #[serde(default = "default_true")]
     pub auto_scan_on_startup: bool,
+    /// Single source of truth for backup ignore extensions used by the UI and
+    /// backup preview when the request does not override them.
+    #[serde(default = "default_backup_ignore_extensions")]
+    pub backup_ignore_extensions: Vec<String>,
 }
 
 fn default_ui_density() -> u8 {
@@ -79,6 +83,10 @@ fn default_ui_density() -> u8 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_backup_ignore_extensions() -> Vec<String> {
+    vec![".dng".to_owned(), ".lrv".to_owned()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,6 +141,8 @@ pub struct Infrastructure {
     store: SettingsStore,
     repository: Repository,
     database_path: PathBuf,
+    app_data_dir: PathBuf,
+    app_cache_dir: PathBuf,
 }
 
 impl Infrastructure {
@@ -153,12 +163,22 @@ impl Infrastructure {
         default_thumbnail_cache_dir: PathBuf,
         database_path: PathBuf,
     ) -> Result<Self, InfrastructureError> {
-        let store = SettingsStore::open(settings_path, default_thumbnail_cache_dir)?;
+        let store = SettingsStore::open(settings_path.clone(), default_thumbnail_cache_dir.clone())?;
         let repository = Repository::open(&database_path).map_err(InfrastructureError::database)?;
+        let app_data_dir = settings_path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let app_cache_dir = default_thumbnail_cache_dir
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| app_data_dir.clone());
         Ok(Self {
             store,
             repository,
             database_path,
+            app_data_dir,
+            app_cache_dir,
         })
     }
 
@@ -305,6 +325,34 @@ impl Infrastructure {
         self.settings()
     }
 
+    pub fn set_backup_ignore_extensions(
+        &mut self,
+        extensions: Vec<String>,
+    ) -> Result<AppSettings, InfrastructureError> {
+        let normalized = normalize_ignore_extensions(extensions);
+        self.store.settings.backup_ignore_extensions = normalized;
+        self.store.save()?;
+        self.settings()
+    }
+
+    pub fn app_data_dir(&self) -> PathBuf {
+        self.app_data_dir.clone()
+    }
+
+    pub fn app_cache_dir(&self) -> PathBuf {
+        self.app_cache_dir.clone()
+    }
+
+    pub fn settings_path(&self) -> PathBuf {
+        self.store.path.clone()
+    }
+
+    /// Rough on-disk size of the thumbnail cache. Walks the directory once;
+    /// intended for the settings page, not for hot paths.
+    pub fn thumbnail_cache_stats(&self) -> Result<DirectoryStats, InfrastructureError> {
+        directory_stats(Path::new(&self.store.settings.thumbnail_cache_dir))
+    }
+
     pub fn library_status(&mut self) -> Result<LibraryStatus, InfrastructureError> {
         let Some(root_text) = self.store.settings.library_root.clone() else {
             return Ok(LibraryStatus {
@@ -419,6 +467,7 @@ impl SettingsStore {
                 ui_density: default_ui_density(),
                 ui_sort: UiSort::default(),
                 auto_scan_on_startup: true,
+                backup_ignore_extensions: default_backup_ignore_extensions(),
             }
         };
 
@@ -465,6 +514,8 @@ struct DiskSettings {
     ui_sort: Option<UiSort>,
     #[serde(default = "default_true")]
     auto_scan_on_startup: bool,
+    #[serde(default = "default_backup_ignore_extensions")]
+    backup_ignore_extensions: Vec<String>,
 }
 
 impl DiskSettings {
@@ -499,6 +550,11 @@ impl DiskSettings {
             ui_density: self.ui_density,
             ui_sort: self.ui_sort.unwrap_or_default(),
             auto_scan_on_startup: self.auto_scan_on_startup,
+            backup_ignore_extensions: if self.backup_ignore_extensions.is_empty() {
+                default_backup_ignore_extensions()
+            } else {
+                self.backup_ignore_extensions
+            },
         })
     }
 }
@@ -514,6 +570,7 @@ impl From<&AppSettings> for DiskSettings {
             ui_density: settings.ui_density,
             ui_sort: Some(settings.ui_sort.clone()),
             auto_scan_on_startup: settings.auto_scan_on_startup,
+            backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
         }
     }
 }
@@ -665,6 +722,73 @@ fn stable_library_id(root: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("library-{hash:016x}")
+}
+
+/// Normalize ignore extensions to lowercase `.ext` form, drop empties/dupes.
+fn normalize_ignore_extensions(extensions: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for extension in extensions {
+        let trimmed = extension.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = if trimmed.starts_with('.') {
+            trimmed
+        } else {
+            format!(".{trimmed}")
+        };
+        if !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    if normalized.is_empty() {
+        default_backup_ignore_extensions()
+    } else {
+        normalized
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryStats {
+    pub path: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+}
+
+fn directory_stats(root: &Path) -> Result<DirectoryStats, InfrastructureError> {
+    if !root.exists() {
+        return Ok(DirectoryStats {
+            path: path_to_string(root),
+            file_count: 0,
+            total_bytes: 0,
+        });
+    }
+    let mut file_count = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| InfrastructureError::io(&directory, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| InfrastructureError::io(&directory, error))?;
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata.is_file() {
+                file_count += 1;
+                total_bytes += metadata.len();
+            }
+        }
+    }
+    Ok(DirectoryStats {
+        path: path_to_string(root),
+        file_count,
+        total_bytes,
+    })
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), InfrastructureError> {
@@ -929,6 +1053,7 @@ mod tests {
             ui_density: default_ui_density(),
             ui_sort: None,
             auto_scan_on_startup: true,
+            backup_ignore_extensions: default_backup_ignore_extensions(),
         };
         fs::write(
             &settings_path,
@@ -1005,5 +1130,57 @@ mod tests {
         let (_temp_dir, mut infrastructure) = test_infrastructure();
         assert!(infrastructure.set_ui_prefs(Some(0), None).is_err());
         assert!(infrastructure.set_ui_prefs(Some(6), None).is_err());
+    }
+
+    #[test]
+    fn backup_ignore_extensions_are_normalized_and_persisted() {
+        let (temp_dir, mut infrastructure) = test_infrastructure();
+        let defaults = infrastructure.settings().unwrap().backup_ignore_extensions;
+        assert_eq!(defaults, vec![".dng".to_owned(), ".lrv".to_owned()]);
+
+        let updated = infrastructure
+            .set_backup_ignore_extensions(vec![
+                " JPG ".to_owned(),
+                ".jpg".to_owned(),
+                "png".to_owned(),
+                "".to_owned(),
+            ])
+            .expect("set ignore extensions");
+        assert_eq!(updated.backup_ignore_extensions, vec![".jpg", ".png"]);
+
+        let settings_path = temp_dir.path().join("app-data").join("settings.json");
+        let reloaded = Infrastructure::open(settings_path, temp_dir.path().join("other-cache"))
+            .expect("reload infrastructure");
+        assert_eq!(
+            reloaded.settings().unwrap().backup_ignore_extensions,
+            vec![".jpg".to_owned(), ".png".to_owned()]
+        );
+    }
+
+    #[test]
+    fn empty_ignore_extensions_fall_back_to_defaults() {
+        let (_temp_dir, mut infrastructure) = test_infrastructure();
+        let updated = infrastructure
+            .set_backup_ignore_extensions(vec![])
+            .expect("set empty ignore extensions");
+        assert_eq!(
+            updated.backup_ignore_extensions,
+            default_backup_ignore_extensions()
+        );
+    }
+
+    #[test]
+    fn thumbnail_cache_stats_count_files() {
+        let (temp_dir, mut infrastructure) = test_infrastructure();
+        let cache = temp_dir.path().join("stats-cache");
+        infrastructure
+            .set_thumbnail_cache_dir(cache.clone())
+            .expect("set cache");
+        fs::write(cache.join("a.jpg"), vec![0_u8; 16]).expect("write a");
+        fs::create_dir(cache.join("nested")).expect("nested");
+        fs::write(cache.join("nested").join("b.jpg"), vec![0_u8; 8]).expect("write b");
+        let stats = infrastructure.thumbnail_cache_stats().expect("stats");
+        assert_eq!(stats.file_count, 2);
+        assert_eq!(stats.total_bytes, 24);
     }
 }

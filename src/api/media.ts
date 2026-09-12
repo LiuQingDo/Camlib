@@ -205,8 +205,8 @@ export interface ScanProgressDto {
   error: string | null;
 }
 
-export function startLibraryScan(libraryId: string): Promise<ScanStartDto> {
-  return invoke<ScanStartDto>("library_scan_start", { libraryId });
+export function startLibraryScan(libraryId: string, full = false): Promise<ScanStartDto> {
+  return invoke<ScanStartDto>("library_scan_start", { libraryId, full });
 }
 
 export function cancelLibraryScan(jobId: string): Promise<void> {

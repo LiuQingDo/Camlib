@@ -379,6 +379,67 @@ impl Repository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Recent scan attempts for one library, newest first.
+    pub fn list_scan_runs(&self, library_id: &str, limit: i64) -> DbResult<Vec<ScanRun>> {
+        let limit = limit.clamp(1, 100);
+        let mut statement = self.connection.prepare(
+            "SELECT id, library_id, job_id, status, started_at, finished_at, files_seen,
+                    items_added, items_updated, items_missing, errors, error_summary
+             FROM scan_runs
+             WHERE library_id = ?1
+             ORDER BY started_at DESC, rowid DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![library_id, limit], map_scan_run)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Aggregate index counters used by the settings status card.
+    pub fn library_index_summary(&self, library_id: &str) -> DbResult<LibraryIndexSummary> {
+        let library = self.get_library(library_id)?.ok_or_else(|| {
+            DbError::InvalidInput("媒体库不存在".to_owned())
+        })?;
+        let mut statement = self.connection.prepare(
+            "SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN kind = 'photo' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'video' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'live' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN scan_state = 'missing' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(total_size_bytes), 0)
+             FROM media_items WHERE library_id = ?1",
+        )?;
+        let row = statement.query_row([library_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let favorites = self.connection.query_row(
+            "SELECT COUNT(*) FROM favorites f
+             JOIN media_items m ON m.id = f.media_item_id
+             WHERE m.library_id = ?1",
+            [library_id],
+            |row| row.get(0),
+        )?;
+        Ok(LibraryIndexSummary {
+            library_id: library_id.to_owned(),
+            total_items: row.0,
+            photos: row.1,
+            videos: row.2,
+            live: row.3,
+            missing: row.4,
+            favorites,
+            total_size_bytes: row.5,
+            last_scan_at: library.last_scan_at,
+            scan_generation: library.scan_generation,
+        })
+    }
+
     /// Insert or update one logical media item. The stable `id` is supplied by
     /// the caller so rescans can retain favorites and tags.
     pub fn upsert_media_item(&self, input: NewMediaItem) -> DbResult<MediaItem> {
@@ -1336,6 +1397,38 @@ pub struct NewScanRun {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRun {
+    pub id: String,
+    pub library_id: String,
+    pub job_id: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub files_seen: i64,
+    pub items_added: i64,
+    pub items_updated: i64,
+    pub items_missing: i64,
+    pub errors: i64,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryIndexSummary {
+    pub library_id: String,
+    pub total_items: i64,
+    pub photos: i64,
+    pub videos: i64,
+    pub live: i64,
+    pub missing: i64,
+    pub favorites: i64,
+    pub total_size_bytes: i64,
+    pub last_scan_at: Option<String>,
+    pub scan_generation: i64,
+}
+
 pub struct FinishScanRun<'a> {
     pub id: &'a str,
     pub status: &'a str,
@@ -1824,6 +1917,24 @@ fn map_library(row: &Row<'_>) -> rusqlite::Result<Library> {
         updated_at: row.get(10)?,
     })
 }
+
+fn map_scan_run(row: &Row<'_>) -> rusqlite::Result<ScanRun> {
+    Ok(ScanRun {
+        id: row.get(0)?,
+        library_id: row.get(1)?,
+        job_id: row.get(2)?,
+        status: row.get(3)?,
+        started_at: row.get(4)?,
+        finished_at: row.get(5)?,
+        files_seen: row.get(6)?,
+        items_added: row.get(7)?,
+        items_updated: row.get(8)?,
+        items_missing: row.get(9)?,
+        errors: row.get(10)?,
+        error_summary: row.get(11)?,
+    })
+}
+
 fn map_media_item(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
     Ok(MediaItem {
         id: row.get(0)?,
@@ -2038,6 +2149,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexes, 12);
+    }
+
+    #[test]
+    fn scan_runs_and_index_summary_are_queryable() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        repository
+            .begin_scan_run(NewScanRun {
+                id: "run-a".into(),
+                library_id: "library-1".into(),
+                job_id: "job-a".into(),
+                started_at: "2026-01-02T00:00:00Z".into(),
+            })
+            .unwrap();
+        repository
+            .finish_scan_run(FinishScanRun {
+                id: "run-a",
+                status: "completed",
+                finished_at: "2026-01-02T00:05:00Z",
+                files_seen: 3,
+                items_added: 2,
+                items_updated: 1,
+                items_missing: 0,
+                errors: 0,
+                error_summary: None,
+            })
+            .unwrap();
+        repository
+            .begin_scan_run(NewScanRun {
+                id: "run-b".into(),
+                library_id: "library-1".into(),
+                job_id: "job-b".into(),
+                started_at: "2026-01-03T00:00:00Z".into(),
+            })
+            .unwrap();
+
+        let runs = repository.list_scan_runs("library-1", 8).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, "run-b");
+        assert_eq!(runs[0].status, "running");
+        assert_eq!(runs[1].id, "run-a");
+        assert_eq!(runs[1].files_seen, 3);
+
+        repository.upsert_media_item(item("photo-1", MediaKind::Photo)).unwrap();
+        repository.upsert_media_item(item("video-1", MediaKind::Video)).unwrap();
+        repository.set_favorite("photo-1", true, "2026-01-03T01:00:00Z").unwrap();
+
+        let summary = repository.library_index_summary("library-1").unwrap();
+        assert_eq!(summary.total_items, 2);
+        assert_eq!(summary.photos, 1);
+        assert_eq!(summary.videos, 1);
+        assert_eq!(summary.live, 0);
+        assert_eq!(summary.favorites, 1);
+        assert_eq!(summary.missing, 0);
     }
 
     #[test]

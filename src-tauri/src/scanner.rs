@@ -111,10 +111,18 @@ pub fn spawn_scan(
     library_id: String,
     job_id: String,
     cancel: Arc<AtomicBool>,
+    full_rebuild: bool,
 ) {
     let job_for_thread = job_id.clone();
     std::thread::spawn(move || {
-        run_scan(&app, &database_path, &library_id, &job_for_thread, &cancel);
+        run_scan(
+            &app,
+            &database_path,
+            &library_id,
+            &job_for_thread,
+            &cancel,
+            full_rebuild,
+        );
         manager.finish(&job_for_thread);
     });
 }
@@ -125,6 +133,7 @@ fn run_scan(
     library_id: &str,
     job_id: &str,
     cancel: &AtomicBool,
+    full_rebuild: bool,
 ) {
     let repository = match Repository::open(database_path) {
         Ok(repository) => repository,
@@ -295,25 +304,31 @@ fn run_scan(
             error: None,
         },
     );
-    let old_files = match repository.list_scan_file_records(library_id) {
-        Ok(files) => files
-            .into_iter()
-            .map(|file| (file.relative_path.clone(), file))
-            .collect::<HashMap<_, _>>(),
-        Err(error) => {
-            finish_run(
-                &repository,
-                &scan_run_id,
-                "failed",
-                0,
-                0,
-                0,
-                0,
-                1,
-                &error.to_string(),
-            );
-            emit_terminal(app, job_id, "failed", 0, 0, 0, 1, Some(error.to_string()));
-            return;
+    let old_files = if full_rebuild {
+        // Full rebuild treats every discovered file as new so size/mtime
+        // shortcuts cannot skip metadata re-extraction.
+        HashMap::new()
+    } else {
+        match repository.list_scan_file_records(library_id) {
+            Ok(files) => files
+                .into_iter()
+                .map(|file| (file.relative_path.clone(), file))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                finish_run(
+                    &repository,
+                    &scan_run_id,
+                    "failed",
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    &error.to_string(),
+                );
+                emit_terminal(app, job_id, "failed", 0, 0, 0, 1, Some(error.to_string()));
+                return;
+            }
         }
     };
     let total = discovered.len() as i64;

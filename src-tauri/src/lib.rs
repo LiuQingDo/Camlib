@@ -13,7 +13,7 @@ use db::{MediaKind, MediaQuery, MediaSort};
 use infrastructure::{AppSettings, Infrastructure, InfrastructureState, LibraryStatus};
 use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -81,6 +81,163 @@ fn set_auto_scan_on_startup(
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, String> {
     state.with_infrastructure(|infrastructure| infrastructure.set_auto_scan_on_startup(enabled))
+}
+
+/// Persist backup ignore extensions used as the single default source for
+/// the settings panel and backup preview.
+#[tauri::command]
+fn set_backup_ignore_extensions(
+    extensions: Vec<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure.set_backup_ignore_extensions(extensions)
+    })
+}
+
+/// Recent scan_runs rows for the settings index summary.
+#[tauri::command]
+fn list_scan_runs(
+    library_id: String,
+    limit: Option<i64>,
+    state: State<'_, InfrastructureState>,
+) -> Result<Vec<db::ScanRun>, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .list_scan_runs(&library_id, limit.unwrap_or(8))
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+/// Aggregate counters for the media-library status card.
+#[tauri::command]
+fn library_index_summary(
+    library_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<db::LibraryIndexSummary, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .library_index_summary(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FfmpegStatusDto {
+    available: bool,
+    path: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailCacheStatsDto {
+    path: String,
+    file_count: u64,
+    total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppAboutDto {
+    version: String,
+    app_data_dir: String,
+    app_cache_dir: String,
+    database_path: String,
+    settings_path: String,
+    thumbnail_cache_dir: String,
+    ffmpeg: FfmpegStatusDto,
+}
+
+/// Version, directories, and ffmpeg detection for the About panel.
+#[tauri::command]
+fn get_app_about(
+    app: AppHandle,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppAboutDto, String> {
+    let (app_data_dir, app_cache_dir, database_path, settings_path, thumbnail_cache_dir) = state
+        .with_infrastructure(|infrastructure| {
+            let settings = infrastructure.settings()?;
+            Ok((
+                infrastructure.app_data_dir(),
+                infrastructure.app_cache_dir(),
+                infrastructure.database_path(),
+                infrastructure.settings_path(),
+                PathBuf::from(settings.thumbnail_cache_dir),
+            ))
+        })?;
+    let ffmpeg = match media::resolve_ffmpeg(&app) {
+        Ok(path) => FfmpegStatusDto {
+            available: true,
+            path: Some(path.to_string_lossy().into_owned()),
+            message: None,
+        },
+        Err(message) => FfmpegStatusDto {
+            available: false,
+            path: None,
+            message: Some(message),
+        },
+    };
+    Ok(AppAboutDto {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        app_data_dir: app_data_dir.to_string_lossy().into_owned(),
+        app_cache_dir: app_cache_dir.to_string_lossy().into_owned(),
+        database_path: database_path.to_string_lossy().into_owned(),
+        settings_path: settings_path.to_string_lossy().into_owned(),
+        thumbnail_cache_dir: thumbnail_cache_dir.to_string_lossy().into_owned(),
+        ffmpeg,
+    })
+}
+
+#[tauri::command]
+fn get_thumbnail_cache_stats(
+    state: State<'_, InfrastructureState>,
+) -> Result<ThumbnailCacheStatsDto, String> {
+    state.with_infrastructure(|infrastructure| {
+        let stats = infrastructure.thumbnail_cache_stats()?;
+        Ok(ThumbnailCacheStatsDto {
+            path: stats.path,
+            file_count: stats.file_count,
+            total_bytes: stats.total_bytes,
+        })
+    })
+}
+
+/// Open a directory in Explorer. Accepts only well-known app-owned locations.
+#[tauri::command]
+fn open_app_directory(
+    which: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), String> {
+    let path = state.with_infrastructure(|infrastructure| {
+        let settings = infrastructure.settings()?;
+        Ok(match which.as_str() {
+            "app_data" => infrastructure.app_data_dir(),
+            "app_cache" => infrastructure.app_cache_dir(),
+            "thumbnail_cache" => PathBuf::from(settings.thumbnail_cache_dir),
+            "library" => PathBuf::from(
+                infrastructure
+                    .library_status()?
+                    .root_path
+                    .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath(
+                        "尚未配置媒体库".to_owned(),
+                    ))?,
+            ),
+            other => {
+                return Err(infrastructure::InfrastructureError::InvalidPath(format!(
+                    "不支持的目录类型: {other}"
+                )))
+            }
+        })
+    })?;
+    if !path.exists() {
+        return Err(format!("目录不存在: {}", path.display()));
+    }
+    tauri_plugin_opener::open_path(&path, None::<&str>)
+        .map_err(|error| format!("打开目录失败: {error}"))
 }
 
 /// Re-check the library root and its recorded volume identity.
@@ -464,9 +621,11 @@ fn preview_job_cancel(
 
 /// Start an incremental scan. The worker reads the root path from the
 /// `libraries` table, not from frontend input or a compiled-in drive letter.
+/// `full` forces reprocessing of every file (size/mtime shortcuts ignored).
 #[tauri::command]
 fn library_scan_start(
     library_id: String,
+    full: Option<bool>,
     app: AppHandle,
     infrastructure: State<'_, InfrastructureState>,
     jobs: State<'_, ScanManagerState>,
@@ -487,6 +646,7 @@ fn library_scan_start(
         library_id,
         job_id.clone(),
         cancel,
+        full.unwrap_or(false),
     );
     Ok(ScanStartResponse {
         job_id,
@@ -507,22 +667,30 @@ fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
 }
 
 /// Build and persist a read-only backup preview. Copying is a separate command
-/// and requires the preview confirmation token.
+/// and requires the preview confirmation token. Conflict policy and default
+/// ignore extensions come from app settings when the request omits them.
 #[tauri::command]
 async fn backup_preview(
     request: BackupPreviewRequest,
     state: State<'_, InfrastructureState>,
 ) -> Result<BackupPreviewDto, String> {
-    let (database_path, conflict_policy) = state.with_infrastructure(|infrastructure| {
+    let (database_path, conflict_policy, default_ignore) = state.with_infrastructure(|infrastructure| {
+        let settings = infrastructure.settings()?;
         Ok((
             infrastructure.database_path(),
-            infrastructure.settings()?.backup_conflict_policy,
+            settings.backup_conflict_policy,
+            settings.backup_ignore_extensions,
         ))
     })?;
     tauri::async_runtime::spawn_blocking(move || {
         let repository = db::Repository::open(database_path).map_err(|error| error.to_string())?;
         let mut request = request;
-        request.conflict_policy = Some(conflict_policy);
+        if request.conflict_policy.is_none() {
+            request.conflict_policy = Some(conflict_policy);
+        }
+        if request.ignore_extensions.is_none() {
+            request.ignore_extensions = Some(default_ignore);
+        }
         backup::preview(&repository, request).map_err(|error| error.to_string())
     })
     .await
@@ -708,10 +876,16 @@ pub fn run() {
             set_library_root,
             set_thumbnail_cache_dir,
             set_backup_conflict_policy,
+            set_backup_ignore_extensions,
             set_ui_prefs,
             set_auto_scan_on_startup,
             get_library_status,
             get_infrastructure_state,
+            list_scan_runs,
+            library_index_summary,
+            get_app_about,
+            get_thumbnail_cache_stats,
+            open_app_directory,
             library_list,
             media_query,
             media_date_facets,

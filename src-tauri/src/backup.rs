@@ -446,6 +446,7 @@ pub fn spawn(
                             run.target_library_id,
                             scan_job,
                             scan_cancel,
+                            false,
                         );
                     }
                 }
