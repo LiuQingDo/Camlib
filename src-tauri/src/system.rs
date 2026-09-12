@@ -159,11 +159,7 @@ pub fn spawn_volume_watch(app: AppHandle<Wry>) {
     });
 }
 
-fn handle_availability(
-    app: &AppHandle<Wry>,
-    state: &VolumeWatchState,
-    status: LibraryStatus,
-) {
+fn handle_availability(app: &AppHandle<Wry>, state: &VolumeWatchState, status: LibraryStatus) {
     let mut last = match state.last.lock() {
         Ok(lock) => lock,
         Err(_) => return,

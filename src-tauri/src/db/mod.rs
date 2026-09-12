@@ -411,9 +411,9 @@ impl Repository {
 
     /// Aggregate index counters used by the settings status card.
     pub fn library_index_summary(&self, library_id: &str) -> DbResult<LibraryIndexSummary> {
-        let library = self.get_library(library_id)?.ok_or_else(|| {
-            DbError::InvalidInput("媒体库不存在".to_owned())
-        })?;
+        let library = self
+            .get_library(library_id)?
+            .ok_or_else(|| DbError::InvalidInput("媒体库不存在".to_owned()))?;
         let mut statement = self.connection.prepare(
             "SELECT
                 COUNT(*) AS total,
@@ -656,7 +656,9 @@ impl Repository {
         }
         // Keep only media first indexed at/after a timestamp. Production writes
         // `unix-ms:<millis>`; the filter accepts that form or a bare integer.
-        if let Some(first_seen_from) = query.first_seen_from.filter(|value| !value.trim().is_empty())
+        if let Some(first_seen_from) = query
+            .first_seen_from
+            .filter(|value| !value.trim().is_empty())
         {
             let raw = first_seen_from.trim();
             let numeric = raw.strip_prefix("unix-ms:").unwrap_or(raw);
@@ -2495,9 +2497,15 @@ mod tests {
         assert_eq!(runs[1].id, "run-a");
         assert_eq!(runs[1].files_seen, 3);
 
-        repository.upsert_media_item(item("photo-1", MediaKind::Photo)).unwrap();
-        repository.upsert_media_item(item("video-1", MediaKind::Video)).unwrap();
-        repository.set_favorite("photo-1", true, "2026-01-03T01:00:00Z").unwrap();
+        repository
+            .upsert_media_item(item("photo-1", MediaKind::Photo))
+            .unwrap();
+        repository
+            .upsert_media_item(item("video-1", MediaKind::Video))
+            .unwrap();
+        repository
+            .set_favorite("photo-1", true, "2026-01-03T01:00:00Z")
+            .unwrap();
 
         let summary = repository.library_index_summary("library-1").unwrap();
         assert_eq!(summary.total_items, 2);
@@ -2886,7 +2894,10 @@ mod tests {
 
         repository.delete_tag(&tag.id).unwrap();
         assert!(repository.list_tags().unwrap().is_empty());
-        assert!(repository.list_tags_for_media("photo-b").unwrap().is_empty());
+        assert!(repository
+            .list_tags_for_media("photo-b")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3103,7 +3114,9 @@ mod tests {
                 .set_favorite(&item_id, true, "2026-01-01T00:00:00Z")
                 .unwrap();
             // Simulate a scan re-upsert of the same logical id.
-            repository.upsert_media_item(item("photo-1", MediaKind::Photo)).unwrap();
+            repository
+                .upsert_media_item(item("photo-1", MediaKind::Photo))
+                .unwrap();
         }
         let repository = Repository::open(&database).unwrap();
         assert!(repository.is_favorite(&item_id).unwrap());
@@ -3218,8 +3231,12 @@ mod tests {
             })
             .unwrap();
 
-        let scan_changed = repository.fail_interrupted_scan_runs("unix-ms:999").unwrap();
-        let backup_changed = repository.fail_interrupted_backup_runs("unix-ms:999").unwrap();
+        let scan_changed = repository
+            .fail_interrupted_scan_runs("unix-ms:999")
+            .unwrap();
+        let backup_changed = repository
+            .fail_interrupted_backup_runs("unix-ms:999")
+            .unwrap();
         assert_eq!(scan_changed, 1);
         assert_eq!(backup_changed, 1);
 

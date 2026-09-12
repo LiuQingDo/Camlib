@@ -1,17 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. Notification and tray APIs are used only from Rust, so the webview does not request them.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default",
     "dialog:allow-open",
-    "notification:default",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-focus",
     "core:window:allow-unminimize"
   ]
 }
-

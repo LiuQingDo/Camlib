@@ -47,7 +47,7 @@ pub fn preview(
     repository: &Repository,
     library_id: &str,
     media_item_ids: &[String],
-) -> Result<DeletePreviewDto, String> {
+) -> Result<DeletePreviewDto, crate::errors::AppError> {
     let root = library_root(repository, library_id)?;
     let mut seen_items = HashSet::new();
     let mut files = 0;
@@ -59,8 +59,8 @@ pub fn preview(
         }
         let details = repository
             .get_media_item_details(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("媒体不存在: {id}"))?;
+            .map_err(crate::errors::AppError::from)?
+            .ok_or_else(|| crate::errors::AppError::from(format!("媒体不存在: {id}")))?;
         ensure_item_library(&details, library_id)?;
         for file in &details.files {
             // Preview performs the same path validation as deletion. Missing
@@ -79,7 +79,11 @@ pub fn preview(
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         total_size_bytes += file.size_bytes;
                     }
-                    Err(error) => return Err(format!("检查媒体文件失败: {error}")),
+                    Err(error) => {
+                        return Err(crate::errors::AppError::from(format!(
+                            "检查媒体文件失败: {error}"
+                        )))
+                    }
                 }
             } else {
                 total_size_bytes += file.size_bytes;
@@ -105,7 +109,7 @@ pub fn delete_to_recycle_bin(
     media_item_ids: &[String],
     thumbnail_cache_dir: &Path,
     mut on_progress: impl FnMut(&DeleteProgressDto),
-) -> Result<DeleteResultDto, String> {
+) -> Result<DeleteResultDto, crate::errors::AppError> {
     let root = library_root(repository, library_id)?;
     let mut seen_items = HashSet::new();
     let mut work: Vec<(String, MediaItemDetails)> = Vec::new();
@@ -115,8 +119,8 @@ pub fn delete_to_recycle_bin(
         }
         let details = repository
             .get_media_item_details(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("媒体不存在: {id}"))?;
+            .map_err(crate::errors::AppError::from)?
+            .ok_or_else(|| crate::errors::AppError::from(format!("媒体不存在: {id}")))?;
         ensure_item_library(&details, library_id)?;
         work.push((id.clone(), details));
     }
@@ -158,7 +162,7 @@ pub fn delete_to_recycle_bin(
                         error_message: None,
                         created_at: &now,
                     })
-                    .map_err(|e| e.to_string())?;
+                    .map_err(crate::errors::AppError::from)?;
                 continue;
             }
 
@@ -180,7 +184,7 @@ pub fn delete_to_recycle_bin(
                             error_message: Some(&message),
                             created_at: &now,
                         })
-                        .map_err(|e| e.to_string())?;
+                        .map_err(crate::errors::AppError::from)?;
                     continue;
                 }
             };
@@ -189,7 +193,7 @@ pub fn delete_to_recycle_bin(
                 result.files_already_missing += 1;
                 repository
                     .mark_media_file_deleted(&file.id, &now)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(crate::errors::AppError::from)?;
                 repository
                     .record_deletion_log(DeletionLogInput {
                         id: &log_id,
@@ -201,7 +205,7 @@ pub fn delete_to_recycle_bin(
                         error_message: None,
                         created_at: &now,
                     })
-                    .map_err(|e| e.to_string())?;
+                    .map_err(crate::errors::AppError::from)?;
                 continue;
             }
 
@@ -210,7 +214,7 @@ pub fn delete_to_recycle_bin(
                     result.files_recycled += 1;
                     repository
                         .mark_media_file_deleted(&file.id, &now)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(crate::errors::AppError::from)?;
                     repository
                         .record_deletion_log(DeletionLogInput {
                             id: &log_id,
@@ -222,7 +226,7 @@ pub fn delete_to_recycle_bin(
                             error_message: None,
                             created_at: &now,
                         })
-                        .map_err(|e| e.to_string())?;
+                        .map_err(crate::errors::AppError::from)?;
                 }
                 Err(error) => {
                     result.failed_files += 1;
@@ -240,13 +244,13 @@ pub fn delete_to_recycle_bin(
                             error_message: Some(&message),
                             created_at: &now,
                         })
-                        .map_err(|e| e.to_string())?;
+                        .map_err(crate::errors::AppError::from)?;
                 }
             }
         }
         repository
             .refresh_media_item_state(id)
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::errors::AppError::from)?;
         if item_failed {
             result.failed_item_ids.push(id.clone());
         } else {
@@ -266,47 +270,65 @@ pub fn delete_to_recycle_bin(
     Ok(result)
 }
 
-fn library_root(repository: &Repository, library_id: &str) -> Result<PathBuf, String> {
+fn library_root(
+    repository: &Repository,
+    library_id: &str,
+) -> Result<PathBuf, crate::errors::AppError> {
     let library = repository
         .get_library(library_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "媒体库不存在".to_owned())?;
-    let root = fs::canonicalize(&library.root_path)
-        .map_err(|e| format!("媒体库根目录 canonicalize 失败: {e}"))?;
+        .map_err(crate::errors::AppError::from)?
+        .ok_or_else(|| crate::errors::AppError::invalid_argument("媒体库不存在"))?;
+    let root = fs::canonicalize(&library.root_path).map_err(|e| {
+        crate::errors::AppError::library_offline(format!("媒体库根目录 canonicalize 失败: {e}"))
+    })?;
     if !root.is_dir() {
-        return Err("媒体库根目录不是目录".to_owned());
+        return Err(crate::errors::AppError::library_offline(
+            "媒体库根目录不是目录",
+        ));
     }
     Ok(root)
 }
 
-fn ensure_item_library(details: &MediaItemDetails, library_id: &str) -> Result<(), String> {
+fn ensure_item_library(
+    details: &MediaItemDetails,
+    library_id: &str,
+) -> Result<(), crate::errors::AppError> {
     if details.item.library_id != library_id
         || details
             .files
             .iter()
             .any(|file| file.library_id != library_id)
     {
-        return Err("媒体项不属于当前媒体库".to_owned());
+        return Err(crate::errors::AppError::invalid_argument(
+            "媒体项不属于当前媒体库",
+        ));
     }
     Ok(())
 }
 
 /// Canonicalize both root and target. A lexical relative path check alone is
 /// insufficient because a symlink can point outside the library.
-pub fn resolve_media_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
+pub fn resolve_media_file(root: &Path, relative: &str) -> Result<PathBuf, crate::errors::AppError> {
     let (canonical_root, candidate) = lexical_candidate(root, relative)?;
-    let canonical_file =
-        fs::canonicalize(&candidate).map_err(|e| format!("媒体文件 canonicalize 失败: {e}"))?;
+    let canonical_file = fs::canonicalize(&candidate).map_err(|e| {
+        crate::errors::AppError::media_missing(format!("媒体文件 canonicalize 失败: {e}"))
+    })?;
+    // Component-aware containment check (not string prefix).
     if !canonical_file.starts_with(&canonical_root) {
-        return Err("媒体路径越过媒体库根目录".to_owned());
+        return Err(crate::errors::AppError::path_outside_root(
+            "媒体路径越过媒体库根目录",
+        ));
     }
     if !canonical_file.is_file() {
-        return Err("媒体路径不是文件".to_owned());
+        return Err(crate::errors::AppError::media_missing("媒体路径不是文件"));
     }
     Ok(canonical_file)
 }
 
-fn lexical_candidate(root: &Path, relative: &str) -> Result<(PathBuf, PathBuf), String> {
+fn lexical_candidate(
+    root: &Path,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), crate::errors::AppError> {
     let relative_path = Path::new(relative);
     if relative.is_empty()
         || relative_path.is_absolute()
@@ -324,14 +346,20 @@ fn lexical_candidate(root: &Path, relative: &str) -> Result<(PathBuf, PathBuf), 
             .split('/')
             .any(|part| part.is_empty())
     {
-        return Err("媒体相对路径无效或包含路径穿越段".to_owned());
+        return Err(crate::errors::AppError::path_outside_root(
+            "媒体相对路径无效或包含路径穿越段",
+        ));
     }
-    let canonical_root =
-        fs::canonicalize(root).map_err(|e| format!("媒体库根目录 canonicalize 失败: {e}"))?;
+    let canonical_root = fs::canonicalize(root).map_err(|e| {
+        crate::errors::AppError::library_offline(format!("媒体库根目录 canonicalize 失败: {e}"))
+    })?;
     Ok((canonical_root.clone(), canonical_root.join(relative_path)))
 }
 
-fn invalidate_library_thumbnail_cache(cache_dir: &Path, library_id: &str) -> Result<(), String> {
+fn invalidate_library_thumbnail_cache(
+    cache_dir: &Path,
+    library_id: &str,
+) -> Result<(), crate::errors::AppError> {
     let cache_root = fs::canonicalize(cache_dir)
         .or_else(|_| {
             cache_dir
@@ -342,11 +370,14 @@ fn invalidate_library_thumbnail_cache(cache_dir: &Path, library_id: &str) -> Res
                 .and_then(fs::canonicalize)
                 .map(|parent| parent.join(cache_dir.file_name().unwrap_or_default()))
         })
-        .map_err(|e| format!("缩略图缓存目录 canonicalize 失败: {e}"))?;
+        .map_err(|e| {
+            crate::errors::AppError::from(format!("缩略图缓存目录 canonicalize 失败: {e}"))
+        })?;
     let thumbs = cache_root.join("thumbs");
     let library_cache = thumbs.join(safe_component(library_id));
     if library_cache.exists() {
-        fs::remove_dir_all(&library_cache).map_err(|e| format!("清理缩略图缓存失败: {e}"))?;
+        fs::remove_dir_all(&library_cache)
+            .map_err(|e| crate::errors::AppError::from(format!("清理缩略图缓存失败: {e}")))?;
     }
     Ok(())
 }
@@ -365,7 +396,7 @@ fn safe_component(value: &str) -> String {
 }
 
 #[cfg(windows)]
-fn send_to_recycle_bin(path: &Path) -> Result<(), String> {
+fn send_to_recycle_bin(path: &Path) -> Result<(), crate::errors::AppError> {
     use windows_sys::Win32::UI::Shell::{
         SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
         SHFILEOPSTRUCTW,
@@ -398,13 +429,15 @@ fn send_to_recycle_bin(path: &Path) -> Result<(), String> {
     if code == 0 {
         Ok(())
     } else {
-        Err(format!("Windows 回收站 API 错误码 {code}"))
+        Err(crate::errors::AppError::from(format!(
+            "Windows 回收站 API 错误码 {code}"
+        )))
     }
 }
 
 #[cfg(not(windows))]
-fn send_to_recycle_bin(_path: &Path) -> Result<(), String> {
-    Err("当前平台不支持 Windows 回收站".to_owned())
+fn send_to_recycle_bin(_path: &Path) -> Result<(), crate::errors::AppError> {
+    Err(crate::errors::AppError::io("当前平台不支持 Windows 回收站"))
 }
 
 fn timestamp_now() -> String {
@@ -490,6 +523,49 @@ mod tests {
         assert!(resolve_media_file(root.path(), "../outside.jpg").is_err());
         assert!(resolve_media_file(root.path(), outside.to_string_lossy().as_ref()).is_err());
         assert!(resolve_media_file(root.path(), "./inside.jpg").is_err());
+    }
+
+    #[test]
+    fn rejects_sibling_directory_prefix_and_empty_segments() {
+        let base = tempfile::tempdir().unwrap();
+        let library = base.path().join("DCIM-local");
+        let sibling = base.path().join("DCIM-local-evil");
+        fs::create_dir_all(&library).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join("secret.jpg"), b"secret").unwrap();
+        // String-prefix comparison would accept this; component-aware must not.
+        assert!(resolve_media_file(&library, "../DCIM-local-evil/secret.jpg").is_err());
+        assert!(resolve_media_file(&library, "DCIM-local-evil/secret.jpg").is_err());
+        assert!(resolve_media_file(&library, "a//b.jpg").is_err());
+        assert!(resolve_media_file(&library, "a/./b.jpg").is_err());
+        assert!(resolve_media_file(&library, "").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unc_and_device_prefix_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(resolve_media_file(root.path(), r"\\?\C:\Windows\notepad.exe").is_err());
+        assert!(resolve_media_file(root.path(), r"\\server\share\file.jpg").is_err());
+        assert!(resolve_media_file(root.path(), r"\\.\pipe\camlib").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_nt_device_and_drive_absolute_paths() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(resolve_media_file(root.path(), r"C:\Windows\notepad.exe").is_err());
+        assert!(resolve_media_file(root.path(), r"\Windows\notepad.exe").is_err());
+    }
+
+    #[test]
+    fn accepts_only_library_relative_files_on_disk() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("2026").join("01")).unwrap();
+        fs::write(root.path().join("2026").join("01").join("ok.jpg"), b"ok").unwrap();
+        let resolved = resolve_media_file(root.path(), r"2026\01\ok.jpg").unwrap();
+        assert!(resolved.is_file());
+        assert!(resolved.starts_with(fs::canonicalize(root.path()).unwrap()));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod backup;
 pub mod db;
 mod deletion;
+mod errors;
 mod infrastructure;
 mod media;
 mod scanner;
@@ -11,6 +12,7 @@ use backup::{
     BackupVolumeDto,
 };
 use db::{MediaKind, MediaQuery, MediaSort};
+use errors::AppError;
 use infrastructure::{
     AppSettings, CloseBehavior, Infrastructure, InfrastructureError, InfrastructureState,
     LibraryAvailability, LibraryStatus,
@@ -30,7 +32,7 @@ fn greet(name: &str) -> String {
 
 /// Return the persisted application settings and the current library status.
 #[tauri::command]
-fn get_app_settings(state: State<'_, InfrastructureState>) -> Result<AppSettings, String> {
+fn get_app_settings(state: State<'_, InfrastructureState>) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.settings())
 }
 
@@ -40,7 +42,7 @@ fn get_app_settings(state: State<'_, InfrastructureState>) -> Result<AppSettings
 fn set_library_root(
     path: String,
     state: State<'_, InfrastructureState>,
-) -> Result<LibraryStatus, String> {
+) -> Result<LibraryStatus, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.set_library_root(PathBuf::from(path)))
 }
 
@@ -50,7 +52,7 @@ fn set_library_root(
 fn set_thumbnail_cache_dir(
     path: String,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure.set_thumbnail_cache_dir(PathBuf::from(path))
     })
@@ -60,7 +62,7 @@ fn set_thumbnail_cache_dir(
 fn set_backup_conflict_policy(
     policy: db::ConflictPolicy,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.set_backup_conflict_policy(policy))
 }
 
@@ -70,9 +72,9 @@ fn set_ui_prefs(
     ui_density: Option<u8>,
     ui_sort: Option<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     let sort = match ui_sort.as_deref() {
-        Some(value) => Some(infrastructure::UiSort::parse(value).map_err(|error| error.to_string())?),
+        Some(value) => Some(infrastructure::UiSort::parse(value).map_err(AppError::from)?),
         None => None,
     };
     state.with_infrastructure(|infrastructure| infrastructure.set_ui_prefs(ui_density, sort))
@@ -83,7 +85,7 @@ fn set_ui_prefs(
 fn set_auto_scan_on_startup(
     enabled: bool,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.set_auto_scan_on_startup(enabled))
 }
 
@@ -92,7 +94,7 @@ fn set_auto_scan_on_startup(
 fn set_notifications_enabled(
     enabled: bool,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.set_notifications_enabled(enabled))
 }
 
@@ -101,8 +103,8 @@ fn set_notifications_enabled(
 fn set_close_behavior(
     behavior: String,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
-    let behavior = CloseBehavior::parse(&behavior).map_err(|error| error.to_string())?;
+) -> Result<AppSettings, AppError> {
+    let behavior = CloseBehavior::parse(&behavior).map_err(AppError::from)?;
     state.with_infrastructure(|infrastructure| infrastructure.set_close_behavior(behavior))
 }
 
@@ -112,7 +114,7 @@ fn set_close_behavior(
 fn set_backup_ignore_extensions(
     extensions: Vec<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<AppSettings, String> {
+) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure.set_backup_ignore_extensions(extensions)
     })
@@ -124,7 +126,7 @@ fn list_scan_runs(
     library_id: String,
     limit: Option<i64>,
     state: State<'_, InfrastructureState>,
-) -> Result<Vec<db::ScanRun>, String> {
+) -> Result<Vec<db::ScanRun>, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -138,7 +140,7 @@ fn list_scan_runs(
 fn library_index_summary(
     library_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<db::LibraryIndexSummary, String> {
+) -> Result<db::LibraryIndexSummary, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -180,7 +182,7 @@ struct AppAboutDto {
 fn get_app_about(
     app: AppHandle,
     state: State<'_, InfrastructureState>,
-) -> Result<AppAboutDto, String> {
+) -> Result<AppAboutDto, AppError> {
     let (app_data_dir, app_cache_dir, database_path, settings_path, thumbnail_cache_dir) = state
         .with_infrastructure(|infrastructure| {
             let settings = infrastructure.settings()?;
@@ -198,10 +200,10 @@ fn get_app_about(
             path: Some(path.to_string_lossy().into_owned()),
             message: None,
         },
-        Err(message) => FfmpegStatusDto {
+        Err(error) => FfmpegStatusDto {
             available: false,
             path: None,
-            message: Some(message),
+            message: Some(error.to_string()),
         },
     };
     Ok(AppAboutDto {
@@ -218,7 +220,7 @@ fn get_app_about(
 #[tauri::command]
 fn get_thumbnail_cache_stats(
     state: State<'_, InfrastructureState>,
-) -> Result<ThumbnailCacheStatsDto, String> {
+) -> Result<ThumbnailCacheStatsDto, AppError> {
     state.with_infrastructure(|infrastructure| {
         let stats = infrastructure.thumbnail_cache_stats()?;
         Ok(ThumbnailCacheStatsDto {
@@ -234,21 +236,18 @@ fn get_thumbnail_cache_stats(
 fn open_app_directory(
     which: String,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let path = state.with_infrastructure(|infrastructure| {
         let settings = infrastructure.settings()?;
         Ok(match which.as_str() {
             "app_data" => infrastructure.app_data_dir(),
             "app_cache" => infrastructure.app_cache_dir(),
             "thumbnail_cache" => PathBuf::from(settings.thumbnail_cache_dir),
-            "library" => PathBuf::from(
-                infrastructure
-                    .library_status()?
-                    .root_path
-                    .ok_or_else(|| infrastructure::InfrastructureError::InvalidPath(
-                        "尚未配置媒体库".to_owned(),
-                    ))?,
-            ),
+            "library" => {
+                PathBuf::from(infrastructure.library_status()?.root_path.ok_or_else(|| {
+                    infrastructure::InfrastructureError::InvalidPath("尚未配置媒体库".to_owned())
+                })?)
+            }
             other => {
                 return Err(infrastructure::InfrastructureError::InvalidPath(format!(
                     "不支持的目录类型: {other}"
@@ -257,15 +256,18 @@ fn open_app_directory(
         })
     })?;
     if !path.exists() {
-        return Err(format!("目录不存在: {}", path.display()));
+        return Err(AppError::invalid_argument(format!(
+            "目录不存在: {}",
+            path.display()
+        )));
     }
     tauri_plugin_opener::open_path(&path, None::<&str>)
-        .map_err(|error| format!("打开目录失败: {error}"))
+        .map_err(|error| AppError::io(format!("打开目录失败: {error}")))
 }
 
 /// Re-check the library root and its recorded volume identity.
 #[tauri::command]
-fn get_library_status(state: State<'_, InfrastructureState>) -> Result<LibraryStatus, String> {
+fn get_library_status(state: State<'_, InfrastructureState>) -> Result<LibraryStatus, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.library_status())
 }
 
@@ -276,9 +278,7 @@ fn ensure_library_ready(
 ) -> Result<(), InfrastructureError> {
     let exists = infrastructure.has_library(library_id)?;
     if !exists {
-        return Err(InfrastructureError::InvalidPath(
-            "媒体库不存在".to_owned(),
-        ));
+        return Err(InfrastructureError::InvalidPath("媒体库不存在".to_owned()));
     }
     let status = infrastructure.library_status()?;
     match status.availability {
@@ -286,15 +286,15 @@ fn ensure_library_ready(
         LibraryAvailability::Unconfigured => Err(InfrastructureError::InvalidPath(
             "尚未配置媒体库".to_owned(),
         )),
-        LibraryAvailability::Disconnected => Err(InfrastructureError::InvalidPath(
+        LibraryAvailability::Disconnected => Err(InfrastructureError::LibraryOffline(
             status
                 .reason
                 .unwrap_or_else(|| "媒体库已断开，请连接磁盘后重试".to_owned()),
         )),
-        LibraryAvailability::Invalid => Err(InfrastructureError::InvalidPath(
+        LibraryAvailability::Invalid => Err(InfrastructureError::VolumeChanged(
             status
                 .reason
-                .unwrap_or_else(|| "媒体库路径无效，请重新选择媒体库目录".to_owned()),
+                .unwrap_or_else(|| "媒体库卷与记录不一致，请重新选择媒体库目录".to_owned()),
         )),
     }
 }
@@ -303,7 +303,7 @@ fn ensure_library_ready(
 #[tauri::command]
 fn get_infrastructure_state(
     state: State<'_, InfrastructureState>,
-) -> Result<infrastructure::InfrastructureStateDto, String> {
+) -> Result<infrastructure::InfrastructureStateDto, AppError> {
     state.with_infrastructure(|infrastructure| infrastructure.state())
 }
 
@@ -328,7 +328,7 @@ struct MediaQueryInput {
 }
 
 #[tauri::command]
-fn library_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Library>, String> {
+fn library_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Library>, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -341,7 +341,7 @@ fn library_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Library
 fn media_query(
     query: MediaQueryInput,
     state: State<'_, InfrastructureState>,
-) -> Result<db::MediaPage, String> {
+) -> Result<db::MediaPage, AppError> {
     let sort = match query.sort.as_deref() {
         Some("oldest") => MediaSort::Oldest,
         Some("name") => MediaSort::Name,
@@ -377,7 +377,7 @@ fn media_query(
 fn media_date_facets(
     library_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<Vec<db::DateFacet>, String> {
+) -> Result<Vec<db::DateFacet>, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -390,14 +390,14 @@ fn media_date_facets(
 fn media_get(
     media_item_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<db::MediaItemDetails, String> {
+) -> Result<db::MediaItemDetails, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
             .ok_or_else(|| {
-                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+                infrastructure::InfrastructureError::MediaMissing("媒体不存在".to_owned())
             })
     })
 }
@@ -408,14 +408,14 @@ fn media_get(
 fn media_open_folder(
     media_item_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let (details, root) = state.with_infrastructure(|infrastructure| {
         let details = infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
             .ok_or_else(|| {
-                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+                infrastructure::InfrastructureError::MediaMissing("媒体不存在".to_owned())
             })?;
         let library = infrastructure
             .repository()
@@ -438,15 +438,17 @@ fn media_open_folder(
             db::MediaFileRole::LiveVideo => 2,
         })
         .or_else(|| details.files.first())
-        .ok_or_else(|| "媒体没有可打开的文件".to_owned())?;
+        .ok_or_else(|| AppError::media_missing("媒体没有可打开的文件"))?;
 
     if !candidate.exists_now {
-        return Err("媒体文件已离线或不存在，无法打开所在文件夹".to_owned());
+        return Err(AppError::media_missing(
+            "媒体文件已离线或不存在，无法打开所在文件夹",
+        ));
     }
 
     let resolved = deletion::resolve_media_file(&root, &candidate.relative_path)?;
     tauri_plugin_opener::reveal_item_in_dir(&resolved)
-        .map_err(|error| format!("打开资源管理器失败: {error}"))
+        .map_err(|error| AppError::io(format!("打开资源管理器失败: {error}")))
 }
 
 #[tauri::command]
@@ -454,7 +456,7 @@ fn favorite_set(
     media_item_id: String,
     favorite: bool,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let now = format!(
         "unix-ms:{}",
         std::time::SystemTime::now()
@@ -475,7 +477,7 @@ fn favorite_set_batch(
     media_item_ids: Vec<String>,
     favorite: bool,
     state: State<'_, InfrastructureState>,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     let now = format!(
         "unix-ms:{}",
         std::time::SystemTime::now()
@@ -502,7 +504,7 @@ fn now_unix_ms() -> String {
 }
 
 #[tauri::command]
-fn tag_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Tag>, String> {
+fn tag_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Tag>, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -516,18 +518,15 @@ fn tag_create(
     name: String,
     color: Option<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<db::Tag, String> {
+) -> Result<db::Tag, AppError> {
     let now = now_unix_ms();
-    let id = format!(
-        "tag-{:016x}",
-        {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            name.trim().to_lowercase().hash(&mut hasher);
-            now.hash(&mut hasher);
-            hasher.finish()
-        }
-    );
+    let id = format!("tag-{:016x}", {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.trim().to_lowercase().hash(&mut hasher);
+        now.hash(&mut hasher);
+        hasher.finish()
+    });
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -546,18 +545,15 @@ fn tag_find_or_create(
     name: String,
     color: Option<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<db::Tag, String> {
+) -> Result<db::Tag, AppError> {
     let now = now_unix_ms();
-    let id = format!(
-        "tag-{:016x}",
-        {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            name.trim().to_lowercase().hash(&mut hasher);
-            now.hash(&mut hasher);
-            hasher.finish()
-        }
-    );
+    let id = format!("tag-{:016x}", {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.trim().to_lowercase().hash(&mut hasher);
+        now.hash(&mut hasher);
+        hasher.finish()
+    });
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -577,7 +573,7 @@ fn tag_update(
     name: Option<String>,
     color: Option<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<db::Tag, String> {
+) -> Result<db::Tag, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -587,7 +583,7 @@ fn tag_update(
 }
 
 #[tauri::command]
-fn tag_delete(tag_id: String, state: State<'_, InfrastructureState>) -> Result<(), String> {
+fn tag_delete(tag_id: String, state: State<'_, InfrastructureState>) -> Result<(), AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -601,7 +597,7 @@ fn tag_attach(
     media_item_id: String,
     tag_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let now = now_unix_ms();
     state.with_infrastructure(|infrastructure| {
         infrastructure
@@ -616,7 +612,7 @@ fn tag_detach(
     media_item_id: String,
     tag_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -630,7 +626,7 @@ fn tag_attach_batch(
     media_item_ids: Vec<String>,
     tag_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     let now = now_unix_ms();
     state.with_infrastructure(|infrastructure| {
         infrastructure
@@ -645,7 +641,7 @@ fn tag_detach_batch(
     media_item_ids: Vec<String>,
     tag_id: String,
     state: State<'_, InfrastructureState>,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -659,7 +655,7 @@ fn rating_set(
     media_item_id: String,
     rating: i64,
     state: State<'_, InfrastructureState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let now = now_unix_ms();
     state.with_infrastructure(|infrastructure| {
         infrastructure
@@ -674,7 +670,7 @@ fn rating_set_batch(
     media_item_ids: Vec<String>,
     rating: i64,
     state: State<'_, InfrastructureState>,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     let now = now_unix_ms();
     state.with_infrastructure(|infrastructure| {
         infrastructure
@@ -689,11 +685,11 @@ fn media_delete_preview(
     library_id: String,
     media_item_ids: Vec<String>,
     state: State<'_, InfrastructureState>,
-) -> Result<deletion::DeletePreviewDto, String> {
+) -> Result<deletion::DeletePreviewDto, AppError> {
     state.with_infrastructure(|infrastructure| {
         ensure_library_ready(infrastructure, &library_id)?;
         deletion::preview(infrastructure.repository(), &library_id, &media_item_ids)
-            .map_err(infrastructure::InfrastructureError::InvalidPath)
+            .map_err(InfrastructureError::from)
     })
 }
 
@@ -705,7 +701,7 @@ async fn media_delete_items(
     media_item_ids: Vec<String>,
     app: AppHandle,
     state: State<'_, InfrastructureState>,
-) -> Result<deletion::DeleteResultDto, String> {
+) -> Result<deletion::DeleteResultDto, AppError> {
     let (database_path, thumbnail_cache_dir) = state.with_infrastructure(|infrastructure| {
         ensure_library_ready(infrastructure, &library_id)?;
         let settings = infrastructure.settings()?;
@@ -715,7 +711,7 @@ async fn media_delete_items(
         ))
     })?;
     tauri::async_runtime::spawn_blocking(move || {
-        let repository = db::Repository::open(database_path).map_err(|error| error.to_string())?;
+        let repository = db::Repository::open(database_path).map_err(AppError::from)?;
         deletion::delete_to_recycle_bin(
             &repository,
             &library_id,
@@ -727,7 +723,7 @@ async fn media_delete_items(
         )
     })
     .await
-    .map_err(|error| format!("删除任务异常结束: {error}"))?
+    .map_err(|error| AppError::internal(format!("删除任务异常结束: {error}")))?
 }
 
 #[tauri::command]
@@ -737,14 +733,14 @@ async fn media_thumbnail(
     app: AppHandle,
     state: State<'_, InfrastructureState>,
     streams: State<'_, MediaStreamRegistry>,
-) -> Result<media::ThumbnailDto, String> {
+) -> Result<media::ThumbnailDto, AppError> {
     let (details, root, cache_dir) = state.with_infrastructure(|infrastructure| {
         let details = infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
             .ok_or_else(|| {
-                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+                infrastructure::InfrastructureError::MediaMissing("媒体不存在".to_owned())
             })?;
         let library = infrastructure
             .repository()
@@ -766,7 +762,7 @@ async fn media_thumbnail(
         media::thumbnail_for_item(&details, &root, &cache_dir, width, Some(&app), None)
     })
     .await
-    .map_err(|error| format!("缩略图任务异常退出: {error}"))??;
+    .map_err(|error| AppError::thumbnail(format!("缩略图任务异常退出: {error}")))??;
     let token = streams.register(
         thumbnail.cache_path.clone(),
         stream_root,
@@ -781,14 +777,14 @@ fn media_preview(
     media_item_id: String,
     state: State<'_, InfrastructureState>,
     streams: State<'_, MediaStreamRegistry>,
-) -> Result<media::MediaPreviewDto, String> {
+) -> Result<media::MediaPreviewDto, AppError> {
     state.with_infrastructure(|infrastructure| {
         let details = infrastructure
             .repository()
             .get_media_item_details(&media_item_id)
             .map_err(infrastructure::InfrastructureError::database)?
             .ok_or_else(|| {
-                infrastructure::InfrastructureError::InvalidPath("媒体不存在".to_owned())
+                infrastructure::InfrastructureError::MediaMissing("媒体不存在".to_owned())
             })?;
         let library = infrastructure
             .repository()
@@ -802,7 +798,7 @@ fn media_preview(
             PathBuf::from(&library.root_path).as_path(),
             &streams,
         )
-        .map_err(infrastructure::InfrastructureError::InvalidPath)
+        .map_err(InfrastructureError::from)
     })
 }
 
@@ -812,7 +808,7 @@ fn thumbnail_rebuild_start(
     app: AppHandle,
     infrastructure: State<'_, InfrastructureState>,
     jobs: State<'_, PreviewJobManagerState>,
-) -> Result<media::PreviewJobStartDto, String> {
+) -> Result<media::PreviewJobStartDto, AppError> {
     let (database_path, root, cache_dir, exists) = infrastructure.with_infrastructure(|value| {
         ensure_library_ready(value, &library_id)?;
         let settings = value.settings()?;
@@ -828,9 +824,9 @@ fn thumbnail_rebuild_start(
         ))
     })?;
     if !exists {
-        return Err("媒体库不存在".to_owned());
+        return Err(AppError::invalid_argument("媒体库不存在"));
     }
-    let root = PathBuf::from(root.ok_or_else(|| "媒体库不存在".to_owned())?);
+    let root = PathBuf::from(root.ok_or_else(|| AppError::invalid_argument("媒体库不存在"))?);
     let (job_id, cancel) = jobs.start()?;
     let manager = jobs.shared();
     let job_for_thread = job_id.clone();
@@ -872,7 +868,7 @@ fn thumbnail_rebuild_start(
 fn preview_job_cancel(
     job_id: String,
     jobs: State<'_, PreviewJobManagerState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     jobs.cancel(&job_id)
 }
 
@@ -886,15 +882,15 @@ fn library_scan_start(
     app: AppHandle,
     infrastructure: State<'_, InfrastructureState>,
     jobs: State<'_, ScanManagerState>,
-) -> Result<ScanStartResponse, String> {
+) -> Result<ScanStartResponse, AppError> {
     let (database_path, exists) = infrastructure.with_infrastructure(|value| {
         ensure_library_ready(value, &library_id)?;
         Ok((value.database_path(), value.has_library(&library_id)?))
     })?;
     if !exists {
-        return Err("媒体库不存在".to_owned());
+        return Err(AppError::invalid_argument("媒体库不存在"));
     }
-    let (job_id, cancel) = jobs.start(&library_id)?;
+    let (job_id, cancel) = jobs.start(&library_id).map_err(AppError::from)?;
     let manager = jobs.inner().clone();
     let scan_run_id = format!("run-{job_id}");
     scanner::spawn_scan(
@@ -913,14 +909,14 @@ fn library_scan_start(
 }
 
 #[tauri::command]
-fn library_scan_cancel(job_id: String, jobs: State<'_, ScanManagerState>) -> Result<(), String> {
+fn library_scan_cancel(job_id: String, jobs: State<'_, ScanManagerState>) -> Result<(), AppError> {
     jobs.cancel(&job_id)
 }
 
 /// Discover removable volumes with a direct DCIM directory. The result is
 /// only a list of candidates; no camera file is opened or changed here.
 #[tauri::command]
-fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
+fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, AppError> {
     Ok(backup::discover_volumes())
 }
 
@@ -931,17 +927,18 @@ fn backup_sources_discover() -> Result<Vec<BackupVolumeDto>, String> {
 async fn backup_preview(
     request: BackupPreviewRequest,
     state: State<'_, InfrastructureState>,
-) -> Result<BackupPreviewDto, String> {
-    let (database_path, conflict_policy, default_ignore) = state.with_infrastructure(|infrastructure| {
-        let settings = infrastructure.settings()?;
-        Ok((
-            infrastructure.database_path(),
-            settings.backup_conflict_policy,
-            settings.backup_ignore_extensions,
-        ))
-    })?;
+) -> Result<BackupPreviewDto, AppError> {
+    let (database_path, conflict_policy, default_ignore) =
+        state.with_infrastructure(|infrastructure| {
+            let settings = infrastructure.settings()?;
+            Ok((
+                infrastructure.database_path(),
+                settings.backup_conflict_policy,
+                settings.backup_ignore_extensions,
+            ))
+        })?;
     tauri::async_runtime::spawn_blocking(move || {
-        let repository = db::Repository::open(database_path).map_err(|error| error.to_string())?;
+        let repository = db::Repository::open(database_path).map_err(AppError::from)?;
         let mut request = request;
         if request.conflict_policy.is_none() {
             request.conflict_policy = Some(conflict_policy);
@@ -949,10 +946,10 @@ async fn backup_preview(
         if request.ignore_extensions.is_none() {
             request.ignore_extensions = Some(default_ignore);
         }
-        backup::preview(&repository, request).map_err(|error| error.to_string())
+        backup::preview(&repository, request).map_err(AppError::from)
     })
     .await
-    .map_err(|error| format!("备份预览任务异常结束: {error}"))?
+    .map_err(|error| AppError::internal(format!("备份预览任务异常结束: {error}")))?
 }
 
 /// Execute only the exact persisted preview that the user confirmed.
@@ -964,7 +961,7 @@ fn backup_start(
     infrastructure: State<'_, InfrastructureState>,
     backups: State<'_, BackupManagerState>,
     scans: State<'_, ScanManagerState>,
-) -> Result<BackupStartResponse, String> {
+) -> Result<BackupStartResponse, AppError> {
     let database_path = infrastructure.with_infrastructure(|value| {
         let run = value
             .repository()
@@ -1006,7 +1003,7 @@ fn backup_retry_failed(
     infrastructure: State<'_, InfrastructureState>,
     backups: State<'_, BackupManagerState>,
     scans: State<'_, ScanManagerState>,
-) -> Result<BackupStartResponse, String> {
+) -> Result<BackupStartResponse, AppError> {
     let database_path = infrastructure.with_infrastructure(|value| {
         let run = value
             .repository()
@@ -1025,19 +1022,19 @@ fn backup_retry_failed(
         }
         Ok(value.database_path())
     })?;
-    let repository = db::Repository::open(&database_path).map_err(|error| error.to_string())?;
+    let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
     // Cancelled runs keep unfinished work as `cancelled`; allow retrying those
     // too so a partial cancel can resume without a fresh preview of copied files.
     let retryable = repository
         .list_backup_items(&backup_run_id)
-        .map_err(|error| error.to_string())?
+        .map_err(AppError::from)?
         .into_iter()
         .filter(|item| item.status == "failed" || item.status == "cancelled")
         .map(|item| item.id)
         .collect::<std::collections::HashSet<_>>();
     let selected = item_ids.unwrap_or_else(|| retryable.iter().cloned().collect());
     if selected.is_empty() || selected.iter().any(|id| !retryable.contains(id)) {
-        return Err("没有可重试的失败文件".to_owned());
+        return Err(AppError::invalid_argument("没有可重试的失败文件"));
     }
     let (job_id, cancel) = backups.start()?;
     backup::spawn(
@@ -1057,7 +1054,7 @@ fn backup_retry_failed(
 }
 
 #[tauri::command]
-fn backup_cancel(job_id: String, backups: State<'_, BackupManagerState>) -> Result<(), String> {
+fn backup_cancel(job_id: String, backups: State<'_, BackupManagerState>) -> Result<(), AppError> {
     backups.cancel(&job_id)
 }
 
@@ -1066,7 +1063,7 @@ fn backup_cancel(job_id: String, backups: State<'_, BackupManagerState>) -> Resu
 fn backup_history(
     limit: Option<i64>,
     state: State<'_, InfrastructureState>,
-) -> Result<Vec<db::BackupRun>, String> {
+) -> Result<Vec<db::BackupRun>, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure
             .repository()
@@ -1081,7 +1078,7 @@ fn backup_run_items(
     backup_run_id: String,
     only_retryable: Option<bool>,
     state: State<'_, InfrastructureState>,
-) -> Result<Vec<db::BackupItem>, String> {
+) -> Result<Vec<db::BackupItem>, AppError> {
     state.with_infrastructure(|infrastructure| {
         let items = infrastructure
             .repository()

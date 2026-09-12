@@ -43,13 +43,18 @@ impl ScanManagerState {
         }
     }
 
-    pub fn start(&self, library_id: &str) -> Result<(String, Arc<AtomicBool>), String> {
+    pub fn start(
+        &self,
+        library_id: &str,
+    ) -> Result<(String, Arc<AtomicBool>), crate::errors::AppError> {
         let mut jobs = self
             .jobs
             .lock()
-            .map_err(|_| "扫描任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("扫描任务状态锁已损坏"))?;
         if jobs.values().any(|job| job.library_id == library_id) {
-            return Err("该媒体库已有扫描任务正在运行".to_owned());
+            return Err(crate::errors::AppError::job_already_running(
+                "该媒体库已有扫描任务正在运行",
+            ));
         }
         let job_id = next_job_id();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -63,13 +68,13 @@ impl ScanManagerState {
         Ok((job_id, cancel))
     }
 
-    pub fn cancel(&self, job_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, job_id: &str) -> Result<(), crate::errors::AppError> {
         let jobs = self
             .jobs
             .lock()
-            .map_err(|_| "扫描任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("扫描任务状态锁已损坏"))?;
         let Some(job) = jobs.get(job_id) else {
-            return Err("扫描任务不存在".to_owned());
+            return Err(crate::errors::AppError::job_not_found("扫描任务不存在"));
         };
         job.cancel.store(true, Ordering::Relaxed);
         Ok(())
@@ -1052,7 +1057,10 @@ mod tests {
             .iter()
             .filter(|group| group.burst_group.is_some())
             .count();
-        assert_eq!(burst_count, 3, "expected the first three photos to share a burst");
+        assert_eq!(
+            burst_count, 3,
+            "expected the first three photos to share a burst"
+        );
         let burst_ids: std::collections::HashSet<_> = groups
             .iter()
             .filter_map(|group| group.burst_group.as_deref())

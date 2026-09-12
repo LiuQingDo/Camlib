@@ -5,9 +5,7 @@
 //! small range-aware protocol registry so the webview never receives the
 //! complete video in an IPC response.
 
-use crate::db::{
-    MediaFile, MediaFileRole, MediaItemDetails, MediaKind, Repository, ScanState,
-};
+use crate::db::{MediaFile, MediaFileRole, MediaItemDetails, MediaKind, Repository, ScanState};
 use image::{DynamicImage, ImageReader};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -126,11 +124,11 @@ impl PreviewJobManagerState {
         }
     }
 
-    pub fn start(&self) -> Result<(String, Arc<AtomicBool>), String> {
+    pub fn start(&self) -> Result<(String, Arc<AtomicBool>), crate::errors::AppError> {
         let mut jobs = self
             .jobs
             .lock()
-            .map_err(|_| "预览任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("预览任务状态锁已损坏"))?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -149,13 +147,13 @@ impl PreviewJobManagerState {
         Ok((job_id, cancel))
     }
 
-    pub fn cancel(&self, job_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, job_id: &str) -> Result<(), crate::errors::AppError> {
         let jobs = self
             .jobs
             .lock()
-            .map_err(|_| "预览任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("预览任务状态锁已损坏"))?;
         jobs.get(job_id)
-            .ok_or_else(|| "预览任务不存在".to_owned())?
+            .ok_or_else(|| crate::errors::AppError::job_not_found("预览任务不存在"))?
             .cancel
             .store(true, Ordering::Relaxed);
         Ok(())
@@ -351,17 +349,19 @@ pub fn thumbnail_for_item(
     width: u32,
     app: Option<&AppHandle>,
     cancel: Option<&AtomicBool>,
-) -> Result<ThumbnailDto, String> {
+) -> Result<ThumbnailDto, crate::errors::AppError> {
     let file = thumbnail_file(details)?;
     let source = resolve_media_path(root, &file.relative_path)?;
-    let metadata = fs::metadata(&source).map_err(|error| format!("读取媒体元数据失败: {error}"))?;
+    let metadata = fs::metadata(&source)
+        .map_err(|error| crate::errors::AppError::from(format!("读取媒体元数据失败: {error}")))?;
     let size = metadata.len();
     let modified = modified_signature(&metadata);
     let cache_key = thumbnail_cache_key(&file.relative_path, size, &modified, width, width);
     let directory = cache_dir
         .join("thumbs")
         .join(safe_component(&details.item.library_id));
-    fs::create_dir_all(&directory).map_err(|error| format!("创建缩略图缓存失败: {error}"))?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| crate::errors::AppError::from(format!("创建缩略图缓存失败: {error}")))?;
     let target = directory.join(format!("{cache_key}.jpg"));
     if !target.is_file() {
         let temp = directory.join(format!(".{cache_key}.{}.tmp", unique_suffix()));
@@ -374,14 +374,17 @@ pub fn thumbnail_for_item(
         } else if is_image(&file.extension) {
             generate_image_thumbnail(&source, &temp, width)
         } else {
-            let app = app.ok_or_else(|| "视频缩略图需要应用上下文".to_owned())?;
+            let app =
+                app.ok_or_else(|| crate::errors::AppError::thumbnail("视频缩略图需要应用上下文"))?;
             generate_ffmpeg_thumbnail(app, &source, &temp, width, cancel)
         };
         if let Err(error) = result {
             let _ = fs::remove_file(&temp);
             return Err(error);
         }
-        fs::rename(&temp, &target).map_err(|error| format!("提交缩略图缓存失败: {error}"))?;
+        fs::rename(&temp, &target).map_err(|error| {
+            crate::errors::AppError::from(format!("提交缩略图缓存失败: {error}"))
+        })?;
     }
     Ok(ThumbnailDto {
         url: String::new(),
@@ -479,25 +482,29 @@ pub fn thumbnail_cache_key(
     )
 }
 
-fn generate_image_thumbnail(source: &Path, target: &Path, width: u32) -> Result<(), String> {
+fn generate_image_thumbnail(
+    source: &Path,
+    target: &Path,
+    width: u32,
+) -> Result<(), crate::errors::AppError> {
     let _decode_guard = IMAGE_DECODE_LOCK
         .lock()
-        .map_err(|_| "图片解码锁已损坏".to_owned())?;
+        .map_err(|_| crate::errors::AppError::thumbnail("图片解码锁已损坏"))?;
     let orientation = read_exif_orientation(source);
     let image = ImageReader::open(source)
-        .map_err(|error| format!("打开图片失败: {error}"))?
+        .map_err(|error| crate::errors::AppError::from(format!("打开图片失败: {error}")))?
         .with_guessed_format()
-        .map_err(|error| format!("识别图片格式失败: {error}"))?
+        .map_err(|error| crate::errors::AppError::from(format!("识别图片格式失败: {error}")))?
         .decode()
-        .map_err(|error| format!("解码图片失败: {error}"))?;
+        .map_err(|error| crate::errors::AppError::from(format!("解码图片失败: {error}")))?;
     let image = apply_orientation(image, orientation);
     let thumbnail = image.thumbnail(width, width);
-    let mut output =
-        File::create(target).map_err(|error| format!("创建图片缩略图失败: {error}"))?;
+    let mut output = File::create(target)
+        .map_err(|error| crate::errors::AppError::from(format!("创建图片缩略图失败: {error}")))?;
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 84);
     encoder
         .encode_image(&thumbnail)
-        .map_err(|error| format!("编码图片缩略图失败: {error}"))
+        .map_err(|error| crate::errors::AppError::from(format!("编码图片缩略图失败: {error}")))
 }
 
 fn generate_ffmpeg_thumbnail(
@@ -506,7 +513,7 @@ fn generate_ffmpeg_thumbnail(
     target: &Path,
     width: u32,
     cancel: Option<&AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), crate::errors::AppError> {
     let ffmpeg = resolve_ffmpeg(app)?;
     let scale = format!("scale={width}:-2:force_original_aspect_ratio=decrease");
     let mut child = Command::new(ffmpeg)
@@ -530,48 +537,54 @@ fn generate_ffmpeg_thumbnail(
         // media file can fill the pipe and leave ffmpeg waiting forever.
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("启动 ffmpeg 失败: {error}"))?;
+        .map_err(|error| crate::errors::AppError::from(format!("启动 ffmpeg 失败: {error}")))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         if cancel.is_some_and(|value| value.load(Ordering::Relaxed)) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(target);
-            return Err("用户取消视频首帧处理".to_owned());
+            return Err(crate::errors::AppError::cancelled("用户取消视频首帧处理"));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(target);
-            return Err("视频首帧处理超时".to_owned());
+            return Err(crate::errors::AppError::thumbnail("视频首帧处理超时"));
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
-            Err(error) => return Err(format!("等待 ffmpeg 失败: {error}")),
+            Err(error) => {
+                return Err(crate::errors::AppError::from(format!(
+                    "等待 ffmpeg 失败: {error}"
+                )))
+            }
         }
     };
     if !status.success() {
-        return Err("ffmpeg 首帧失败".to_owned());
+        return Err(crate::errors::AppError::thumbnail("ffmpeg 首帧失败"));
     }
     if !target.is_file() {
-        return Err("ffmpeg 未生成首帧".to_owned());
+        return Err(crate::errors::AppError::thumbnail("ffmpeg 未生成首帧"));
     }
     Ok(())
 }
 
-pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, crate::errors::AppError> {
     if let Ok(path) = env::var("CAMLIB_FFMPEG_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Ok(path);
         }
-        return Err("CAMLIB_FFMPEG_PATH 不存在或不是文件".to_owned());
+        return Err(crate::errors::AppError::thumbnail(
+            "CAMLIB_FFMPEG_PATH 不存在或不是文件",
+        ));
     }
     let resource_dir = app
         .path()
         .resource_dir()
-        .map_err(|error| format!("无法定位应用资源目录: {error}"))?;
+        .map_err(|error| crate::errors::AppError::from(format!("无法定位应用资源目录: {error}")))?;
     let packaged = [
         resource_dir.join("ffmpeg").join(if cfg!(windows) {
             "ffmpeg.exe"
@@ -611,10 +624,9 @@ pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = find_winget_ffmpeg() {
         return Ok(path);
     }
-    Err(
-        "找不到 ffmpeg：开发环境请安装到 PATH，打包环境应提供 resources/ffmpeg/ffmpeg.exe"
-            .to_owned(),
-    )
+    Err(crate::errors::AppError::thumbnail(
+        "找不到 ffmpeg：开发环境请安装到 PATH，打包环境应提供 resources/ffmpeg/ffmpeg.exe",
+    ))
 }
 
 #[cfg(windows)]
@@ -683,7 +695,7 @@ pub fn preview_sources(
     details: &MediaItemDetails,
     root: &Path,
     registry: &MediaStreamRegistry,
-) -> Result<MediaPreviewDto, String> {
+) -> Result<MediaPreviewDto, crate::errors::AppError> {
     let mut sources = Vec::new();
     for file in &details.files {
         if !file.exists_now {
@@ -708,7 +720,7 @@ pub fn preview_sources(
         });
     }
     if sources.is_empty() {
-        return Err("媒体文件不可用".to_owned());
+        return Err(crate::errors::AppError::media_missing("媒体文件不可用"));
     }
     Ok(MediaPreviewDto {
         kind: details.item.kind.clone(),
@@ -717,7 +729,7 @@ pub fn preview_sources(
     })
 }
 
-fn thumbnail_file(details: &MediaItemDetails) -> Result<&MediaFile, String> {
+fn thumbnail_file(details: &MediaItemDetails) -> Result<&MediaFile, crate::errors::AppError> {
     details
         .files
         .iter()
@@ -726,10 +738,10 @@ fn thumbnail_file(details: &MediaItemDetails) -> Result<&MediaFile, String> {
                 && (details.item.kind != MediaKind::Live || file.role == MediaFileRole::LivePhoto)
         })
         .or_else(|| details.files.iter().find(|file| file.exists_now))
-        .ok_or_else(|| "媒体文件不可用".to_owned())
+        .ok_or_else(|| crate::errors::AppError::media_missing("媒体文件不可用"))
 }
 
-fn resolve_media_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+fn resolve_media_path(root: &Path, relative: &str) -> Result<PathBuf, crate::errors::AppError> {
     let relative_path = Path::new(relative);
     if relative.is_empty()
         || relative_path.is_absolute()
@@ -743,13 +755,20 @@ fn resolve_media_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
             )
         })
     {
-        return Err("媒体相对路径无效".to_owned());
+        return Err(crate::errors::AppError::path_outside_root(
+            "媒体相对路径无效",
+        ));
     }
-    let root = fs::canonicalize(root).map_err(|error| format!("媒体库不可用: {error}"))?;
-    let path = fs::canonicalize(root.join(relative_path))
-        .map_err(|error| format!("媒体文件不可用: {error}"))?;
+    let root = fs::canonicalize(root).map_err(|error| {
+        crate::errors::AppError::library_offline(format!("媒体库不可用: {error}"))
+    })?;
+    let path = fs::canonicalize(root.join(relative_path)).map_err(|error| {
+        crate::errors::AppError::media_missing(format!("媒体文件不可用: {error}"))
+    })?;
+    // Component-aware starts_with: `C:\DCIM-local-evil` must not pass as
+    // contained under `C:\DCIM-local`.
     if !path.starts_with(&root) {
-        return Err("媒体路径越界".to_owned());
+        return Err(crate::errors::AppError::path_outside_root("媒体路径越界"));
     }
     Ok(path)
 }

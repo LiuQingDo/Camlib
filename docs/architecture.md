@@ -1,29 +1,49 @@
-# Camlib 架构审计与目标架构
+# Camlib 当前架构（含历史审计摘要）
 
-> 审计范围：当前仓库，以及 H 盘原型的实际存在文件。
+> 更新日期：2026-09-12（S9 加固）
 >
-> 审计日期：2026-09-06
->
-> 本文只记录架构审计和设计，不实现业务功能，也不将 H 盘媒体、缩略图或静态清单复制到仓库。
+> 本文描述**当前代码真实状态**。H 盘原型审计结论见 §2 历史摘要；不再代表仓库仍是模板。
 
-## 1. 审计结论
+## 0. 当前实现摘要
 
-当前仓库是 Tauri 2 + Vite + Vanilla TypeScript 的官方最小模板，尚未形成媒体库应用。H 盘原型已经验证了日期归档、照片/视频展示、实况照片配对、连拍标记、收藏、回收站删除和相机备份等用户流程，但运行时仍依赖硬编码路径、静态 JavaScript 清单、浏览器 `localStorage` 和本地 HTTP 服务。
+仓库是 Tauri 2 + Vite + Vanilla TypeScript + Rust + SQLite 的可运行媒体库应用。
 
-目标架构应让 Rust 成为唯一的文件系统、索引、数据库、缩略图和备份边界；前端只持有 DTO、媒体项 ID 和任务 ID。静态清单不再是正式索引，Python HTTP 服务不再作为运行时依赖。
+**Rust 边界**（`src-tauri/src/`）：
 
-## 2. 当前代码现状
+| 模块 | 职责 |
+| --- | --- |
+| `lib.rs` | Tauri commands、状态装配、`ensure_library_ready` |
+| `errors.rs` | 结构化 `AppError` / `ErrorCode`，command 错误合约 |
+| `infrastructure.rs` | 设置、库根、卷身份、断盘状态 |
+| `db/` | SQLite 迁移、查询、收藏/标签/评分、扫描与备份 runs |
+| `scanner.rs` | 增量扫描、实况配对、连拍、进度 Channel |
+| `media.rs` | 缩略图、ffmpeg 适配器、`camlib` 流协议与 Range |
+| `deletion.rs` | 路径解析、回收站删除预检与执行 |
+| `backup.rs` | DCIM 发现、预览、复制校验、重试 |
+| `system.rs` | 托盘、关闭行为、通知、卷监视 |
 
-### 2.1 仓库
+**安全基线（S9）**：
 
-- `package.json` 只有 `build`、`dev`、`preview` 和 Tauri 命令；依赖只有 Tauri API、opener、Vite 和 TypeScript。
-- `src/main.ts` 只注册默认表单，并调用 `greet`。
-- `index.html` 和 `src/styles.css` 仍是 Tauri 欢迎页。
-- `src-tauri/src/lib.rs` 只有 `greet` command；没有应用状态、数据库、扫描器、任务管理器或路径安全层。
-- `Cargo.toml` 只有 Tauri、opener、Serde 和 Serde JSON；尚未引入 SQLite、媒体元数据、Windows 文件操作或测试替身。
-- `tauri.conf.json` 使用 Vite `1420` 端口、`frontendDist=../dist`，CSP 为 `null`；能力文件只有 `core:default` 和 `opener:default`。
-- 仓库没有测试、数据库迁移或业务源代码；当前没有 Git 提交记录。
-- 现有 `docs/requirements.md` 和 `docs/codex-development-workflow.md` 是需求与开发流程文档，不代表功能已经存在。
+- CSP 非 `null`：`default-src 'self'`，script 仅 self；`img-src`/`media-src` 含 `camlib:` 与 asset
+- `withGlobalTauri: false`；capabilities 最小化（无 webview 侧 notification）
+- 路径：component-aware containment；拒绝 `..` / 绝对 / UNC / 设备前缀
+- 错误：`{ code, message, retryable, details? }` 贯穿 Rust → 前端中文文案
+
+## 1. 设计原则（不变）
+
+1. Rust 是唯一文件系统、索引、缩略图与备份边界。
+2. 前端只持有 DTO、媒体项 ID、任务 ID；不拼物理路径。
+3. SQLite 是正式索引与用户状态唯一来源；可重建数据与原始媒体分离。
+4. 原始媒体默认只读；删除进回收站；备份不改源盘。
+5. 长任务可查询、可取消；断盘时写操作被拒绝。
+
+## 2. 历史审计摘要（2026-09-06）
+
+以下为 H 盘原型阶段的结论，保留作迁移依据；仓库实现已完成其中主要迁移项。
+
+### 2.1 仓库（审计时）
+
+当审计时仓库接近官方模板，无业务代码。现已实现完整浏览 / 管理 / 备份闭环与系统融入（见 §0）。
 
 ### 2.2 原型文件名差异
 
@@ -62,17 +82,13 @@
 - 图片使用 Pillow 做 EXIF 方向纠正和 JPEG 缩略图；视频调用 ffmpeg 截取首帧。
 - 缩略图新鲜度只比较缩略图和源文件修改时间；视频 ffmpeg 返回码没有作为失败条件处理。
 
-### 当前实现的媒体预览边界
+### 原型媒体预览边界（历史）
 
-- 缩略图只写入应用设置中的 SSD 缓存目录，缓存键包含规范化相对路径、文件大小、修改时间、规格和处理器版本；原媒体目录不会写入生成文件。
-- 图片缩略图在解码后按 EXIF Orientation 纠正；视频首帧写入缓存前由 ffmpeg 生成。
-- 原图和视频通过受控 `camlib://` URI 访问。视频协议支持 HTTP Range，并将单次读取限制在 2 MiB，避免把整个视频读进 IPC 或前端内存。
-- ffmpeg 查找顺序是 `CAMLIB_FFMPEG_PATH`、打包资源 `resources/ffmpeg/ffmpeg[.exe]`、开发机 PATH。发布构建需要把对应平台的 ffmpeg 可执行文件放入 `src-tauri/resources/ffmpeg/`；仓库不内置第三方二进制。
-- 按文件名时间戳把相邻三秒内、至少三项的媒体标记为连拍。
-- 生成一个启动索引和按月 JavaScript 分片，并从文本备份日志解析最近备份信息。
-- 清单中的 `stats.files` 统计的是逻辑项，不是所有物理文件；`duplicates` 明确未计算。
+- 缩略图曾写在媒体盘；现改为应用缓存目录，缓存键包含规范化相对路径、文件大小、修改时间、规格和处理器版本。
+- 原图和视频通过受控 `camlib://` / `http://camlib.localhost` URI 访问，支持 Range，单次读取限制在 2 MiB。
+- ffmpeg 查找顺序：`CAMLIB_FFMPEG_PATH` → 打包资源 → PATH/WinGet。
 
-主要架构风险：静态清单会过期；搜索必须把月份分片加载到浏览器内存；清单输出暴露 H 盘相对路径并依赖本地 HTTP；逻辑 ID 主要由日期、类型和 stem 拼接而成；同一日期内重复 stem 可能在字典分类阶段互相覆盖；元数据范围有限；缩略图和清单都写在媒体盘而非应用缓存。
+主要架构风险（原型）：静态清单会过期；全库搜索把月份分片装进浏览器；清单暴露相对路径并依赖本地 HTTP；逻辑 ID 由日期/stem 拼接；缩略图与清单写在媒体盘。
 
 ### 2.5 前端查看器原型
 
@@ -129,19 +145,19 @@ Rust application layer
 7. 扫描和备份使用独立长任务；任务状态可查询、可取消、最终结果持久化，界面关闭后不会把任务线程和数据库写入留在不可知状态。
 8. Windows 盘符只作为显示信息。库记录规范化根路径和卷唯一标识；每次写操作前重新确认卷和根目录仍是同一对象。
 
-### 3.3 建议 Rust 模块
+### 3.3 当前 Rust 模块布局
 
 ```text
 src-tauri/src/
-  app_state.rs       应用目录、数据库、任务管理器、单实例
-  commands/          command 入参、出参和错误映射
-  db/                迁移、repository、查询 DTO
-  library/           卷识别、扫描、配对、增量同步
-  media/             资源访问、元数据、缩略图、回收站
-  backup/            源盘发现、预览、复制和校验
-  jobs/              job 状态、取消令牌、进度 channel
-  security/          路径解析、根目录约束、卷校验
-  windows/            回收站、盘符/卷信息、文件夹打开
+  lib.rs             commands + ensure_library_ready
+  errors.rs          AppError / ErrorCode
+  infrastructure.rs  设置、库根、卷、断盘
+  db/                SQLite 迁移与 repository
+  scanner.rs         增量扫描与 job
+  media.rs           缩略图、ffmpeg、流协议
+  deletion.rs        路径解析与回收站删除
+  backup.rs          备份发现/预览/复制/重试
+  system.rs          托盘、通知、卷监视
 ```
 
 ## 4. 与原型的迁移边界

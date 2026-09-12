@@ -138,13 +138,15 @@ impl BackupManagerState {
         }
     }
 
-    pub fn start(&self) -> Result<(String, Arc<AtomicBool>), String> {
+    pub fn start(&self) -> Result<(String, Arc<AtomicBool>), crate::errors::AppError> {
         let mut jobs = self
             .jobs
             .lock()
-            .map_err(|_| "备份任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("备份任务状态锁已损坏"))?;
         if !jobs.is_empty() {
-            return Err("已有备份任务正在运行".to_owned());
+            return Err(crate::errors::AppError::job_already_running(
+                "已有备份任务正在运行",
+            ));
         }
         let job_id = next_id("backup");
         let cancel = Arc::new(AtomicBool::new(false));
@@ -157,13 +159,13 @@ impl BackupManagerState {
         Ok((job_id, cancel))
     }
 
-    pub fn cancel(&self, job_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, job_id: &str) -> Result<(), crate::errors::AppError> {
         let jobs = self
             .jobs
             .lock()
-            .map_err(|_| "备份任务状态锁已损坏".to_owned())?;
+            .map_err(|_| crate::errors::AppError::internal("备份任务状态锁已损坏"))?;
         jobs.get(job_id)
-            .ok_or_else(|| "备份任务不存在".to_owned())?
+            .ok_or_else(|| crate::errors::AppError::job_not_found("备份任务不存在"))?
             .cancel
             .store(true, Ordering::Relaxed);
         Ok(())
@@ -800,7 +802,9 @@ fn finish(
         app,
         terminal,
         copied_files,
-        summary.as_deref().or_else(|| errors.first().map(String::as_str)),
+        summary
+            .as_deref()
+            .or_else(|| errors.first().map(String::as_str)),
     );
     Ok(status)
 }

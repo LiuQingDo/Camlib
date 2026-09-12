@@ -162,12 +162,12 @@ impl InfrastructureState {
     pub fn with_infrastructure<T>(
         &self,
         operation: impl FnOnce(&mut Infrastructure) -> Result<T, InfrastructureError>,
-    ) -> Result<T, String> {
+    ) -> Result<T, crate::errors::AppError> {
         let mut infrastructure = self
             .inner
             .lock()
-            .map_err(|_| "基础设施状态锁已损坏".to_owned())?;
-        operation(&mut infrastructure).map_err(|error| error.to_string())
+            .map_err(|_| crate::errors::AppError::internal("基础设施状态锁已损坏"))?;
+        operation(&mut infrastructure).map_err(crate::errors::AppError::from)
     }
 }
 
@@ -198,7 +198,8 @@ impl Infrastructure {
         default_thumbnail_cache_dir: PathBuf,
         database_path: PathBuf,
     ) -> Result<Self, InfrastructureError> {
-        let store = SettingsStore::open(settings_path.clone(), default_thumbnail_cache_dir.clone())?;
+        let store =
+            SettingsStore::open(settings_path.clone(), default_thumbnail_cache_dir.clone())?;
         let repository = Repository::open(&database_path).map_err(InfrastructureError::database)?;
         let app_data_dir = settings_path
             .parent()
@@ -641,9 +642,24 @@ impl From<&AppSettings> for DiskSettings {
 #[derive(Debug)]
 pub enum InfrastructureError {
     InvalidPath(String),
-    Io { path: PathBuf, message: String },
+    LibraryOffline(String),
+    VolumeChanged(String),
+    MediaMissing(String),
+    #[allow(dead_code)]
+    PathOutsideRoot(String),
+    Io {
+        path: PathBuf,
+        message: String,
+    },
     InvalidSettings(String),
     Database(String),
+    App(crate::errors::AppError),
+}
+
+impl From<crate::errors::AppError> for InfrastructureError {
+    fn from(error: crate::errors::AppError) -> Self {
+        Self::App(error)
+    }
 }
 
 impl InfrastructureError {
@@ -663,11 +679,16 @@ impl std::fmt::Display for InfrastructureError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidPath(message) => write!(formatter, "路径无效: {message}"),
+            Self::LibraryOffline(message) => write!(formatter, "媒体库离线: {message}"),
+            Self::VolumeChanged(message) => write!(formatter, "卷身份变化: {message}"),
+            Self::MediaMissing(message) => write!(formatter, "媒体不可用: {message}"),
+            Self::PathOutsideRoot(message) => write!(formatter, "路径越界: {message}"),
             Self::Io { path, message } => {
                 write!(formatter, "访问路径 {} 失败: {message}", path.display())
             }
             Self::InvalidSettings(message) => write!(formatter, "设置文件无效: {message}"),
             Self::Database(message) => write!(formatter, "数据库无效: {message}"),
+            Self::App(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -831,7 +852,8 @@ fn directory_stats(root: &Path) -> Result<DirectoryStats, InfrastructureError> {
     let mut total_bytes = 0_u64;
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        let entries = fs::read_dir(&directory).map_err(|error| InfrastructureError::io(&directory, error))?;
+        let entries =
+            fs::read_dir(&directory).map_err(|error| InfrastructureError::io(&directory, error))?;
         for entry in entries {
             let entry = entry.map_err(|error| InfrastructureError::io(&directory, error))?;
             let path = entry.path();
@@ -1274,5 +1296,34 @@ mod tests {
         let stats = infrastructure.thumbnail_cache_stats().expect("stats");
         assert_eq!(stats.file_count, 2);
         assert_eq!(stats.total_bytes, 24);
+    }
+
+    #[test]
+    fn offline_library_status_is_ready_for_write_guards() {
+        let (temp_dir, mut infrastructure) = test_infrastructure();
+        let root = temp_dir.path().join("library");
+        fs::create_dir(&root).expect("library");
+        infrastructure
+            .set_library_root(root.clone())
+            .expect("set library root");
+        fs::remove_dir(&root).expect("disconnect");
+
+        let status = infrastructure.library_status().expect("status");
+        assert_eq!(status.availability, LibraryAvailability::Disconnected);
+        // ensure_library_ready in lib.rs maps Disconnected → LibraryOffline.
+        // Here we assert the status classification the guard depends on.
+        let mapped = InfrastructureError::LibraryOffline(
+            status.reason.unwrap_or_else(|| "disconnected".to_owned()),
+        );
+        let app = crate::errors::AppError::from(mapped);
+        assert_eq!(app.code, crate::errors::ErrorCode::LibraryOffline);
+        assert!(app.retryable);
+    }
+
+    #[test]
+    fn volume_mismatch_maps_to_volume_changed_code() {
+        let mapped = InfrastructureError::VolumeChanged("当前卷与记录的媒体库卷不一致".to_owned());
+        let app = crate::errors::AppError::from(mapped);
+        assert_eq!(app.code, crate::errors::ErrorCode::VolumeChanged);
     }
 }

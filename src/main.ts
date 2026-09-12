@@ -75,6 +75,7 @@ import {
   type UiSortMode,
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { toUserMessage } from "./api/errors";
 import { listen } from "@tauri-apps/api/event";
 import type { ScanProgressDto, PreviewProgressDto } from "./api/media";
 import {
@@ -684,7 +685,7 @@ async function toggleFavorite(id: string): Promise<void> {
     }
     updateFavoriteButton(id);
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "更新收藏失败";
+    state.error = toUserMessage(error, "更新收藏失败");
     render();
   } finally {
     state.favoritePendingIds.delete(id);
@@ -717,7 +718,7 @@ async function applyBatchFavorite(favorite: boolean): Promise<void> {
       ? `已收藏 ${formatCount(ids.length)} 项`
       : `已取消收藏 ${formatCount(ids.length)} 项`;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "批量更新收藏失败";
+    state.error = toUserMessage(error, "批量更新收藏失败");
   } finally {
     state.favoritesBusy = false;
     if ((!favorite && state.favoriteOnly) || state.error) {
@@ -767,7 +768,7 @@ async function applyBatchTag(attach: boolean): Promise<void> {
       ? `已为 ${formatCount(ids.length)} 项添加「${tagName}」`
       : `已从 ${formatCount(ids.length)} 项移除「${tagName}」`;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "批量更新标签失败";
+    state.error = toUserMessage(error, "批量更新标签失败");
   } finally {
     state.tagsBusy = false;
     if (state.error || (state.tagIds.has(tagId) && !attach)) {
@@ -811,7 +812,7 @@ async function applyBatchRating(): Promise<void> {
       ? `已清除 ${formatCount(ids.length)} 项评分`
       : `已为 ${formatCount(ids.length)} 项设为 ${rating} 星`;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "批量设置评分失败";
+    state.error = toUserMessage(error, "批量设置评分失败");
   } finally {
     state.tagsBusy = false;
     if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
@@ -1280,7 +1281,7 @@ function bindTagManagerEvents(): void {
         await createTag(name);
         await refreshTags();
       } catch (error) {
-        state.tagsManagerError = error instanceof Error ? error.message : "新建标签失败";
+        state.tagsManagerError = toUserMessage(error, "新建标签失败");
       } finally {
         state.tagsManagerBusy = false;
         render();
@@ -1310,7 +1311,7 @@ function bindTagManagerEvents(): void {
             };
           }
         } catch (error) {
-          state.tagsManagerError = error instanceof Error ? error.message : "重命名标签失败";
+          state.tagsManagerError = toUserMessage(error, "重命名标签失败");
           await refreshTags();
         } finally {
           state.tagsManagerBusy = false;
@@ -1366,7 +1367,7 @@ function bindTagManagerEvents(): void {
           }
           void refreshMedia();
         } catch (error) {
-          state.tagsManagerError = error instanceof Error ? error.message : "删除标签失败";
+          state.tagsManagerError = toUserMessage(error, "删除标签失败");
         } finally {
           state.tagsManagerBusy = false;
           render();
@@ -1842,7 +1843,7 @@ function bindEvents(): void {
         const settings = await setAutoScanOnStartup(enabled);
         state.autoScanOnStartup = settings.auto_scan_on_startup;
       } catch (error) {
-        state.error = error instanceof Error ? error.message : "保存启动扫描设置失败";
+        state.error = toUserMessage(error, "保存启动扫描设置失败");
         render();
       }
     })();
@@ -1879,7 +1880,7 @@ function bindEvents(): void {
           state.backupHistoryItems = items;
           render();
         }).catch((error) => {
-          state.error = error instanceof Error ? error.message : "读取备份明细失败";
+          state.error = toUserMessage(error, "读取备份明细失败");
           render();
         });
       } else {
@@ -2099,7 +2100,7 @@ async function loadSettingsSectionData(): Promise<void> {
       }
     }
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "加载设置失败";
+    state.settingsError = toUserMessage(error, "加载设置失败");
   }
 }
 
@@ -2108,7 +2109,7 @@ async function openDirectory(which: "app_data" | "app_cache" | "thumbnail_cache"
     await openAppDirectory(which);
     state.settingsError = null;
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "打开目录失败";
+    state.settingsError = toUserMessage(error, "打开目录失败");
     updateSettingsPanel();
   }
 }
@@ -2143,7 +2144,7 @@ async function runSettingsScan(full: boolean): Promise<void> {
     };
     updateSettingsPanel();
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "无法开始扫描";
+    state.settingsError = toUserMessage(error, "无法开始扫描");
     state.settingsNotice = null;
     updateSettingsPanel();
   }
@@ -2161,7 +2162,7 @@ async function chooseThumbnailCacheFolder(): Promise<void> {
       updateSettingsPanel();
     }
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "打开文件夹选择器失败";
+    state.settingsError = toUserMessage(error, "打开文件夹选择器失败");
     updateSettingsPanel();
   }
 }
@@ -2182,7 +2183,7 @@ async function saveThumbnailCacheDir(path: string): Promise<void> {
     state.thumbnailStats = stats;
     state.settingsNotice = "缩略图目录已更新";
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "保存缩略图目录失败";
+    state.settingsError = toUserMessage(error, "保存缩略图目录失败");
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
@@ -2201,7 +2202,7 @@ async function runThumbnailRebuild(): Promise<void> {
     state.thumbnailJobId = start.jobId;
   } catch (error) {
     state.thumbnailRebuilding = false;
-    state.settingsError = error instanceof Error ? error.message : "无法开始重建缩略图";
+    state.settingsError = toUserMessage(error, "无法开始重建缩略图");
     state.settingsNotice = null;
     renderSettingsAware();
   }
@@ -2212,7 +2213,7 @@ async function cancelThumbnailRebuild(): Promise<void> {
   try {
     await cancelPreviewJob(state.thumbnailJobId);
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "无法取消缩略图重建";
+    state.settingsError = toUserMessage(error, "无法取消缩略图重建");
     renderSettingsAware();
   }
 }
@@ -2231,7 +2232,7 @@ async function saveBackupDefaults(): Promise<void> {
     state.backupIgnoreExtensions = extensionsToInput(settings.backup_ignore_extensions);
     state.settingsNotice = "备份默认项已保存";
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "保存备份默认项失败";
+    state.settingsError = toUserMessage(error, "保存备份默认项失败");
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
@@ -2252,7 +2253,7 @@ async function saveSystemSettings(): Promise<void> {
     state.notificationsEnabled = settings.notifications_enabled;
     state.settingsNotice = "系统设置已保存";
   } catch (error) {
-    state.settingsError = error instanceof Error ? error.message : "保存系统设置失败";
+    state.settingsError = toUserMessage(error, "保存系统设置失败");
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
@@ -2264,7 +2265,7 @@ async function openFolderForItem(mediaItemId: string): Promise<void> {
     await openMediaFolder(mediaItemId);
     state.error = null;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "打开所在文件夹失败";
+    state.error = toUserMessage(error, "打开所在文件夹失败");
     render();
   }
 }
@@ -2448,7 +2449,7 @@ async function applyPreviewRating(
       bindPreviewMetaEvents(panel, item);
     }
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "更新评分失败";
+    state.error = toUserMessage(error, "更新评分失败");
     render();
   }
 }
@@ -2496,7 +2497,7 @@ async function applyPreviewTag(
       void refreshMedia();
     }
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "更新标签失败";
+    state.error = toUserMessage(error, "更新标签失败");
     render();
   }
 }
@@ -2671,7 +2672,7 @@ async function refreshMedia(): Promise<void> {
   }
   catch (error) {
     if (token !== mediaQueryToken) return;
-    state.error = error instanceof Error ? error.message : "读取媒体索引失败";
+    state.error = toUserMessage(error, "读取媒体索引失败");
   }
   finally {
     if (token === mediaQueryToken) {
@@ -2700,7 +2701,7 @@ async function loadMore(): Promise<void> {
   }
   catch (error) {
     if (token !== mediaQueryToken) return;
-    state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render();
+    state.error = toUserMessage(error, "加载更多媒体失败"); render();
   }
 }
 
@@ -2735,7 +2736,7 @@ async function selectCurrentResults(): Promise<void> {
     applySelectionChrome();
   } catch (error) {
     if (token !== mediaQueryToken) return;
-    state.error = error instanceof Error ? error.message : "选择当前结果失败"; render();
+    state.error = toUserMessage(error, "选择当前结果失败"); render();
   }
 }
 
@@ -2789,7 +2790,7 @@ async function requestDeleteSelected(): Promise<void> {
     const preview = await previewDelete(state.library.id, ids);
     state.deleteConfirm = { preview, ids };
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "无法生成删除预览";
+    state.error = toUserMessage(error, "无法生成删除预览");
     state.selectedIds.clear();
   } finally {
     state.deleting = false;
@@ -2819,7 +2820,7 @@ async function runConfirmedDelete(): Promise<void> {
     state.error = null;
   } catch (error) {
     state.deleteProgress = null;
-    state.error = error instanceof Error ? error.message : "删除媒体失败";
+    state.error = toUserMessage(error, "删除媒体失败");
   } finally {
     state.deleting = false;
     state.lastSelectIndex = null;
@@ -2836,7 +2837,7 @@ async function connectLibrary(path: string): Promise<void> {
     startupAutoScanStarted = false;
     await bootstrap();
   }
-  catch (error) { state.error = error instanceof Error ? error.message : "连接媒体库失败"; state.loading = false; render(); }
+  catch (error) { state.error = toUserMessage(error, "连接媒体库失败"); state.loading = false; render(); }
 }
 
 async function chooseLibraryFolder(): Promise<void> {
@@ -2850,7 +2851,7 @@ async function chooseLibraryFolder(): Promise<void> {
       await connectLibrary(selected);
     }
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "打开文件夹选择器失败";
+    state.error = toUserMessage(error, "打开文件夹选择器失败");
     render();
   }
 }
@@ -2861,7 +2862,7 @@ async function persistUiPrefs(input: { uiDensity?: number; uiSort?: SortMode }):
     state.density = clampDensity(settings.ui_density);
     state.sort = settings.ui_sort;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "保存界面偏好失败";
+    state.error = toUserMessage(error, "保存界面偏好失败");
   }
 }
 
@@ -2902,7 +2903,7 @@ async function openBackupPanel(): Promise<void> {
       state.backupTargetId = state.library?.id ?? state.libraries[0]?.id ?? null;
     }
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "发现相机盘失败";
+    state.error = toUserMessage(error, "发现相机盘失败");
   } finally {
     state.backupLoading = false;
     render();
@@ -2929,7 +2930,7 @@ async function createBackupPreview(): Promise<void> {
   try {
     state.backupPreview = await previewBackup({ sourceVolumeId: source, targetLibraryId: target, conflictPolicy: state.backupConflictPolicy, ignoreExtensions: ignore });
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "生成备份预览失败";
+    state.error = toUserMessage(error, "生成备份预览失败");
   } finally {
     state.backupLoading = false;
     render();
@@ -2942,7 +2943,7 @@ async function saveBackupConflict(policy: ConflictPolicy): Promise<void> {
     state.backupConflictPolicy = settings.backup_conflict_policy;
     render();
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "保存冲突策略失败";
+    state.error = toUserMessage(error, "保存冲突策略失败");
     render();
   }
 }
@@ -2967,13 +2968,13 @@ async function startConfirmedBackup(): Promise<void> {
     state.backupJobId = start.jobId;
     state.backupLastRunId = start.backupRunId;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "无法开始备份";
+    state.error = toUserMessage(error, "无法开始备份");
   } finally { state.backupLoading = false; render(); }
 }
 
 async function cancelCurrentBackup(): Promise<void> {
   if (!state.backupJobId) return;
-  try { await cancelBackup(state.backupJobId); } catch (error) { state.error = error instanceof Error ? error.message : "无法取消备份"; render(); }
+  try { await cancelBackup(state.backupJobId); } catch (error) { state.error = toUserMessage(error, "无法取消备份"); render(); }
 }
 
 async function retryCurrentBackup(): Promise<void> {
@@ -2989,7 +2990,7 @@ async function retryCurrentBackup(): Promise<void> {
     state.backupProgress = null;
     state.backupFailedItems = [];
   } catch (error) {
-    state.error = error instanceof Error ? error.message : "重试备份失败";
+    state.error = toUserMessage(error, "重试备份失败");
   } finally {
     state.backupRetrying = false;
     render();
@@ -3041,13 +3042,13 @@ async function scanLibrary(): Promise<void> {
     state.scanProgress = { jobId: start.jobId, kind: "scan", seq: 0, phase: "discovering", state: "running", current: null, processed: 0, total: 0, errors: [], error: null };
     renderSettingsAware();
   }
-  catch (error) { state.scanning = false; state.error = error instanceof Error ? error.message : "无法开始扫描"; renderSettingsAware(); }
+  catch (error) { state.scanning = false; state.error = toUserMessage(error, "无法开始扫描"); renderSettingsAware(); }
 }
 
 async function cancelCurrentScan(): Promise<void> {
   if (!state.scanProgress || state.scanProgress.state !== "running") return;
   try { await cancelLibraryScan(state.scanProgress.jobId); }
-  catch (error) { state.error = error instanceof Error ? error.message : "无法取消扫描"; renderSettingsAware(); }
+  catch (error) { state.error = toUserMessage(error, "无法取消扫描"); renderSettingsAware(); }
 }
 
 async function bootstrap(): Promise<void> {
@@ -3084,7 +3085,7 @@ async function bootstrap(): Promise<void> {
       void maybeAutoScan();
     }
     else { state.page = { items: [], total: 0, offset: 0, limit: 120 }; state.facets = []; state.loading = false; renderSettingsAware(); }
-  } catch (error) { state.loading = false; state.error = error instanceof Error ? error.message : "初始化媒体库失败"; renderSettingsAware(); }
+  } catch (error) { state.loading = false; state.error = toUserMessage(error, "初始化媒体库失败"); renderSettingsAware(); }
 }
 
 /** Surface the newest interrupted/failed run once after restart. */
