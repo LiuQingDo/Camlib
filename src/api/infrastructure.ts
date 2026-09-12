@@ -6,7 +6,7 @@ export interface VolumeInfo {
   volume_id: string | null;
 }
 
-export type UiSortMode = "newest" | "oldest" | "name";
+export type UiSortMode = "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
 
 export interface AppSettings {
   library_root: string | null;

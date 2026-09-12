@@ -266,6 +266,9 @@ struct MediaQueryInput {
     date_from: Option<String>,
     date_to: Option<String>,
     first_seen_from: Option<String>,
+    tag_ids: Option<Vec<String>>,
+    rating_eq: Option<i64>,
+    rating_min: Option<i64>,
     offset: Option<i64>,
     limit: Option<i64>,
     sort: Option<String>,
@@ -289,6 +292,8 @@ fn media_query(
     let sort = match query.sort.as_deref() {
         Some("oldest") => MediaSort::Oldest,
         Some("name") => MediaSort::Name,
+        Some("rating-desc") => MediaSort::RatingDesc,
+        Some("rating-asc") => MediaSort::RatingAsc,
         _ => MediaSort::Newest,
     };
     state.with_infrastructure(|infrastructure| {
@@ -304,6 +309,9 @@ fn media_query(
                 date_from: query.date_from,
                 date_to: query.date_to,
                 first_seen_from: query.first_seen_from,
+                tag_ids: query.tag_ids.unwrap_or_default(),
+                rating_eq: query.rating_eq,
+                rating_min: query.rating_min,
                 offset: query.offset.unwrap_or(0),
                 limit: query.limit.unwrap_or(120),
                 sort,
@@ -426,6 +434,199 @@ fn favorite_set_batch(
         infrastructure
             .repository()
             .set_favorites_batch(&media_item_ids, favorite, &now)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+fn now_unix_ms() -> String {
+    format!(
+        "unix-ms:{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    )
+}
+
+#[tauri::command]
+fn tag_list(state: State<'_, InfrastructureState>) -> Result<Vec<db::Tag>, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .list_tags()
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_create(
+    name: String,
+    color: Option<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<db::Tag, String> {
+    let now = now_unix_ms();
+    let id = format!(
+        "tag-{:016x}",
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.trim().to_lowercase().hash(&mut hasher);
+            now.hash(&mut hasher);
+            hasher.finish()
+        }
+    );
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .create_tag(db::NewTag {
+                id,
+                name: name.trim().to_owned(),
+                color,
+                created_at: now,
+            })
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_find_or_create(
+    name: String,
+    color: Option<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<db::Tag, String> {
+    let now = now_unix_ms();
+    let id = format!(
+        "tag-{:016x}",
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.trim().to_lowercase().hash(&mut hasher);
+            now.hash(&mut hasher);
+            hasher.finish()
+        }
+    );
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .find_or_create_tag(db::NewTag {
+                id,
+                name: name.trim().to_owned(),
+                color,
+                created_at: now,
+            })
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_update(
+    tag_id: String,
+    name: Option<String>,
+    color: Option<String>,
+    state: State<'_, InfrastructureState>,
+) -> Result<db::Tag, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .update_tag(&tag_id, name.as_deref(), color.as_deref())
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_delete(tag_id: String, state: State<'_, InfrastructureState>) -> Result<(), String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .delete_tag(&tag_id)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_attach(
+    media_item_id: String,
+    tag_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), String> {
+    let now = now_unix_ms();
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .attach_tag(&media_item_id, &tag_id, &now)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_detach(
+    media_item_id: String,
+    tag_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .detach_tag(&media_item_id, &tag_id)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_attach_batch(
+    media_item_ids: Vec<String>,
+    tag_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<usize, String> {
+    let now = now_unix_ms();
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .attach_tags_batch(&media_item_ids, &tag_id, &now)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn tag_detach_batch(
+    media_item_ids: Vec<String>,
+    tag_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<usize, String> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .detach_tags_batch(&media_item_ids, &tag_id)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn rating_set(
+    media_item_id: String,
+    rating: i64,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), String> {
+    let now = now_unix_ms();
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .set_rating(&media_item_id, rating, &now)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
+#[tauri::command]
+fn rating_set_batch(
+    media_item_ids: Vec<String>,
+    rating: i64,
+    state: State<'_, InfrastructureState>,
+) -> Result<usize, String> {
+    let now = now_unix_ms();
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .set_ratings_batch(&media_item_ids, rating, &now)
             .map_err(infrastructure::InfrastructureError::database)
     })
 }
@@ -893,6 +1094,17 @@ pub fn run() {
             media_open_folder,
             favorite_set,
             favorite_set_batch,
+            tag_list,
+            tag_create,
+            tag_find_or_create,
+            tag_update,
+            tag_delete,
+            tag_attach,
+            tag_detach,
+            tag_attach_batch,
+            tag_detach_batch,
+            rating_set,
+            rating_set_batch,
             media_delete_preview,
             media_delete_items,
             media_thumbnail,

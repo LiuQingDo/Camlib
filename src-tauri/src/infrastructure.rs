@@ -27,6 +27,8 @@ pub enum UiSort {
     Newest,
     Oldest,
     Name,
+    RatingDesc,
+    RatingAsc,
 }
 
 impl Default for UiSort {
@@ -42,6 +44,8 @@ impl UiSort {
             Self::Newest => "newest",
             Self::Oldest => "oldest",
             Self::Name => "name",
+            Self::RatingDesc => "rating-desc",
+            Self::RatingAsc => "rating-asc",
         }
     }
 
@@ -50,6 +54,8 @@ impl UiSort {
             "newest" => Ok(Self::Newest),
             "oldest" => Ok(Self::Oldest),
             "name" => Ok(Self::Name),
+            "rating-desc" => Ok(Self::RatingDesc),
+            "rating-asc" => Ok(Self::RatingAsc),
             other => Err(InfrastructureError::InvalidSettings(format!(
                 "排序方式无效: {other}"
             ))),

@@ -461,6 +461,7 @@ mod tests {
             first_seen_at: "2026-01-01T00:00:00Z".into(),
             last_seen_at: "2026-01-01T00:00:00Z".into(),
             favorite: false,
+            rating: 0,
         }
     }
 

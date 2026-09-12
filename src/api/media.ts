@@ -40,6 +40,8 @@ export interface MediaItemDto {
   firstSeenAt: string;
   lastSeenAt: string;
   favorite: boolean;
+  /** 0 = unrated; otherwise 1–5. */
+  rating: number;
 }
 
 export interface MediaFileDto {
@@ -65,6 +67,7 @@ export interface TagDto {
   name: string;
   color: string | null;
   createdAt: string;
+  mediaCount?: number;
 }
 
 export interface MediaItemDetailsDto {
@@ -119,9 +122,15 @@ export interface MediaQueryInput {
   dateTo?: string;
   /** Keep media first indexed at/after this timestamp (`unix-ms:<ms>` or bare integer). */
   firstSeenFrom?: string;
+  /** Keep media that carry every listed tag id (AND). */
+  tagIds?: string[];
+  /** Exact rating filter; 0 means unrated only. */
+  ratingEq?: number;
+  /** Minimum rating 1–5. */
+  ratingMin?: number;
   offset?: number;
   limit?: number;
-  sort?: "newest" | "oldest" | "name";
+  sort?: "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
 }
 
 export interface DateFacetDto {
@@ -159,9 +168,10 @@ export interface PreviewMetaDto {
   totalSizeBytes: number;
   burstGroup: string | null;
   favorite: boolean;
+  rating: number;
   scanState: ScanState;
   files: PreviewFileDto[];
-  tags: string[];
+  tags: TagDto[];
 }
 
 export interface MediaPreviewDto {
@@ -387,6 +397,54 @@ export function setFavorite(mediaItemId: string, favorite: boolean): Promise<voi
 /** Apply the same favorite flag to many items in one backend transaction. */
 export function setFavoritesBatch(mediaItemIds: string[], favorite: boolean): Promise<number> {
   return invoke<number>("favorite_set_batch", { mediaItemIds, favorite });
+}
+
+export function listTags(): Promise<TagDto[]> {
+  return invoke<TagDto[]>("tag_list");
+}
+
+export function createTag(name: string, color?: string | null): Promise<TagDto> {
+  return invoke<TagDto>("tag_create", { name, color: color ?? null });
+}
+
+export function findOrCreateTag(name: string, color?: string | null): Promise<TagDto> {
+  return invoke<TagDto>("tag_find_or_create", { name, color: color ?? null });
+}
+
+export function updateTag(
+  tagId: string,
+  input: { name?: string; color?: string | null },
+): Promise<TagDto> {
+  return invoke<TagDto>("tag_update", { tagId, name: input.name ?? null, color: input.color ?? null });
+}
+
+export function deleteTag(tagId: string): Promise<void> {
+  return invoke<void>("tag_delete", { tagId });
+}
+
+export function attachTag(mediaItemId: string, tagId: string): Promise<void> {
+  return invoke<void>("tag_attach", { mediaItemId, tagId });
+}
+
+export function detachTag(mediaItemId: string, tagId: string): Promise<void> {
+  return invoke<void>("tag_detach", { mediaItemId, tagId });
+}
+
+export function attachTagsBatch(mediaItemIds: string[], tagId: string): Promise<number> {
+  return invoke<number>("tag_attach_batch", { mediaItemIds, tagId });
+}
+
+export function detachTagsBatch(mediaItemIds: string[], tagId: string): Promise<number> {
+  return invoke<number>("tag_detach_batch", { mediaItemIds, tagId });
+}
+
+/** Write a 1–5 star rating. Rating 0 clears the rating. */
+export function setRating(mediaItemId: string, rating: number): Promise<void> {
+  return invoke<void>("rating_set", { mediaItemId, rating });
+}
+
+export function setRatingsBatch(mediaItemIds: string[], rating: number): Promise<number> {
+  return invoke<number>("rating_set_batch", { mediaItemIds, rating });
 }
 
 export function previewDelete(libraryId: string, mediaItemIds: string[]): Promise<DeletePreviewDto> {

@@ -10,10 +10,21 @@ import {
   type MediaPageDto,
   type MediaPreviewDto,
   type PreviewMetaDto,
+  type TagDto,
   getMediaPreview,
   getMediaThumbnail,
   listDateFacets,
   listLibraries,
+  listTags,
+  createTag,
+  updateTag,
+  deleteTag,
+  attachTag,
+  detachTag,
+  attachTagsBatch,
+  detachTagsBatch,
+  setRating,
+  setRatingsBatch,
   onDeleteProgress,
   onScanProgress,
   queryMedia,
@@ -84,6 +95,22 @@ interface AppState {
   datePrefix: string | undefined;
   dateFrom: string | undefined;
   dateTo: string | undefined;
+  /** Selected tag ids for combined filtering (AND). */
+  tagIds: Set<string>;
+  /** Exact rating filter; null = any. 0 = unrated only. */
+  ratingEq: number | null;
+  /** Minimum rating filter; null = any. */
+  ratingMin: number | null;
+  /** All tags known to the library, for filter chips and preview editing. */
+  tags: TagDto[];
+  /** Projected ratings from the current page, keyed by media id. */
+  ratings: Map<string, number>;
+  tagsBusy: boolean;
+  tagsManagerOpen: boolean;
+  tagsManagerBusy: boolean;
+  tagsManagerError: string | null;
+  /** Tag id awaiting delete confirmation inside the manager. */
+  tagDeleteConfirmId: string | null;
   /** Years whose month list is visible in the sidebar. */
   expandedYears: Set<string>;
   /** Months whose day list is visible in the sidebar. */
@@ -156,6 +183,16 @@ const state: AppState = {
   datePrefix: undefined,
   dateFrom: undefined,
   dateTo: undefined,
+  tagIds: new Set(),
+  ratingEq: null,
+  ratingMin: null,
+  tags: [],
+  ratings: new Map(),
+  tagsBusy: false,
+  tagsManagerOpen: false,
+  tagsManagerBusy: false,
+  tagsManagerError: null,
+  tagDeleteConfirmId: null,
   expandedYears: new Set(),
   expandedMonths: new Set(),
   sort: "newest",
@@ -260,6 +297,8 @@ let previewRequest = 0;
 // Modal UI flags that must survive partial DOM updates (not full re-renders).
 let previewInfoOpen = false;
 let livePlaying = false;
+// Last loaded preview meta so tag/rating edits can patch the panel in place.
+let previewMetaCache: PreviewMetaDto | null = null;
 // Bumps on every full refresh so in-flight load-more/select-all pages from a
 // previous filter cannot append into the new result set.
 let mediaQueryToken = 0;
@@ -475,7 +514,7 @@ function hasDateFilter(): boolean {
 }
 
 function hasAnyFilter(): boolean {
-  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom);
+  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null);
 }
 
 function formatRangeLabel(): string {
@@ -494,7 +533,7 @@ function primaryDateLabel(): string {
 
 function currentQueryFields(): Pick<
   MediaQueryInput,
-  "libraryId" | "kind" | "favoriteOnly" | "burstOnly" | "search" | "datePrefix" | "dateFrom" | "dateTo" | "firstSeenFrom" | "sort"
+  "libraryId" | "kind" | "favoriteOnly" | "burstOnly" | "search" | "datePrefix" | "dateFrom" | "dateTo" | "firstSeenFrom" | "tagIds" | "ratingEq" | "ratingMin" | "sort"
 > {
   if (!state.library) throw new Error("媒体库未就绪");
   return {
@@ -507,6 +546,9 @@ function currentQueryFields(): Pick<
     dateFrom: state.dateFrom,
     dateTo: state.dateTo,
     firstSeenFrom: state.firstSeenFrom ?? undefined,
+    tagIds: state.tagIds.size ? [...state.tagIds] : undefined,
+    ratingEq: state.ratingEq ?? undefined,
+    ratingMin: state.ratingEq === null ? (state.ratingMin ?? undefined) : undefined,
     sort: state.sort,
   };
 }
@@ -544,6 +586,9 @@ function bindSelectionToolbarEvents(): void {
   app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void requestDeleteSelected());
   app.querySelector<HTMLButtonElement>("#favorite-selected")?.addEventListener("click", () => void applyBatchFavorite(true));
   app.querySelector<HTMLButtonElement>("#unfavorite-selected")?.addEventListener("click", () => void applyBatchFavorite(false));
+  app.querySelector<HTMLButtonElement>("#batch-tag-attach")?.addEventListener("click", () => void applyBatchTag(true));
+  app.querySelector<HTMLButtonElement>("#batch-tag-detach")?.addEventListener("click", () => void applyBatchTag(false));
+  app.querySelector<HTMLButtonElement>("#batch-rating-apply")?.addEventListener("click", () => void applyBatchRating());
 }
 
 /** Patch selection UI without rebuilding the grid (avoids thumbnail flicker). */
@@ -687,6 +732,85 @@ function showTransientNotice(message: string): void {
   });
 }
 
+async function applyBatchTag(attach: boolean): Promise<void> {
+  if (!state.selectedIds.size || state.tagsBusy) return;
+  const select = app.querySelector<HTMLSelectElement>("#batch-tag-select");
+  const tagId = select?.value.trim();
+  if (!tagId) {
+    state.error = "请先选择标签";
+    render();
+    return;
+  }
+  const ids = [...state.selectedIds];
+  state.tagsBusy = true;
+  state.error = null;
+  applySelectionChrome();
+  try {
+    if (attach) await attachTagsBatch(ids, tagId);
+    else await detachTagsBatch(ids, tagId);
+    await refreshTags();
+    const tagName = state.tags.find((tag) => tag.id === tagId)?.name ?? "标签";
+    state.deleteNotice = attach
+      ? `已为 ${formatCount(ids.length)} 项添加「${tagName}」`
+      : `已从 ${formatCount(ids.length)} 项移除「${tagName}」`;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "批量更新标签失败";
+  } finally {
+    state.tagsBusy = false;
+    if (state.error || (state.tagIds.has(tagId) && !attach)) {
+      render();
+      return;
+    }
+    applySelectionChrome();
+    showTransientNotice(state.deleteNotice ?? "");
+    state.deleteNotice = null;
+  }
+}
+
+async function applyBatchRating(): Promise<void> {
+  if (!state.selectedIds.size || state.tagsBusy) return;
+  const select = app.querySelector<HTMLSelectElement>("#batch-rating-select");
+  const raw = select?.value.trim();
+  if (raw === "" || raw === undefined) {
+    state.error = "请先选择评分";
+    render();
+    return;
+  }
+  const rating = Number(raw);
+  if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
+    state.error = "评分必须是 0–5";
+    render();
+    return;
+  }
+  const ids = [...state.selectedIds];
+  state.tagsBusy = true;
+  state.error = null;
+  applySelectionChrome();
+  try {
+    await setRatingsBatch(ids, rating);
+    for (const id of ids) {
+      if (rating > 0) state.ratings.set(id, rating);
+      else state.ratings.delete(id);
+      const item = state.page.items.find((entry) => entry.id === id);
+      if (item) item.rating = rating;
+    }
+    state.deleteNotice = rating === 0
+      ? `已清除 ${formatCount(ids.length)} 项评分`
+      : `已为 ${formatCount(ids.length)} 项设为 ${rating} 星`;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "批量设置评分失败";
+  } finally {
+    state.tagsBusy = false;
+    if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
+      render();
+      return;
+    }
+    applySelectionChrome();
+    showTransientNotice(state.deleteNotice ?? "");
+    state.deleteNotice = null;
+  }
+}
+
 function groupedFacets(): Array<{ year: string; count: number; months: Array<{ month: string; count: number; dates: DateFacetDto[] }> }> {
   const years = new Map<string, { count: number; months: Map<string, { count: number; dates: DateFacetDto[] }> }>();
   for (const facet of state.facets) {
@@ -751,7 +875,7 @@ function renderCard(item: MediaItemDto, index: number): string {
   const favoritePending = state.favoritePendingIds.has(item.id);
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
     <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<button class="card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><span aria-hidden="true">✓</span></button><button class="card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><span aria-hidden="true">★</span></button><button class="card-folder" data-open-folder="${escapeHtml(item.id)}" type="button" aria-label="打开${escapeHtml(item.displayName)}所在文件夹" title="打开所在文件夹"><span aria-hidden="true">▣</span></button><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}</div>
-    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span></div></div>
+    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${item.rating > 0 ? `<span class="card-rating" title="评分 ${item.rating} 星">${"★".repeat(item.rating)}</span>` : ""}</div></div>
   </article>`;
 }
 
@@ -770,7 +894,31 @@ function renderKindFilters(): string {
   // original 收藏 rule so switching tabs always replaces the whole filter set.
   const secondaryActive = state.favoriteOnly || state.burstOnly;
   const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
-  return `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
+  const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
+  if (!state.tags.length) {
+    return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
+  }
+  const tags = state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}</button>`).join("");
+  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${tags}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`;
+}
+
+function renderRatingFilter(): string {
+  const options = [
+    { value: "", label: "全部评分" },
+    { value: "eq:5", label: "5 星" },
+    { value: "eq:4", label: "4 星" },
+    { value: "eq:3", label: "3 星" },
+    { value: "eq:2", label: "2 星" },
+    { value: "eq:1", label: "1 星" },
+    { value: "eq:0", label: "未评分" },
+    { value: "min:3", label: "3 星以上" },
+    { value: "min:4", label: "4 星以上" },
+    { value: "min:5", label: "5 星" },
+  ];
+  let selected = "";
+  if (state.ratingEq !== null) selected = `eq:${state.ratingEq}`;
+  else if (state.ratingMin !== null) selected = `min:${state.ratingMin}`;
+  return `<label class="select-wrap rating-filter"><span>评分</span><select id="rating-filter" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
 }
 
 function renderDateRangeControls(): string {
@@ -989,7 +1137,8 @@ function renderStatusBanner(): string {
 function renderSelectionToolbar(): string {
   if (!state.page.total) return "";
   const allSelected = state.selectedIds.size >= state.page.total;
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
+  const tagOptions = state.tags.map((tag) => `<option value="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</option>`).join("");
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy ? "disabled" : ""}>${state.deleting ? "处理中…" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderDeleteFeedback(): string {
@@ -1041,6 +1190,176 @@ function renderLibraryEmpty(): string {
   if (!state.library) return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
   if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${hasAnyFilter() ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${hasAnyFilter() ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
   return "";
+}
+
+function openTagManager(): void {
+  state.tagsManagerOpen = true;
+  state.tagsManagerError = null;
+  state.tagDeleteConfirmId = null;
+  void refreshTags().then(() => render());
+}
+
+function closeTagManager(): void {
+  if (state.tagsManagerBusy) return;
+  state.tagsManagerOpen = false;
+  state.tagDeleteConfirmId = null;
+  state.tagsManagerError = null;
+  render();
+}
+
+function renderTagManager(): string {
+  if (!state.tagsManagerOpen) return "";
+  const busy = state.tagsManagerBusy;
+  const rows = state.tags.length
+    ? state.tags.map((tag) => {
+        const confirming = state.tagDeleteConfirmId === tag.id;
+        return `<li class="tag-manager-row" data-tag-id="${escapeHtml(tag.id)}">
+          <span class="tag-manager-swatch" ${tag.color ? `style="background:${escapeHtml(tag.color)}"` : ""}></span>
+          <input class="tag-manager-name" data-rename-tag="${escapeHtml(tag.id)}" value="${escapeHtml(tag.name)}" aria-label="标签名称" ${busy ? "disabled" : ""} />
+          <span class="tag-manager-count">${formatCount(tag.mediaCount ?? 0)} 项</span>
+          ${confirming
+            ? `<span class="tag-manager-confirm"><span>删除后无法恢复</span><button type="button" class="danger-button" data-confirm-delete-tag="${escapeHtml(tag.id)}" ${busy ? "disabled" : ""}>确认删除</button><button type="button" class="text-button" data-cancel-delete-tag>取消</button></span>`
+            : `<button type="button" class="text-button" data-start-delete-tag="${escapeHtml(tag.id)}" ${busy ? "disabled" : ""}>删除</button>`}
+        </li>`;
+      }).join("")
+    : `<li class="tag-manager-empty">还没有标签，在上方新建一个吧。</li>`;
+  return `<div class="modal-backdrop tag-manager-backdrop" id="tag-manager-backdrop" role="presentation">
+    <div class="tag-manager" role="dialog" aria-modal="true" aria-labelledby="tag-manager-title">
+      <header class="tag-manager-header">
+        <div>
+          <h2 id="tag-manager-title">标签管理</h2>
+          <span>新建、改名或删除标签。给媒体打标时只能选用已有标签。</span>
+        </div>
+        <button class="icon-button" type="button" id="close-tag-manager" aria-label="关闭标签管理">×</button>
+      </header>
+      <form class="tag-manager-create" id="tag-create-form">
+        <input id="tag-create-name" placeholder="新标签名称" aria-label="新标签名称" autocomplete="off" ${busy ? "disabled" : ""} />
+        <button class="primary-button" type="submit" ${busy ? "disabled" : ""}>${busy ? "处理中…" : "新建"}</button>
+      </form>
+      ${state.tagsManagerError ? `<div class="notice-banner is-error" role="alert"><span class="notice-icon">!</span><span>${escapeHtml(state.tagsManagerError)}</span></div>` : ""}
+      <ul class="tag-manager-list">${rows}</ul>
+      <footer class="tag-manager-footer">
+        <span>改名请直接编辑后按回车或失焦保存</span>
+        <button class="outline-button" type="button" id="close-tag-manager-footer">完成</button>
+      </footer>
+    </div>
+  </div>`;
+}
+
+function bindTagManagerEvents(): void {
+  if (!state.tagsManagerOpen) return;
+  app.querySelector<HTMLButtonElement>("#close-tag-manager")?.addEventListener("click", closeTagManager);
+  app.querySelector<HTMLButtonElement>("#close-tag-manager-footer")?.addEventListener("click", closeTagManager);
+  app.querySelector<HTMLDivElement>("#tag-manager-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeTagManager();
+  });
+  app.querySelector<HTMLFormElement>("#tag-create-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = app.querySelector<HTMLInputElement>("#tag-create-name");
+    const name = input?.value.trim() ?? "";
+    if (!name || state.tagsManagerBusy) return;
+    if (input) input.value = "";
+    void (async () => {
+      state.tagsManagerBusy = true;
+      state.tagsManagerError = null;
+      try {
+        await createTag(name);
+        await refreshTags();
+      } catch (error) {
+        state.tagsManagerError = error instanceof Error ? error.message : "新建标签失败";
+      } finally {
+        state.tagsManagerBusy = false;
+        render();
+      }
+    })();
+  });
+  app.querySelectorAll<HTMLInputElement>("[data-rename-tag]").forEach((input) => {
+    const commit = () => {
+      const tagId = input.dataset.renameTag;
+      if (!tagId || state.tagsManagerBusy) return;
+      const tag = state.tags.find((entry) => entry.id === tagId);
+      const name = input.value.trim();
+      if (!tag || !name || name === tag.name) {
+        if (tag) input.value = tag.name;
+        return;
+      }
+      void (async () => {
+        state.tagsManagerBusy = true;
+        state.tagsManagerError = null;
+        try {
+          await updateTag(tagId, { name });
+          await refreshTags();
+          if (previewMetaCache) {
+            previewMetaCache = {
+              ...previewMetaCache,
+              tags: previewMetaCache.tags.map((entry) => entry.id === tagId ? { ...entry, name } : entry),
+            };
+          }
+        } catch (error) {
+          state.tagsManagerError = error instanceof Error ? error.message : "重命名标签失败";
+          await refreshTags();
+        } finally {
+          state.tagsManagerBusy = false;
+          render();
+        }
+      })();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      }
+    });
+    input.addEventListener("blur", commit);
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-start-delete-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.tagDeleteConfirmId = button.dataset.startDeleteTag ?? null;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-cancel-delete-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.tagDeleteConfirmId = null;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-confirm-delete-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tagId = button.dataset.confirmDeleteTag;
+      if (!tagId || state.tagsManagerBusy) return;
+      void (async () => {
+        state.tagsManagerBusy = true;
+        state.tagsManagerError = null;
+        try {
+          await deleteTag(tagId);
+          state.tagIds.delete(tagId);
+          if (previewMetaCache) {
+            previewMetaCache = {
+              ...previewMetaCache,
+              tags: previewMetaCache.tags.filter((entry) => entry.id !== tagId),
+            };
+          }
+          await refreshTags();
+          state.tagDeleteConfirmId = null;
+          if (state.previewIndex !== null) {
+            const panel = app.querySelector<HTMLElement>("#modal-meta");
+            const item = state.page.items[state.previewIndex];
+            if (panel && item && previewMetaCache) {
+              panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+              bindPreviewMetaEvents(panel, item);
+            }
+          }
+          void refreshMedia();
+        } catch (error) {
+          state.tagsManagerError = error instanceof Error ? error.message : "删除标签失败";
+        } finally {
+          state.tagsManagerBusy = false;
+          render();
+        }
+      })();
+    });
+  });
 }
 
 function renderLibrarySwitcher(): string {
@@ -1112,7 +1431,7 @@ function renderSettingsIndexSection(): string {
         <button class="danger-button" type="button" id="settings-full-rebuild" ${state.scanning || !state.library ? "disabled" : ""}>全量重建索引</button>
       </div>
       ${state.fullRebuildConfirm ? `<div class="settings-confirm">
-        <p>全量重建会重新读取库内全部文件的元数据，比增量扫描更耗时。收藏与标签会保留。是否继续？</p>
+        <p>全量重建会重新读取库内全部文件的元数据，比增量扫描更耗时。收藏、标签与评分会保留。是否继续？</p>
         <div class="settings-actions">
           <button class="outline-button" type="button" id="settings-full-rebuild-cancel">取消</button>
           <button class="danger-button confirm-danger" type="button" id="settings-full-rebuild-confirm">确认全量重建</button>
@@ -1277,9 +1596,10 @@ function render(): void {
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button">${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
-    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderSettingsPanel()}`;
+    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right">${renderRatingFilter()}<label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
+    <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
   bindEvents();
+  bindTagManagerEvents();
   if (hasItems) observePreviews();
   const nextContent = app.querySelector<HTMLElement>(".content");
   if (nextContent) {
@@ -1350,6 +1670,22 @@ function bindEvents(): void {
     else { state.burstOnly = true; state.favoriteOnly = false; }
     void refreshMedia();
   });
+  app.querySelectorAll<HTMLButtonElement>("[data-tag-filter]").forEach((button) => button.addEventListener("click", () => {
+    const tagId = button.dataset.tagFilter;
+    if (!tagId) return;
+    if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
+    else state.tagIds.add(tagId);
+    void refreshMedia();
+  }));
+  app.querySelector<HTMLButtonElement>("#open-tag-manager")?.addEventListener("click", () => openTagManager());
+  app.querySelector<HTMLSelectElement>("#rating-filter")?.addEventListener("change", (event) => {
+    const value = (event.target as HTMLSelectElement).value;
+    state.ratingEq = null;
+    state.ratingMin = null;
+    if (value.startsWith("eq:")) state.ratingEq = Number(value.slice(3));
+    else if (value.startsWith("min:")) state.ratingMin = Number(value.slice(4));
+    void refreshMedia();
+  });
   const applyDateInputs = () => {
     const from = app.querySelector<HTMLInputElement>("#date-from")?.value.trim();
     const to = app.querySelector<HTMLInputElement>("#date-to")?.value.trim();
@@ -1404,6 +1740,9 @@ function bindEvents(): void {
     state.dateFrom = undefined;
     state.dateTo = undefined;
     state.firstSeenFrom = null;
+    state.tagIds.clear();
+    state.ratingEq = null;
+    state.ratingMin = null;
     resetSidebarExpansionForSelection();
     void refreshMedia();
   });
@@ -1886,6 +2225,17 @@ function observePreviews(): void {
   } else cards.slice(0, 24).forEach((card) => load(card));
 }
 
+function renderStars(rating: number, interactive: boolean, mediaId?: string): string {
+  const stars = [1, 2, 3, 4, 5].map((value) => {
+    const filled = value <= rating;
+    if (interactive) {
+      return `<button type="button" class="star-button ${filled ? "is-filled" : ""}" data-set-rating="${value}" data-media-id="${escapeHtml(mediaId ?? "")}" aria-label="${value} 星" aria-pressed="${filled}">★</button>`;
+    }
+    return `<span class="star-glyph ${filled ? "is-filled" : ""}" aria-hidden="true">★</span>`;
+  }).join("");
+  return `<span class="star-row" role="img" aria-label="评分 ${rating} / 5">${stars}${rating === 0 ? `<span class="star-empty-label">未评分</span>` : ""}</span>`;
+}
+
 function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): string {
   if (!meta) return `<div class="meta-placeholder">元数据加载中…</div>`;
   const rows: Array<[string, string]> = [
@@ -1900,11 +2250,30 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
   rows.push(["状态", meta.scanState === "present" ? "在库" : meta.scanState === "missing" ? "离线" : meta.scanState === "ambiguous" ? "待确认" : "错误"]);
   if (meta.burstGroup) rows.push(["连拍组", meta.burstGroup]);
   if (meta.favorite) rows.push(["收藏", "是"]);
-  if (meta.tags.length) rows.push(["标签", meta.tags.join("、")]);
   const files = meta.files.map((file) => `<li class="meta-file ${file.existsNow ? "" : "is-missing"}"><span class="meta-file-role">${fileRoleLabel(file.role)}</span><span class="meta-file-name" title="${escapeHtml(file.relativePath)}">${escapeHtml(file.fileName)}</span><span class="meta-file-size">${formatSize(file.sizeBytes)}</span>${file.existsNow ? "" : `<span class="meta-file-state">缺失</span>`}</li>`).join("");
+  const tagChips = meta.tags.map((tag) => `<span class="tag-chip" ${tag.color ? `style="--tag-accent:${escapeHtml(tag.color)}"` : ""}><span>${escapeHtml(tag.name)}</span><button type="button" class="tag-remove" data-remove-tag="${escapeHtml(tag.id)}" aria-label="移除标签 ${escapeHtml(tag.name)}">×</button></span>`).join("");
+  const remainingTags = state.tags.filter((tag) => !meta.tags.some((attached) => attached.id === tag.id));
+  const tagSuggestions = remainingTags
+    .map((tag) => `<button type="button" class="tag-suggest" data-add-tag="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</button>`)
+    .join("");
   return `<div class="meta-panel-body">
     <h3>媒体信息</h3>
+    <div class="meta-rating-block">
+      <span class="meta-rating-label">评分</span>
+      ${renderStars(meta.rating, true, item.id)}
+      ${meta.rating > 0 ? `<button type="button" class="text-button" data-set-rating="0" data-media-id="${escapeHtml(item.id)}">清除</button>` : ""}
+    </div>
     <dl class="meta-list">${rows.map(([label, value]) => `<div class="meta-row"><dt>${label}</dt><dd>${escapeHtml(String(value))}</dd></div>`).join("")}</dl>
+    <div class="meta-tags-block">
+      <div class="meta-tags-head">
+        <h4>标签</h4>
+        <button type="button" class="text-button" id="open-tag-manager-from-preview">管理标签</button>
+      </div>
+      <div class="tag-chip-row" id="preview-tag-chips">${tagChips || `<span class="tag-empty">暂无标签</span>`}</div>
+      ${remainingTags.length
+        ? `<div class="tag-suggest-row">${tagSuggestions}</div>`
+        : (state.tags.length ? `<div class="tag-empty">该媒体已带有全部标签</div>` : `<div class="tag-empty">还没有标签，请先在「标签管理」中新建</div>`)}
+    </div>
     <h4>关联文件</h4>
     <ul class="meta-files">${files}</ul>
   </div>`;
@@ -1931,6 +2300,103 @@ function bindVideoElement(video: HTMLVideoElement): void {
   });
 }
 
+function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): void {
+  panel.querySelectorAll<HTMLButtonElement>("[data-set-rating]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rating = Number(button.dataset.setRating);
+      const mediaId = button.dataset.mediaId || item.id;
+      void applyPreviewRating(panel, item, mediaId, rating);
+    });
+  });
+  panel.querySelectorAll<HTMLButtonElement>("[data-remove-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tagId = button.dataset.removeTag;
+      if (!tagId) return;
+      void applyPreviewTag(panel, item, tagId, "remove");
+    });
+  });
+  panel.querySelectorAll<HTMLButtonElement>("[data-add-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tagId = button.dataset.addTag;
+      if (!tagId) return;
+      void applyPreviewTag(panel, item, tagId, "add");
+    });
+  });
+  panel.querySelector<HTMLButtonElement>("#open-tag-manager-from-preview")?.addEventListener("click", () => {
+    openTagManager();
+  });
+}
+
+async function applyPreviewRating(
+  panel: HTMLElement,
+  item: MediaItemDto,
+  mediaId: string,
+  rating: number,
+): Promise<void> {
+  try {
+    await setRating(mediaId, rating);
+    item.rating = rating;
+    if (rating > 0) state.ratings.set(mediaId, rating);
+    else state.ratings.delete(mediaId);
+    if (previewMetaCache) {
+      previewMetaCache = { ...previewMetaCache, rating };
+      panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+      bindPreviewMetaEvents(panel, item);
+    }
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "更新评分失败";
+    render();
+  }
+}
+
+async function applyPreviewTag(
+  panel: HTMLElement,
+  item: MediaItemDto,
+  tagId: string | null,
+  mode: "add" | "remove",
+): Promise<void> {
+  const mediaId = item.id;
+  try {
+    if (mode === "add" && tagId) {
+      await attachTag(mediaId, tagId);
+      const tag = state.tags.find((entry) => entry.id === tagId);
+      if (tag && previewMetaCache && !previewMetaCache.tags.some((entry) => entry.id === tagId)) {
+        previewMetaCache = { ...previewMetaCache, tags: [...previewMetaCache.tags, tag] };
+      }
+    } else if (mode === "remove" && tagId) {
+      await detachTag(mediaId, tagId);
+      if (previewMetaCache) {
+        previewMetaCache = {
+          ...previewMetaCache,
+          tags: previewMetaCache.tags.filter((entry) => entry.id !== tagId),
+        };
+      }
+    } else {
+      return;
+    }
+    await refreshTags();
+    if (previewMetaCache) {
+      // Keep counts roughly fresh without another preview fetch.
+      previewMetaCache = {
+        ...previewMetaCache,
+        tags: previewMetaCache.tags.map((tag) => ({
+          ...tag,
+          mediaCount: state.tags.find((entry) => entry.id === tag.id)?.mediaCount ?? tag.mediaCount,
+        })),
+      };
+      panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+      bindPreviewMetaEvents(panel, item);
+    }
+    // If the active filter requires this tag and we just removed it, refresh.
+    if (mode === "remove" && tagId && state.tagIds.has(tagId)) {
+      void refreshMedia();
+    }
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : "更新标签失败";
+    render();
+  }
+}
+
 async function loadModalAsset(): Promise<void> {
   const index = state.previewIndex;
   const item = index === null ? undefined : state.page.items[index];
@@ -1944,7 +2410,11 @@ async function loadModalAsset(): Promise<void> {
     const media = app.querySelector<HTMLElement>("#modal-media");
     const metaPanel = app.querySelector<HTMLElement>("#modal-meta");
     if (!media) return;
-    if (metaPanel) metaPanel.innerHTML = renderMetaPanel(preview.meta, item);
+    previewMetaCache = preview.meta;
+    if (metaPanel) {
+      metaPanel.innerHTML = renderMetaPanel(preview.meta, item);
+      bindPreviewMetaEvents(metaPanel, item);
+    }
     const photo = preview.sources.find((source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")));
     const video = preview.sources.find((source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")));
     const photoPreview = photo ? await loadModalThumbnail(item.id).catch(() => undefined) : undefined;
@@ -2061,6 +2531,7 @@ function closePreview(): void {
   state.previewIndex = null;
   livePlaying = false;
   liveHoldActive = false;
+  previewMetaCache = null;
   if (liveHoldTimer !== null) {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
@@ -2092,6 +2563,7 @@ async function refreshMedia(): Promise<void> {
     state.selectedIds.clear();
     state.lastSelectIndex = null;
     state.favorites = new Set(state.page.items.filter((item) => item.favorite).map((item) => item.id));
+    state.ratings = new Map(state.page.items.filter((item) => item.rating > 0).map((item) => [item.id, item.rating]));
   }
   catch (error) {
     if (token !== mediaQueryToken) return;
@@ -2116,12 +2588,23 @@ async function loadMore(): Promise<void> {
     // Discard pages that finished after a filter switch.
     if (token !== mediaQueryToken) return;
     state.page.items.push(...next.items);
-    next.items.forEach((item) => { if (item.favorite) state.favorites.add(item.id); });
+    next.items.forEach((item) => {
+      if (item.favorite) state.favorites.add(item.id);
+      if (item.rating > 0) state.ratings.set(item.id, item.rating);
+    });
     render();
   }
   catch (error) {
     if (token !== mediaQueryToken) return;
     state.error = error instanceof Error ? error.message : "加载更多媒体失败"; render();
+  }
+}
+
+async function refreshTags(): Promise<void> {
+  try {
+    state.tags = await listTags();
+  } catch {
+    // Filter chips stay usable with the previous list; preview can still edit.
   }
 }
 
@@ -2168,6 +2651,7 @@ function applyDeleteToGrid(result: DeleteResultDto, requestedIds: string[]): voi
   for (const id of requestedIds) {
     state.selectedIds.delete(id);
     state.favorites.delete(id);
+    state.ratings.delete(id);
     if (deleted.has(id)) {
       thumbnailRequests.delete(id);
       modalThumbnailRequests.delete(id);
@@ -2466,6 +2950,7 @@ async function bootstrap(): Promise<void> {
     if (state.library && state.availability === "available") {
       state.facets = await listDateFacets(state.library.id);
       resetSidebarExpansionForSelection();
+      void refreshTags();
       await refreshMedia();
       void maybeAutoScan();
     }
@@ -2474,6 +2959,13 @@ async function bootstrap(): Promise<void> {
 }
 
 window.addEventListener("keydown", (event) => {
+  if (state.tagsManagerOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeTagManager();
+    }
+    return;
+  }
   if (state.settingsOpen) {
     if (event.key === "Escape") {
       event.preventDefault();

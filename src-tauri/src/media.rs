@@ -74,9 +74,10 @@ pub struct PreviewMetaDto {
     pub total_size_bytes: i64,
     pub burst_group: Option<String>,
     pub favorite: bool,
+    pub rating: i64,
     pub scan_state: String,
     pub files: Vec<PreviewFileDto>,
-    pub tags: Vec<String>,
+    pub tags: Vec<crate::db::Tag>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -645,6 +646,7 @@ pub fn preview_meta(details: &MediaItemDetails) -> PreviewMetaDto {
         total_size_bytes: details.item.total_size_bytes,
         burst_group: details.item.burst_group.clone(),
         favorite: details.favorite,
+        rating: details.item.rating,
         scan_state: match details.item.scan_state {
             ScanState::Present => "present",
             ScanState::Missing => "missing",
@@ -669,7 +671,7 @@ pub fn preview_meta(details: &MediaItemDetails) -> PreviewMetaDto {
                 exists_now: file.exists_now,
             })
             .collect(),
-        tags: details.tags.iter().map(|tag| tag.name.clone()).collect(),
+        tags: details.tags.clone(),
     }
 }
 
@@ -973,6 +975,7 @@ mod tests {
             first_seen_at: "unix-ms:1".to_owned(),
             last_seen_at: "unix-ms:2".to_owned(),
             favorite: true,
+            rating: 4,
         }
     }
 
@@ -1076,6 +1079,7 @@ mod tests {
                 name: "旅行".to_owned(),
                 color: None,
                 created_at: "unix-ms:5".to_owned(),
+                media_count: 1,
             }],
         };
 
@@ -1093,11 +1097,14 @@ mod tests {
         assert_eq!(dto.meta.total_size_bytes, 4_500_000);
         assert_eq!(dto.meta.capture_date.as_deref(), Some("2026-01-15"));
         assert!(dto.meta.favorite);
+        assert_eq!(dto.meta.rating, 4);
         assert_eq!(dto.meta.scan_state, "present");
         assert_eq!(dto.meta.files.len(), 2);
         assert_eq!(dto.meta.files[0].role, "live_photo");
         assert_eq!(dto.meta.files[1].role, "live_video");
-        assert_eq!(dto.meta.tags, vec!["旅行".to_owned()]);
+        assert_eq!(dto.meta.tags.len(), 1);
+        assert_eq!(dto.meta.tags[0].name, "旅行");
+        assert_eq!(dto.meta.tags[0].id, "tag-1");
         // Metadata panel must never leak an absolute filesystem path.
         for file in &dto.meta.files {
             assert!(!file.relative_path.contains(':'));
