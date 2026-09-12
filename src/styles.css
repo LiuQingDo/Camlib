@@ -782,6 +782,16 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   border-radius:17px;
   box-shadow:0 18px 34px rgba(0,0,0,.12), 0 2px 8px rgba(0,0,0,.06);
 }
+.live-still-stack {
+  position:relative;
+  display:grid;
+  width:100%;
+  height:100%;
+  min-height:0;
+  place-items:center;
+}
+.live-still-stack img.live-still { grid-area:1 / 1; }
+.live-still-stack.is-under img.live-still,
 .live-preview img.live-still.is-under { visibility:hidden; }
 .live-controls {
   position:absolute;
@@ -878,9 +888,145 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   border-color:#111111;
   background:#111111;
 }
+
+/* Photo stage: original-first still with wheel zoom, pan, and fullscreen. */
+.photo-stage {
+  position:relative;
+  display:grid;
+  width:100%;
+  height:100%;
+  place-items:center;
+  overflow:hidden;
+  border-radius:17px;
+  background:rgba(0,0,0,.08);
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+}
+.photo-stage.is-dragging { cursor:grabbing; }
+.photo-stage img.modal-photo {
+  grid-area:1 / 1;
+  display:block;
+  width:100%;
+  height:100%;
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain;
+  border:1px solid rgba(255,255,255,.75);
+  border-radius:17px;
+  box-shadow:0 18px 34px rgba(0,0,0,.12), 0 2px 8px rgba(0,0,0,.06);
+  transform-origin:center center;
+  will-change:transform;
+  cursor:zoom-in;
+  transition:opacity .2s ease;
+}
+.photo-stage img.modal-photo.is-placeholder {
+  filter:saturate(.94) contrast(.98);
+}
+.photo-stage img.modal-photo.is-original {
+  z-index:1;
+  filter:none;
+  opacity:1;
+}
+.photo-stage img.modal-photo.is-zoomed {
+  cursor:grab;
+}
+.photo-stage.is-dragging img.modal-photo {
+  cursor:grabbing;
+}
+.photo-load-status {
+  position:absolute;
+  z-index:2;
+  top:12px;
+  left:50%;
+  transform:translateX(-50%);
+  padding:5px 10px;
+  border:1px solid rgba(0,0,0,.08);
+  border-radius:999px;
+  color:#333333;
+  background:rgba(255,255,255,.82);
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  font-size:10px;
+  font-weight:650;
+  pointer-events:none;
+  white-space:nowrap;
+}
+.photo-stage.is-original-ready .photo-load-status,
+.photo-stage.is-original-failed .photo-load-status {
+  opacity:0;
+  transition:opacity .25s ease;
+}
+.photo-stage.is-original-failed .photo-load-status {
+  opacity:1;
+}
+.photo-zoom-hint {
+  position:absolute;
+  z-index:2;
+  right:12px;
+  bottom:12px;
+  left:12px;
+  display:flex;
+  justify-content:center;
+  pointer-events:none;
+}
+.photo-zoom-hint {
+  padding:5px 9px;
+  border:1px solid rgba(0,0,0,.08);
+  border-radius:9px;
+  color:#555555;
+  background:rgba(255,255,255,.72);
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  font-size:10px;
+  opacity:.92;
+  transition:opacity .2s ease;
+}
+.photo-stage.is-original-ready .photo-zoom-hint {
+  opacity:.55;
+}
+.photo-stage:fullscreen {
+  border-radius:0;
+  background:#0a0a0a;
+}
+.photo-stage:fullscreen img.modal-photo {
+  border:0;
+  border-radius:0;
+  box-shadow:none;
+}
+.photo-stage:fullscreen .photo-zoom-hint {
+  right:18px;
+  bottom:18px;
+  left:auto;
+  color:#dddddd;
+  background:rgba(0,0,0,.55);
+  border-color:rgba(255,255,255,.12);
+}
+.photo-stage:fullscreen .photo-load-status {
+  color:#eeeeee;
+  background:rgba(0,0,0,.55);
+  border-color:rgba(255,255,255,.14);
+}
+.modal-media:has(.photo-stage) {
+  overflow:hidden;
+}
+.live-still-stack {
+  position:relative;
+  display:grid;
+  width:100%;
+  height:100%;
+  place-items:center;
+}
+.live-still-stack img.live-still {
+  grid-area:1 / 1;
+}
+.live-still-stack.is-under img.live-still {
+  visibility:hidden;
+}
 @media (max-width:900px) {
   .modal-meta { display:none; }
   .live-caption { display:none; }
+  .photo-zoom-hint { display:none; }
 }
 
 /* Settings panel — glass dialog with left section nav. */

@@ -282,7 +282,14 @@ pub fn serve_stream(
         }
         None => (0, length.saturating_sub(1), false),
     };
-    let end = requested_end.min(start.saturating_add(MAX_STREAM_CHUNK - 1));
+    // Images must be served whole. WebView2 `<img>` does not reliably reassemble
+    // multi-range bodies, so a 2MB cap left large originals half-decoded (top
+    // scanlines sharp, remainder gray). Only video keeps the memory bound.
+    let end = if entry.mime_type.starts_with("video/") {
+        requested_end.min(start.saturating_add(MAX_STREAM_CHUNK - 1))
+    } else {
+        requested_end
+    };
     partial = partial || end + 1 < length;
     let count = end.saturating_sub(start).saturating_add(1);
     let Ok(mut file) = File::open(&path) else {

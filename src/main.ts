@@ -313,6 +313,11 @@ let previewInfoOpen = false;
 let livePlaying = false;
 // Last loaded preview meta so tag/rating edits can patch the panel in place.
 let previewMetaCache: PreviewMetaDto | null = null;
+// Photo viewer zoom/pan. Scale 1 means fit-contain; >1 is a transform zoom.
+type PhotoZoomState = { scale: number; x: number; y: number; dragging: boolean; lastX: number; lastY: number };
+let photoZoom: PhotoZoomState = { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 };
+const PHOTO_ZOOM_MIN = 1;
+const PHOTO_ZOOM_MAX = 8;
 // Bumps on every full refresh so in-flight load-more/select-all pages from a
 // previous filter cannot append into the new result set.
 let mediaQueryToken = 0;
@@ -357,6 +362,181 @@ function loadModalThumbnail(id: string): Promise<Awaited<ReturnType<typeof getMe
   modalThumbnailRequests.set(id, request);
   void request.catch(() => modalThumbnailRequests.delete(id));
   return request;
+}
+
+function resetPhotoZoom(): void {
+  photoZoom = { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 };
+  const imgs = app.querySelectorAll<HTMLImageElement>("#modal-media .photo-stage img.modal-photo");
+  imgs.forEach((img) => {
+    img.style.transform = "";
+    img.classList.remove("is-zoomed");
+  });
+}
+
+function applyPhotoTransform(img: HTMLImageElement): void {
+  const { scale, x, y } = photoZoom;
+  const transform = scale <= 1 && Math.abs(x) < 0.5 && Math.abs(y) < 0.5
+    ? ""
+    : `translate(${x}px, ${y}px) scale(${scale})`;
+  img.style.transform = transform;
+  img.classList.toggle("is-zoomed", scale > 1.01);
+}
+
+function applyPhotoTransformAll(stage: HTMLElement | null): void {
+  if (!stage) return;
+  stage.querySelectorAll<HTMLImageElement>("img.modal-photo").forEach(applyPhotoTransform);
+  stage.classList.toggle("is-zoomed", photoZoom.scale > 1.01);
+}
+
+function clampPhotoZoom(value: number): number {
+  return Math.min(PHOTO_ZOOM_MAX, Math.max(PHOTO_ZOOM_MIN, value));
+}
+
+function handlePhotoWheel(event: WheelEvent): void {
+  const stage = (event.currentTarget as HTMLElement | null)?.closest?.<HTMLElement>(".photo-stage") ?? app.querySelector<HTMLElement>("#modal-media .photo-stage");
+  if (!stage) return;
+  event.preventDefault();
+  const rect = stage.getBoundingClientRect();
+  const cursorX = event.clientX - rect.left - rect.width / 2;
+  const cursorY = event.clientY - rect.top - rect.height / 2;
+  const factor = Math.exp(-event.deltaY * 0.0015);
+  const next = clampPhotoZoom(photoZoom.scale * factor);
+  if (Math.abs(next - photoZoom.scale) < 0.0001) return;
+  const ratio = next / photoZoom.scale;
+  photoZoom.x = cursorX - (cursorX - photoZoom.x) * ratio;
+  photoZoom.y = cursorY - (cursorY - photoZoom.y) * ratio;
+  photoZoom.scale = next;
+  if (photoZoom.scale <= 1.01) {
+    photoZoom.scale = 1;
+    photoZoom.x = 0;
+    photoZoom.y = 0;
+  }
+  applyPhotoTransformAll(stage);
+}
+
+function handlePhotoDoubleClick(event: MouseEvent): void {
+  const stage = (event.currentTarget as HTMLElement | null) ?? app.querySelector<HTMLElement>("#modal-media .photo-stage");
+  if (!stage) return;
+  event.preventDefault();
+  if (photoZoom.scale > 1.01) {
+    resetPhotoZoom();
+    return;
+  }
+  const rect = stage.getBoundingClientRect();
+  const cursorX = event.clientX - rect.left - rect.width / 2;
+  const cursorY = event.clientY - rect.top - rect.height / 2;
+  const next = 2;
+  const ratio = next / photoZoom.scale;
+  photoZoom.x = cursorX - (cursorX - photoZoom.x) * ratio;
+  photoZoom.y = cursorY - (cursorY - photoZoom.y) * ratio;
+  photoZoom.scale = next;
+  applyPhotoTransformAll(stage);
+}
+
+function handlePhotoPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  const stage = (event.currentTarget as HTMLElement | null);
+  if (!stage || photoZoom.scale <= 1.01) return;
+  photoZoom.dragging = true;
+  photoZoom.lastX = event.clientX;
+  photoZoom.lastY = event.clientY;
+  stage.classList.add("is-dragging");
+  stage.setPointerCapture?.(event.pointerId);
+}
+
+function handlePhotoPointerMove(event: PointerEvent): void {
+  if (!photoZoom.dragging) return;
+  const stage = (event.currentTarget as HTMLElement | null);
+  if (!stage) return;
+  photoZoom.x += event.clientX - photoZoom.lastX;
+  photoZoom.y += event.clientY - photoZoom.lastY;
+  photoZoom.lastX = event.clientX;
+  photoZoom.lastY = event.clientY;
+  applyPhotoTransformAll(stage);
+}
+
+function handlePhotoPointerUp(event: PointerEvent): void {
+  if (!photoZoom.dragging) return;
+  photoZoom.dragging = false;
+  const stage = (event.currentTarget as HTMLElement | null);
+  stage?.classList.remove("is-dragging");
+  stage?.releasePointerCapture?.(event.pointerId);
+}
+
+function bindPhotoStage(stage: HTMLElement): void {
+  stage.addEventListener("wheel", handlePhotoWheel, { passive: false });
+  stage.addEventListener("dblclick", handlePhotoDoubleClick);
+  stage.addEventListener("pointerdown", handlePhotoPointerDown);
+  stage.addEventListener("pointermove", handlePhotoPointerMove);
+  stage.addEventListener("pointerup", handlePhotoPointerUp);
+  stage.addEventListener("pointercancel", handlePhotoPointerUp);
+}
+
+/**
+ * Overlay the camera original on top of the thumbnail placeholder.
+ * Never swap src on the same element — partial decode would flash gray bands.
+ */
+function upgradeStillToOriginal(
+  stage: HTMLElement | null,
+  originalUrl: string,
+  request: number,
+): void {
+  if (!stage || !originalUrl) return;
+  const loader = new Image();
+  loader.decoding = "async";
+  loader.onload = () => {
+    if (request !== previewRequest || !stage.isConnected) return;
+    if (!loader.naturalWidth || !loader.naturalHeight) return;
+    const existing = stage.querySelector<HTMLImageElement>("img.modal-photo.is-original");
+    if (existing) return;
+    const original = document.createElement("img");
+    original.className = "modal-photo is-original";
+    original.alt = stage.querySelector<HTMLImageElement>("img.modal-photo")?.alt ?? "";
+    original.draggable = false;
+    original.src = originalUrl;
+    original.style.transform = stage.querySelector<HTMLImageElement>("img.modal-photo")?.style.transform ?? "";
+    if (photoZoom.scale > 1.01) original.classList.add("is-zoomed");
+    const hint = stage.querySelector<HTMLElement>(".photo-zoom-hint");
+    const placeholder = stage.querySelector<HTMLImageElement>("img.modal-photo.is-placeholder");
+    if (hint) stage.insertBefore(original, hint);
+    else stage.appendChild(original);
+    // Drop the blurry stand-in after the original is on screen.
+    placeholder?.remove();
+    stage.classList.add("is-original-ready");
+    stage.classList.remove("is-original-loading");
+  };
+  loader.onerror = () => {
+    if (request !== previewRequest || !stage.isConnected) return;
+    stage.classList.add("is-original-failed");
+    stage.classList.remove("is-original-loading");
+    const status = stage.querySelector<HTMLElement>(".photo-load-status");
+    if (status) status.textContent = "原图加载失败 · 显示缩略图";
+  };
+  stage.classList.add("is-original-loading");
+  loader.src = originalUrl;
+}
+
+/** Same overlay upgrade for Live Photo stills (no zoom stack). */
+function upgradeLiveStill(
+  stack: HTMLElement | null,
+  originalUrl: string,
+  request: number,
+): void {
+  if (!stack || !originalUrl) return;
+  const loader = new Image();
+  loader.decoding = "async";
+  loader.onload = () => {
+    if (request !== previewRequest || !stack.isConnected) return;
+    if (!loader.naturalWidth || !loader.naturalHeight) return;
+    if (stack.querySelector("img.live-still.is-original")) return;
+    const original = document.createElement("img");
+    original.className = "live-still is-original";
+    original.alt = stack.querySelector<HTMLImageElement>("img.live-still")?.alt ?? "";
+    original.src = originalUrl;
+    stack.appendChild(original);
+    stack.querySelector<HTMLImageElement>("img.live-still.is-placeholder")?.remove();
+  };
+  loader.src = originalUrl;
 }
 
 function requestPreview(id: string): Promise<MediaPreviewDto> {
@@ -1679,7 +1859,7 @@ function renderPreview(): string {
       <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
       <aside class="modal-meta ${previewInfoOpen ? "" : "is-hidden"}" id="modal-meta" aria-label="媒体信息" aria-hidden="${previewInfoOpen ? "false" : "true"}"><div class="meta-placeholder">加载中…</div></aside>
     </div>
-    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">← → 切换 · Space 播放 · F 全屏 · I 信息 · L 实况</span></div></footer>
+    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button><button class="outline-button modal-tool-button" id="preview-fullscreen" type="button">全屏</button><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">← → 切换 · 滚轮缩放 · F 全屏 · I 信息 · L 实况</span></div></footer>
   </div></div>`;
 }
 
@@ -1937,6 +2117,7 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
   app.querySelector<HTMLButtonElement>("#preview-info-toggle")?.addEventListener("click", () => togglePreviewInfo());
+  app.querySelector<HTMLButtonElement>("#preview-fullscreen")?.addEventListener("click", () => togglePreviewFullscreen());
   bindSettingsEvents();
 }
 
@@ -2508,6 +2689,7 @@ async function loadModalAsset(): Promise<void> {
   if (!item) return;
   const request = ++previewRequest;
   livePlaying = false;
+  resetPhotoZoom();
   if (index !== null) prefetchPreviewNeighbors(index);
   try {
     const preview = await requestPreview(item.id);
@@ -2522,17 +2704,24 @@ async function loadModalAsset(): Promise<void> {
     }
     const photo = preview.sources.find((source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")));
     const video = preview.sources.find((source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")));
-    const photoPreview = photo ? await loadModalThumbnail(item.id).catch(() => undefined) : undefined;
-    if (request !== previewRequest || state.previewIndex === null) return;
     if (item.kind === "live" && photo && video) {
+      const photoPreview = await loadModalThumbnail(item.id).catch(() => undefined);
+      if (request !== previewRequest || state.previewIndex === null) return;
+      const usePlaceholder = Boolean(photoPreview?.url && photoPreview.url !== photo.url);
       media.innerHTML = `<div class="live-preview" data-live-playing="false">
-        <img class="live-still" src="${photoPreview?.url ?? photo.url}" alt="${escapeHtml(item.displayName)}" />
+        <div class="live-still-stack" id="live-still-stack">
+          <img class="live-still${usePlaceholder ? " is-placeholder" : " is-original"}" src="${photoPreview?.url ?? photo.url}" alt="${escapeHtml(item.displayName)}" />
+        </div>
         <video class="live-motion" src="${video.url}" muted loop playsinline preload="metadata" hidden></video>
         <div class="live-controls">
           <button type="button" class="live-toggle" id="live-toggle" aria-pressed="false">实况</button>
           <span class="live-caption">默认显示静帧 · 点击「实况」或按 L / 长按画面播放短片</span>
         </div>
       </div>`;
+      if (usePlaceholder) {
+        const stack = media.querySelector<HTMLElement>("#live-still-stack");
+        if (stack) upgradeLiveStill(stack, photo.url, request);
+      }
       const liveVideo = media.querySelector<HTMLVideoElement>("video.live-motion");
       if (liveVideo) {
         bindVideoElement(liveVideo);
@@ -2545,8 +2734,22 @@ async function loadModalAsset(): Promise<void> {
         bindVideoElement(el);
         void el.play().catch(() => undefined);
       }
-    } else if (photoPreview) {
-      media.innerHTML = `<img src="${photoPreview.url}" alt="${escapeHtml(item.displayName)}" />`;
+    } else if (photo) {
+      // Thumbnail first for instant paint; original overlays only after a full decode.
+      const thumb = await loadModalThumbnail(item.id).catch(() => undefined);
+      if (request !== previewRequest || state.previewIndex === null) return;
+      const placeholder = thumb?.url;
+      const usePlaceholder = Boolean(placeholder && placeholder !== photo.url);
+      media.innerHTML = `<div class="photo-stage${usePlaceholder ? " is-original-loading" : " is-original-ready"}" id="photo-stage">
+        <img class="modal-photo${usePlaceholder ? " is-placeholder" : " is-original"}" id="modal-photo" src="${placeholder ?? photo.url}" alt="${escapeHtml(item.displayName)}" draggable="false" decoding="async" />
+        ${usePlaceholder ? `<span class="photo-load-status" id="photo-load-status">正在加载原图…</span>` : ""}
+        <div class="photo-zoom-hint" id="photo-zoom-hint">滚轮缩放 · 拖动平移 · 双击放大 · F 全屏</div>
+      </div>`;
+      const stage = media.querySelector<HTMLElement>("#photo-stage");
+      if (stage) {
+        bindPhotoStage(stage);
+        if (usePlaceholder) upgradeStillToOriginal(stage, photo.url, request);
+      }
     } else {
       media.innerHTML = `<div class="preview-error"><span>当前文件不可用</span><button type="button" class="outline-button" id="preview-retry-media">重试</button></div>`;
     }
@@ -2564,7 +2767,7 @@ function setLivePlaying(playing: boolean): void {
   const root = app.querySelector<HTMLElement>("#modal-media .live-preview");
   if (!root) return;
   const video = root.querySelector<HTMLVideoElement>("video.live-motion");
-  const still = root.querySelector<HTMLImageElement>("img.live-still");
+  const stack = root.querySelector<HTMLElement>(".live-still-stack");
   const toggle = root.querySelector<HTMLButtonElement>("#live-toggle");
   root.dataset.livePlaying = playing ? "true" : "false";
   toggle?.setAttribute("aria-pressed", String(playing));
@@ -2572,13 +2775,13 @@ function setLivePlaying(playing: boolean): void {
   if (!video) return;
   if (playing) {
     video.hidden = false;
-    if (still) still.classList.add("is-under");
+    stack?.classList.add("is-under");
     if (video.ended || video.currentTime === 0) video.currentTime = 0;
     void video.play().catch(() => setLivePlaying(false));
   } else {
     video.pause();
     video.hidden = true;
-    still?.classList.remove("is-under");
+    stack?.classList.remove("is-under");
   }
 }
 
@@ -2612,13 +2815,15 @@ function togglePreviewMute(): void {
 }
 
 function togglePreviewFullscreen(): void {
+  const photoStage = app.querySelector<HTMLElement>("#modal-media .photo-stage");
   const video = activePreviewVideo() ?? app.querySelector<HTMLVideoElement>("#modal-media video");
-  if (!video) return;
+  const target = photoStage ?? video;
+  if (!target) return;
   if (document.fullscreenElement) {
     void document.exitFullscreen().catch(() => undefined);
     return;
   }
-  void video.requestFullscreen().catch(() => undefined);
+  void target.requestFullscreen().catch(() => undefined);
 }
 
 function togglePreviewInfo(): void {
@@ -2637,6 +2842,10 @@ function closePreview(): void {
   livePlaying = false;
   liveHoldActive = false;
   previewMetaCache = null;
+  resetPhotoZoom();
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => undefined);
+  }
   if (liveHoldTimer !== null) {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
@@ -2649,6 +2858,7 @@ function movePreview(delta: number): void {
   state.previewIndex = (state.previewIndex + delta + state.page.items.length) % state.page.items.length;
   livePlaying = false;
   liveHoldActive = false;
+  resetPhotoZoom();
   if (liveHoldTimer !== null) {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
