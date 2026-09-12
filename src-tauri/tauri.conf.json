@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://asset.localhost camlib: data:; media-src 'self' asset: http://asset.localhost https://asset.localhost camlib:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://asset.localhost camlib: http://camlib.localhost https://camlib.localhost data:; media-src 'self' asset: http://asset.localhost https://asset.localhost camlib: http://camlib.localhost https://camlib.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://camlib.localhost https://camlib.localhost; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

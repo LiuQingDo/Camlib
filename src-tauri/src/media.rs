@@ -16,6 +16,19 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Windows GUI apps inherit a console host; spawning ffmpeg without
+/// CREATE_NO_WINDOW flashes a black console per thumbnail/preview call.
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -516,7 +529,8 @@ fn generate_ffmpeg_thumbnail(
 ) -> Result<(), crate::errors::AppError> {
     let ffmpeg = resolve_ffmpeg(app)?;
     let scale = format!("scale={width}:-2:force_original_aspect_ratio=decrease");
-    let mut child = Command::new(ffmpeg)
+    let mut command = Command::new(ffmpeg);
+    command
         .args([
             "-nostdin",
             "-hide_banner",
@@ -535,7 +549,9 @@ fn generate_ffmpeg_thumbnail(
         .stdout(Stdio::null())
         // Do not pipe stderr without draining it while waiting. A malformed
         // media file can fill the pipe and leave ffmpeg waiting forever.
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| crate::errors::AppError::from(format!("启动 ffmpeg 失败: {error}")))?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -601,15 +617,14 @@ pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, crate::errors::AppErro
         return Ok(path);
     }
     // Development uses the ffmpeg executable installed on PATH.
-    if Command::new(if cfg!(windows) {
+    let mut probe = Command::new(if cfg!(windows) {
         "ffmpeg.exe"
     } else {
         "ffmpeg"
-    })
-    .arg("-version")
-    .output()
-    .is_ok()
-    {
+    });
+    probe.arg("-version").stdout(Stdio::null()).stderr(Stdio::null());
+    hide_console_window(&mut probe);
+    if probe.output().is_ok() {
         return Ok(PathBuf::from(if cfg!(windows) {
             "ffmpeg.exe"
         } else {
