@@ -67,7 +67,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   margin: 0 0 10px;
   padding: 10px 8px 8px;
   border-bottom: 1px solid rgba(255,255,255,.45);
-  border-radius: 0 0 18px 18px;
+  border-radius: 18px;
   background: rgba(240,240,240,.42);
   box-shadow: 0 10px 24px rgba(0,0,0,.06), var(--glass-specular);
   backdrop-filter: blur(22px) saturate(1.4) contrast(1.04);
