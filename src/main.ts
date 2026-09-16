@@ -76,6 +76,7 @@ import {
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toUserMessage } from "./api/errors";
+import { initLiquidGlass, syncLiquidGlass } from "./liquid-glass";
 import { listen } from "@tauri-apps/api/event";
 import type { ScanProgressDto, PreviewProgressDto } from "./api/media";
 import {
@@ -1847,6 +1848,8 @@ function render(): void {
     nextContent.scrollTop = previousScrollTop;
     nextContent.scrollLeft = previousScrollLeft;
   }
+  // Full rebuild drops inline backdrop-filter styles — reattach liquid glass.
+  syncLiquidGlass();
 }
 
 function renderPreview(): string {
@@ -3545,6 +3548,7 @@ void onBackupProgress((progress) => {
   }
   render();
 });
+initLiquidGlass();
 void bootstrap();
 
 // Backend volume watcher: apply disconnect/reconnect without a manual refresh.
