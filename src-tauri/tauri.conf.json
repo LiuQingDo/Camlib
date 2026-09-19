@@ -16,7 +16,10 @@
         "title": "Camlib",
         "width": 1800,
         "height": 900,
-        "center": true
+        "center": true,
+        "decorations": false,
+        "resizable": true,
+        "shadow": true
       }
     ],
     "security": {

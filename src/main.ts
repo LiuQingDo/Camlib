@@ -78,6 +78,7 @@ import {
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toUserMessage } from "./api/errors";
 import { initLiquidGlass, syncLiquidGlass } from "./liquid-glass";
+import { initTitlebar } from "./titlebar";
 import { listen } from "@tauri-apps/api/event";
 import type { ScanProgressDto, PreviewProgressDto } from "./api/media";
 import {
@@ -3688,6 +3689,7 @@ void onBackupProgress((progress) => {
   render();
 });
 initLiquidGlass();
+initTitlebar();
 void bootstrap();
 
 // Backend volume watcher: apply disconnect/reconnect without a manual refresh.
