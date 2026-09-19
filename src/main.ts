@@ -72,6 +72,7 @@ import {
   type LibraryStatus,
   type ScanRunDto,
   type ThumbnailCacheStatsDto,
+  type UiPreviewMode,
   type UiSortMode,
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -124,6 +125,8 @@ interface AppState {
   expandedMonths: Set<string>;
   sort: SortMode;
   density: Density;
+  /** Default preview surface: framed modal or immersive pure media. */
+  previewMode: UiPreviewMode;
   loading: boolean;
   scanning: boolean;
   scanProgress: ScanProgressDto | null;
@@ -208,6 +211,7 @@ const state: AppState = {
   expandedMonths: new Set(),
   sort: "newest",
   density: 3,
+  previewMode: "standard",
   loading: true,
   scanning: false,
   scanProgress: null,
@@ -311,6 +315,7 @@ let activePreviewPrefetches = 0;
 let previewRequest = 0;
 // Modal UI flags that must survive partial DOM updates (not full re-renders).
 let previewInfoOpen = false;
+let previewImmersiveOpen = false;
 let livePlaying = false;
 // Last loaded preview meta so tag/rating edits can patch the panel in place.
 let previewMetaCache: PreviewMetaDto | null = null;
@@ -383,9 +388,23 @@ function applyPhotoTransform(img: HTMLImageElement): void {
   img.classList.toggle("is-zoomed", scale > 1.01);
 }
 
+function applyVideoLikeTransform(el: HTMLElement): void {
+  const { scale, x, y } = photoZoom;
+  el.style.transformOrigin = "center center";
+  el.style.willChange = "transform";
+  el.style.transform =
+    scale === 1 && x === 0 && y === 0
+      ? ""
+      : `translate(${x}px, ${y}px) scale(${scale})`;
+}
+
 function applyPhotoTransformAll(stage: HTMLElement | null): void {
   if (!stage) return;
-  stage.querySelectorAll<HTMLImageElement>("img.modal-photo").forEach(applyPhotoTransform);
+  stage.querySelectorAll<HTMLImageElement>("img.modal-photo, img.live-still").forEach((img) => {
+    if (img.classList.contains("modal-photo")) applyPhotoTransform(img);
+    else applyVideoLikeTransform(img);
+  });
+  stage.querySelectorAll<HTMLElement>("video.live-motion, .video-stage video, video").forEach(applyVideoLikeTransform);
   stage.classList.toggle("is-zoomed", photoZoom.scale > 1.01);
 }
 
@@ -393,9 +412,19 @@ function clampPhotoZoom(value: number): number {
   return Math.min(PHOTO_ZOOM_MAX, Math.max(PHOTO_ZOOM_MIN, value));
 }
 
+function resolvePanRoot(el: HTMLElement | null): HTMLElement | null {
+  return (
+    el?.closest?.<HTMLElement>(".photo-stage, .video-stage, .live-preview") ??
+    el ??
+    app.querySelector<HTMLElement>("#modal-media")
+  );
+}
+
 function handlePhotoWheel(event: WheelEvent): void {
-  const stage = (event.currentTarget as HTMLElement | null)?.closest?.<HTMLElement>(".photo-stage") ?? app.querySelector<HTMLElement>("#modal-media .photo-stage");
+  const stage = resolvePanRoot(event.currentTarget as HTMLElement | null);
   if (!stage) return;
+  // Immersive: Ctrl/⌘ + wheel is the documented zoom gesture; plain wheel also
+  // zooms because the pure stage has nothing else to scroll.
   event.preventDefault();
   const rect = stage.getBoundingClientRect();
   const cursorX = event.clientX - rect.left - rect.width / 2;
@@ -416,7 +445,7 @@ function handlePhotoWheel(event: WheelEvent): void {
 }
 
 function handlePhotoDoubleClick(event: MouseEvent): void {
-  const stage = (event.currentTarget as HTMLElement | null) ?? app.querySelector<HTMLElement>("#modal-media .photo-stage");
+  const stage = resolvePanRoot(event.currentTarget as HTMLElement | null);
   if (!stage) return;
   event.preventDefault();
   if (photoZoom.scale > 1.01) {
@@ -436,8 +465,17 @@ function handlePhotoDoubleClick(event: MouseEvent): void {
 
 function handlePhotoPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return;
-  const stage = (event.currentTarget as HTMLElement | null);
-  if (!stage || photoZoom.scale <= 1.01) return;
+  const stage = resolvePanRoot(event.currentTarget as HTMLElement | null);
+  if (!stage) return;
+  const target = event.target as HTMLElement | null;
+  // Immersive allows free pan at any scale; otherwise pan only after zoom.
+  if (!previewImmersiveOpen && photoZoom.scale <= 1.01) return;
+  if (target?.closest?.("button, a, input, select, textarea, label, .live-controls")) return;
+  // Leave the bottom native video control strip alone.
+  if (previewImmersiveOpen && target?.tagName === "VIDEO") {
+    const rect = target.getBoundingClientRect();
+    if (event.clientY > rect.bottom - 48) return;
+  }
   photoZoom.dragging = true;
   photoZoom.lastX = event.clientX;
   photoZoom.lastY = event.clientY;
@@ -447,7 +485,7 @@ function handlePhotoPointerDown(event: PointerEvent): void {
 
 function handlePhotoPointerMove(event: PointerEvent): void {
   if (!photoZoom.dragging) return;
-  const stage = (event.currentTarget as HTMLElement | null);
+  const stage = resolvePanRoot(event.currentTarget as HTMLElement | null);
   if (!stage) return;
   photoZoom.x += event.clientX - photoZoom.lastX;
   photoZoom.y += event.clientY - photoZoom.lastY;
@@ -459,7 +497,7 @@ function handlePhotoPointerMove(event: PointerEvent): void {
 function handlePhotoPointerUp(event: PointerEvent): void {
   if (!photoZoom.dragging) return;
   photoZoom.dragging = false;
-  const stage = (event.currentTarget as HTMLElement | null);
+  const stage = resolvePanRoot(event.currentTarget as HTMLElement | null);
   stage?.classList.remove("is-dragging");
   stage?.releasePointerCapture?.(event.pointerId);
 }
@@ -471,6 +509,10 @@ function bindPhotoStage(stage: HTMLElement): void {
   stage.addEventListener("pointermove", handlePhotoPointerMove);
   stage.addEventListener("pointerup", handlePhotoPointerUp);
   stage.addEventListener("pointercancel", handlePhotoPointerUp);
+}
+
+function bindPreviewMediaInteraction(media: HTMLElement): void {
+  media.querySelectorAll<HTMLElement>("#photo-stage, .photo-stage, .video-stage, .live-preview").forEach(bindPhotoStage);
 }
 
 /**
@@ -1722,6 +1764,20 @@ function renderSettingsAboutSection(): string {
 function renderSettingsSystemSection(): string {
   return `<div class="settings-section-body">
     <div class="settings-status-card">
+      <h3>查看偏好</h3>
+      <div class="settings-note">控制双击媒体卡片后默认打开的查看形式。查看过程中仍可用底部「沉浸」按钮临时切换。</div>
+      <div class="settings-form">
+        <label><span>默认查看方式</span><select id="settings-preview-mode" aria-label="默认媒体查看方式">
+          <option value="standard" ${state.previewMode === "standard" ? "selected" : ""}>标准查看（带信息与工具栏）</option>
+          <option value="immersive" ${state.previewMode === "immersive" ? "selected" : ""}>沉浸式查看（纯媒体展示）</option>
+        </select></label>
+        <div class="settings-actions">
+          <button class="primary-button" type="button" id="settings-save-preview-mode">保存查看方式</button>
+        </div>
+      </div>
+      <div class="settings-note">沉浸式：无多余边框，支持任意位置拖动平移，Ctrl+滚轮缩放，Esc 退出。</div>
+    </div>
+    <div class="settings-status-card">
       <h3>系统集成</h3>
       <div class="settings-note">托盘与通知初始化失败不会影响主窗口。单实例启动：再次打开应用会聚焦已有窗口。</div>
       <div class="settings-form">
@@ -1784,7 +1840,7 @@ function renderSettingsPanel(): string {
       <header class="settings-header">
         <div>
           <h2 id="settings-title">设置</h2>
-          <span>库状态 · 索引 · 缩略图 · 备份 · 系统 · 关于</span>
+          <span>库状态 · 索引 · 缩略图 · 备份 · 查看与系统 · 关于</span>
         </div>
         <button class="icon-button" type="button" id="settings-close" aria-label="关闭设置">×</button>
       </header>
@@ -1856,13 +1912,26 @@ function renderPreview(): string {
   const item = state.page.items[state.previewIndex ?? 0];
   if (!item) return "";
   const position = (state.previewIndex ?? 0) + 1;
-  return `<div class="modal-backdrop" id="preview-modal"><div class="preview-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}">
+  const immersiveClass = previewImmersiveOpen ? " is-immersive" : "";
+  return `<div class="modal-backdrop${immersiveClass}" id="preview-modal"><div class="preview-modal${immersiveClass}" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}" ${previewImmersiveOpen ? 'data-liquid-glass="off"' : ""}>
     <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></header>
     <div class="modal-body">
       <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
       <aside class="modal-meta ${previewInfoOpen ? "" : "is-hidden"}" id="modal-meta" aria-label="媒体信息" aria-hidden="${previewInfoOpen ? "false" : "true"}"><div class="meta-placeholder">加载中…</div></aside>
     </div>
-    <footer class="modal-caption"><div><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div><div class="modal-actions"><button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button><button class="outline-button modal-tool-button" id="preview-fullscreen" type="button">全屏</button><button class="outline-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button><span class="modal-hint">← → 切换 · 滚轮缩放 · F 全屏 · I 信息 · L 实况</span></div></footer>
+    <footer class="modal-caption">
+      <div class="modal-caption-copy"><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div>
+      <div class="modal-caption-tools">
+        <div class="modal-actions">
+          <button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button>
+          <button class="outline-button modal-tool-button" id="preview-fullscreen" type="button">全屏</button>
+          <button class="outline-button modal-tool-button" id="preview-immersive" type="button" aria-pressed="${previewImmersiveOpen}">沉浸</button>
+          <button class="outline-button modal-tool-button modal-folder-button" id="preview-open-folder" type="button" data-open-folder="${escapeHtml(item.id)}">打开文件夹</button>
+        </div>
+        <span class="modal-hint">← → 切换 · 拖动平移 · Ctrl+滚轮缩放 · F 全屏 · I 信息 · L 实况</span>
+      </div>
+    </footer>
+    <button class="immersive-exit" id="preview-immersive-exit" type="button" aria-label="退出沉浸查看">退出沉浸</button>
   </div></div>`;
 }
 
@@ -2100,7 +2169,12 @@ function bindEvents(): void {
   });
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
   app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
-    const open = () => { state.previewIndex = Number(card.dataset.index); render(); void loadModalAsset(); };
+    const open = () => {
+      state.previewIndex = Number(card.dataset.index);
+      previewImmersiveOpen = state.previewMode === "immersive";
+      render();
+      void loadModalAsset();
+    };
     card.addEventListener("click", open);
     card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
@@ -2121,6 +2195,9 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
   app.querySelector<HTMLButtonElement>("#preview-info-toggle")?.addEventListener("click", () => togglePreviewInfo());
   app.querySelector<HTMLButtonElement>("#preview-fullscreen")?.addEventListener("click", () => togglePreviewFullscreen());
+  app.querySelector<HTMLButtonElement>("#preview-immersive")?.addEventListener("click", () => togglePreviewImmersive());
+  // Immersive exit is a leave-viewer action: return to the grid, not the framed modal.
+  app.querySelector<HTMLButtonElement>("#preview-immersive-exit")?.addEventListener("click", () => closePreview());
   bindSettingsEvents();
 }
 
@@ -2207,6 +2284,8 @@ function bindSettingsBodyEvents(): void {
   app.querySelector<HTMLButtonElement>("#settings-thumbnail-cancel")?.addEventListener("click", () => void cancelThumbnailRebuild());
   app.querySelector<HTMLButtonElement>("#settings-save-backup-defaults")?.addEventListener("click", () => void saveBackupDefaults());
   app.querySelector<HTMLButtonElement>("#settings-save-system")?.addEventListener("click", () => void saveSystemSettings());
+  app.querySelector<HTMLButtonElement>("#settings-save-preview-mode")?.addEventListener("click", () => void savePreviewModeSetting());
+  app.querySelector<HTMLSelectElement>("#settings-preview-mode")?.addEventListener("change", () => void savePreviewModeSetting());
   app.querySelector<HTMLButtonElement>("#settings-open-backup-panel")?.addEventListener("click", () => {
     closeSettings();
     void openBackupPanel();
@@ -2278,6 +2357,7 @@ async function loadSettingsSectionData(): Promise<void> {
       const [infra, backups] = await Promise.all([getInfrastructureState(), listBackupHistory(8)]);
       state.notificationsEnabled = infra.settings.notifications_enabled;
       state.closeBehavior = infra.settings.close_behavior;
+      state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
       state.backupHistory = backups;
       if (state.library) {
         state.scanRuns = await listScanRuns(state.library.id, 8);
@@ -2441,6 +2521,25 @@ async function saveSystemSettings(): Promise<void> {
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
+  }
+}
+
+function clampPreviewMode(value: string | undefined | null): UiPreviewMode {
+  return value === "immersive" ? "immersive" : "standard";
+}
+
+async function savePreviewModeSetting(): Promise<void> {
+  const select = app.querySelector<HTMLSelectElement>("#settings-preview-mode");
+  const next = clampPreviewMode(select?.value);
+  state.settingsError = null;
+  try {
+    await persistUiPrefs({ uiPreviewMode: next });
+    state.previewMode = next;
+    state.settingsNotice = "默认查看方式已保存";
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "保存默认查看方式失败");
+  } finally {
+    updateSettingsPanel();
   }
 }
 
@@ -2730,6 +2829,7 @@ async function loadModalAsset(): Promise<void> {
         bindVideoElement(liveVideo);
         liveVideo.addEventListener("ended", () => setLivePlaying(false));
       }
+      bindPreviewMediaInteraction(media);
     } else if (video) {
       media.innerHTML = `<div class="video-stage"><video src="${video.url}" controls playsinline preload="metadata"></video>${renderVideoStatusOverlay()}</div>`;
       const el = media.querySelector<HTMLVideoElement>("video");
@@ -2737,6 +2837,7 @@ async function loadModalAsset(): Promise<void> {
         bindVideoElement(el);
         void el.play().catch(() => undefined);
       }
+      bindPreviewMediaInteraction(media);
     } else if (photo) {
       // Thumbnail first for instant paint; original overlays only after a full decode.
       const thumb = await loadModalThumbnail(item.id).catch(() => undefined);
@@ -2746,7 +2847,7 @@ async function loadModalAsset(): Promise<void> {
       media.innerHTML = `<div class="photo-stage${usePlaceholder ? " is-original-loading" : " is-original-ready"}" id="photo-stage">
         <img class="modal-photo${usePlaceholder ? " is-placeholder" : " is-original"}" id="modal-photo" src="${placeholder ?? photo.url}" alt="${escapeHtml(item.displayName)}" draggable="false" decoding="async" />
         ${usePlaceholder ? `<span class="photo-load-status" id="photo-load-status">正在加载原图…</span>` : ""}
-        <div class="photo-zoom-hint" id="photo-zoom-hint">滚轮缩放 · 拖动平移 · 双击放大 · F 全屏</div>
+        <div class="photo-zoom-hint" id="photo-zoom-hint">${previewImmersiveOpen ? "拖动平移 · Ctrl+滚轮缩放 · Esc 退出沉浸" : "滚轮缩放 · 拖动平移 · 双击放大 · F 全屏"}</div>
       </div>`;
       const stage = media.querySelector<HTMLElement>("#photo-stage");
       if (stage) {
@@ -2829,6 +2930,31 @@ function togglePreviewFullscreen(): void {
   void target.requestFullscreen().catch(() => undefined);
 }
 
+/** Pure media stage: no chrome, free pan, Ctrl+wheel resize. */
+function togglePreviewImmersive(force?: boolean): void {
+  const next = typeof force === "boolean" ? force : !previewImmersiveOpen;
+  previewImmersiveOpen = next;
+  const backdrop = app.querySelector<HTMLElement>("#preview-modal");
+  const modal = app.querySelector<HTMLElement>(".preview-modal");
+  const button = app.querySelector<HTMLButtonElement>("#preview-immersive");
+  backdrop?.classList.toggle("is-immersive", next);
+  modal?.classList.toggle("is-immersive", next);
+  if (modal) {
+    if (next) modal.dataset.liquidGlass = "off";
+    else delete modal.dataset.liquidGlass;
+  }
+  button?.setAttribute("aria-pressed", String(next));
+  document.documentElement.classList.toggle("is-immersive-view", next);
+  const hint = app.querySelector<HTMLElement>("#photo-zoom-hint");
+  if (hint) {
+    hint.textContent = next
+      ? "拖动平移 · Ctrl+滚轮缩放 · Esc 退出沉浸"
+      : "滚轮缩放 · 拖动平移 · 双击放大 · F 全屏";
+  }
+  if (!next) resetPhotoZoom();
+  syncLiquidGlass();
+}
+
 function togglePreviewInfo(): void {
   previewInfoOpen = !previewInfoOpen;
   const panel = app.querySelector<HTMLElement>("#modal-meta");
@@ -2845,6 +2971,8 @@ function closePreview(): void {
   livePlaying = false;
   liveHoldActive = false;
   previewMetaCache = null;
+  previewImmersiveOpen = false;
+  document.documentElement.classList.remove("is-immersive-view");
   resetPhotoZoom();
   if (document.fullscreenElement) {
     void document.exitFullscreen().catch(() => undefined);
@@ -3069,11 +3197,16 @@ async function chooseLibraryFolder(): Promise<void> {
   }
 }
 
-async function persistUiPrefs(input: { uiDensity?: number; uiSort?: SortMode }): Promise<void> {
+async function persistUiPrefs(input: {
+  uiDensity?: number;
+  uiSort?: SortMode;
+  uiPreviewMode?: UiPreviewMode;
+}): Promise<void> {
   try {
     const settings = await setUiPrefs(input);
     state.density = clampDensity(settings.ui_density);
     state.sort = settings.ui_sort;
+    state.previewMode = clampPreviewMode(settings.ui_preview_mode);
   } catch (error) {
     state.error = toUserMessage(error, "保存界面偏好失败");
   }
@@ -3277,6 +3410,7 @@ async function bootstrap(): Promise<void> {
     state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
     state.density = clampDensity(infra.settings.ui_density);
     state.sort = infra.settings.ui_sort;
+    state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
     state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
     state.notificationsEnabled = infra.settings.notifications_enabled;
     state.closeBehavior = infra.settings.close_behavior;
@@ -3366,6 +3500,10 @@ window.addEventListener("keydown", (event) => {
       void document.exitFullscreen().catch(() => undefined);
       return;
     }
+    if (previewImmersiveOpen) {
+      togglePreviewImmersive(false);
+      return;
+    }
     closePreview();
     return;
   }
@@ -3384,6 +3522,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "f" || event.key === "F") { event.preventDefault(); togglePreviewFullscreen(); return; }
   if (event.key === "i" || event.key === "I") { event.preventDefault(); togglePreviewInfo(); return; }
+  if (event.key === "e" || event.key === "E") { event.preventDefault(); togglePreviewImmersive(); return; }
   if (event.key === "l" || event.key === "L") { event.preventDefault(); toggleLivePreview(); return; }
   if (event.key === "m" || event.key === "M") { event.preventDefault(); togglePreviewMute(); return; }
   if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {

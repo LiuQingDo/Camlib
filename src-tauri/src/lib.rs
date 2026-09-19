@@ -66,18 +66,27 @@ fn set_backup_conflict_policy(
     state.with_infrastructure(|infrastructure| infrastructure.set_backup_conflict_policy(policy))
 }
 
-/// Persist grid density and sort so the next launch restores the same feel.
+/// Persist grid density, sort, and default preview mode across launches.
 #[tauri::command]
 fn set_ui_prefs(
     ui_density: Option<u8>,
     ui_sort: Option<String>,
+    ui_preview_mode: Option<String>,
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, AppError> {
     let sort = match ui_sort.as_deref() {
         Some(value) => Some(infrastructure::UiSort::parse(value).map_err(AppError::from)?),
         None => None,
     };
-    state.with_infrastructure(|infrastructure| infrastructure.set_ui_prefs(ui_density, sort))
+    let preview_mode = match ui_preview_mode.as_deref() {
+        Some(value) => Some(
+            infrastructure::UiPreviewMode::parse(value).map_err(AppError::from)?,
+        ),
+        None => None,
+    };
+    state.with_infrastructure(|infrastructure| {
+        infrastructure.set_ui_prefs(ui_density, sort, preview_mode)
+    })
 }
 
 /// Toggle the startup incremental scan. Default is enabled.

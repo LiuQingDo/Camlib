@@ -8,6 +8,9 @@ export interface VolumeInfo {
 
 export type UiSortMode = "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
 
+/** Default media preview surface when a card is opened. */
+export type UiPreviewMode = "standard" | "immersive";
+
 export type CloseBehavior = "quit" | "minimize_to_tray";
 
 export interface AppSettings {
@@ -17,6 +20,7 @@ export interface AppSettings {
   backup_conflict_policy: "skip_same" | "rename" | "overwrite";
   ui_density: number;
   ui_sort: UiSortMode;
+  ui_preview_mode: UiPreviewMode;
   auto_scan_on_startup: boolean;
   backup_ignore_extensions: string[];
   notifications_enabled: boolean;
@@ -113,10 +117,15 @@ export function setBackupIgnoreExtensions(extensions: string[]): Promise<AppSett
   return invoke<AppSettings>("set_backup_ignore_extensions", { extensions });
 }
 
-export function setUiPrefs(input: { uiDensity?: number; uiSort?: UiSortMode }): Promise<AppSettings> {
+export function setUiPrefs(input: {
+  uiDensity?: number;
+  uiSort?: UiSortMode;
+  uiPreviewMode?: UiPreviewMode;
+}): Promise<AppSettings> {
   return invoke<AppSettings>("set_ui_prefs", {
     uiDensity: input.uiDensity,
     uiSort: input.uiSort,
+    uiPreviewMode: input.uiPreviewMode,
   });
 }
 

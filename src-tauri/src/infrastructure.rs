@@ -74,6 +74,9 @@ pub struct AppSettings {
     pub ui_density: u8,
     #[serde(default)]
     pub ui_sort: UiSort,
+    /// Default media preview mode when opening a card.
+    #[serde(default)]
+    pub ui_preview_mode: UiPreviewMode,
     /// Automatically start an incremental scan when the library is available.
     #[serde(default = "default_true")]
     pub auto_scan_on_startup: bool,
@@ -99,6 +102,29 @@ fn default_true() -> bool {
 
 fn default_backup_ignore_extensions() -> Vec<String> {
     vec![".dng".to_owned(), ".lrv".to_owned()]
+}
+
+/// Default media preview surface when a card is opened.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiPreviewMode {
+    /// Framed modal with chrome (header, caption tools, meta panel).
+    #[default]
+    Standard,
+    /// Pure media stage: free pan, Ctrl+wheel resize, no surrounding chrome.
+    Immersive,
+}
+
+impl UiPreviewMode {
+    pub fn parse(value: &str) -> Result<Self, InfrastructureError> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "immersive" => Ok(Self::Immersive),
+            other => Err(InfrastructureError::InvalidSettings(format!(
+                "默认查看方式无效: {other}"
+            ))),
+        }
+    }
 }
 
 /// Window close action when the tray icon is available.
@@ -336,6 +362,7 @@ impl Infrastructure {
         &mut self,
         ui_density: Option<u8>,
         ui_sort: Option<UiSort>,
+        ui_preview_mode: Option<UiPreviewMode>,
     ) -> Result<AppSettings, InfrastructureError> {
         if let Some(density) = ui_density {
             if !(1..=5).contains(&density) {
@@ -347,6 +374,9 @@ impl Infrastructure {
         }
         if let Some(sort) = ui_sort {
             self.store.settings.ui_sort = sort;
+        }
+        if let Some(mode) = ui_preview_mode {
+            self.store.settings.ui_preview_mode = mode;
         }
         self.store.save()?;
         self.settings()
@@ -520,6 +550,7 @@ impl SettingsStore {
                 backup_conflict_policy: ConflictPolicy::SkipSame,
                 ui_density: default_ui_density(),
                 ui_sort: UiSort::default(),
+                ui_preview_mode: UiPreviewMode::default(),
                 auto_scan_on_startup: true,
                 backup_ignore_extensions: default_backup_ignore_extensions(),
                 notifications_enabled: true,
@@ -568,6 +599,8 @@ struct DiskSettings {
     ui_density: u8,
     #[serde(default)]
     ui_sort: Option<UiSort>,
+    #[serde(default)]
+    ui_preview_mode: UiPreviewMode,
     #[serde(default = "default_true")]
     auto_scan_on_startup: bool,
     #[serde(default = "default_backup_ignore_extensions")]
@@ -609,6 +642,7 @@ impl DiskSettings {
                 .unwrap_or(ConflictPolicy::SkipSame),
             ui_density: self.ui_density,
             ui_sort: self.ui_sort.unwrap_or_default(),
+            ui_preview_mode: self.ui_preview_mode,
             auto_scan_on_startup: self.auto_scan_on_startup,
             backup_ignore_extensions: if self.backup_ignore_extensions.is_empty() {
                 default_backup_ignore_extensions()
@@ -631,6 +665,7 @@ impl From<&AppSettings> for DiskSettings {
             backup_conflict_policy: Some(settings.backup_conflict_policy.clone()),
             ui_density: settings.ui_density,
             ui_sort: Some(settings.ui_sort.clone()),
+            ui_preview_mode: settings.ui_preview_mode,
             auto_scan_on_startup: settings.auto_scan_on_startup,
             backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
             notifications_enabled: settings.notifications_enabled,
@@ -1137,6 +1172,7 @@ mod tests {
             backup_conflict_policy: None,
             ui_density: default_ui_density(),
             ui_sort: None,
+            ui_preview_mode: UiPreviewMode::default(),
             auto_scan_on_startup: true,
             backup_ignore_extensions: default_backup_ignore_extensions(),
             notifications_enabled: true,
@@ -1191,13 +1227,19 @@ mod tests {
         let defaults = infrastructure.settings().unwrap();
         assert_eq!(defaults.ui_density, 3);
         assert_eq!(defaults.ui_sort, UiSort::Newest);
+        assert_eq!(defaults.ui_preview_mode, UiPreviewMode::Standard);
         assert!(defaults.auto_scan_on_startup);
 
         let updated = infrastructure
-            .set_ui_prefs(Some(5), Some(UiSort::Name))
+            .set_ui_prefs(
+                Some(5),
+                Some(UiSort::Name),
+                Some(UiPreviewMode::Immersive),
+            )
             .expect("set ui prefs");
         assert_eq!(updated.ui_density, 5);
         assert_eq!(updated.ui_sort, UiSort::Name);
+        assert_eq!(updated.ui_preview_mode, UiPreviewMode::Immersive);
         let updated = infrastructure
             .set_auto_scan_on_startup(false)
             .expect("disable auto scan");
@@ -1209,6 +1251,7 @@ mod tests {
         let settings = reloaded.settings().unwrap();
         assert_eq!(settings.ui_density, 5);
         assert_eq!(settings.ui_sort, UiSort::Name);
+        assert_eq!(settings.ui_preview_mode, UiPreviewMode::Immersive);
         assert!(!settings.auto_scan_on_startup);
     }
 
@@ -1242,8 +1285,8 @@ mod tests {
     #[test]
     fn rejects_invalid_ui_density() {
         let (_temp_dir, mut infrastructure) = test_infrastructure();
-        assert!(infrastructure.set_ui_prefs(Some(0), None).is_err());
-        assert!(infrastructure.set_ui_prefs(Some(6), None).is_err());
+        assert!(infrastructure.set_ui_prefs(Some(0), None, None).is_err());
+        assert!(infrastructure.set_ui_prefs(Some(6), None, None).is_err());
     }
 
     #[test]
