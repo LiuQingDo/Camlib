@@ -13,11 +13,11 @@ use std::env;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 /// Windows GUI apps inherit a console host; spawning ffmpeg without
 /// CREATE_NO_WINDOW flashes a black console per thumbnail/preview call.
@@ -629,7 +629,10 @@ pub fn resolve_ffmpeg(app: &AppHandle) -> Result<PathBuf, crate::errors::AppErro
     } else {
         "ffmpeg"
     });
-    probe.arg("-version").stdout(Stdio::null()).stderr(Stdio::null());
+    probe
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     hide_console_window(&mut probe);
     if probe.output().is_ok() {
         return Ok(PathBuf::from(if cfg!(windows) {
