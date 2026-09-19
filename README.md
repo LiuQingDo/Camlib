@@ -77,10 +77,12 @@ cargo check
 ## 文档
 
 - `docs/requirements.md` — 产品需求
-- `docs/architecture.md` — 当前架构与历史审计
-- `docs/development-notes.md` — API / 进度 / 路径安全合约
-- `docs/usability-dev-sessions.md` — 开发会话路线（S1–S9）
+- `docs/architecture.md` — 当前架构
+- `docs/data-model.md` — SQLite 数据模型（以 migrations 为准）
+- `docs/development-notes.md` — Command API、错误契约、路径安全、测试
+- `docs/usability-dev-sessions.md` — 好用优先会话记录（S1–S9 已完成）与延后项
 - `docs/release-checklist.md` — 发布前检查
+- `docs/ux-style-plan.md` — 样式与体验打磨计划（计划稿，尚未实施）
 
 ## 安装包
 

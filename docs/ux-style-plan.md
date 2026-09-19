@@ -2,7 +2,7 @@
 
 > 状态：计划稿（未实施）  
 > 范围依据：用户确认的 8 项改动 + 明确不做项  
-> 关联文档：`docs/usability-dev-sessions.md`、`docs/requirements.md`
+> 关联文档：`docs/usability-dev-sessions.md`（原则与延后项）、`docs/requirements.md`、`docs/development-notes.md`（设置/command 合约）
 
 ## 1. 目标
 

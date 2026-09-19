@@ -1,29 +1,36 @@
 # Camlib SQLite 数据模型
 
-> 这是当前 SQLite 模型；迁移由 `src-tauri/src/db/migrations` 管理。
+> 真相来源：`src-tauri/src/db/migrations/`  
+> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 5`（`src-tauri/src/db/mod.rs`）  
+> 迁移在应用启动时按版本顺序自动执行；版本过高时拒绝打开，避免降级损坏。
 
 ## 1. 设计原则
 
 - 数据库位于 SSD 应用数据目录；原始媒体和缩略图不进入数据库。
-- 数据库只保存相对于已注册媒体库根目录的规范化相对路径，不把路径拼接权交给前端。
+- 只保存相对于已注册媒体库根目录的规范化相对路径；路径拼接权不交给前端。
 - `media_items` 表示用户看到的逻辑媒体；`media_files` 表示实际物理文件。
-- 业务状态与扫描状态分离：文件暂时离线不应清除收藏、标签或备注。
-- 所有时间使用 ISO 8601 UTC 文本或整数毫秒，界面按本地时区显示；拍摄日期另存为 `YYYY-MM-DD` 便于分组。
-- 所有外部输入使用参数化 SQL；迁移使用单独版本号并在事务中执行。
+- 业务状态（收藏、标签、评分）与扫描状态分离：文件暂时离线不应清除用户状态。
+- 时间使用 ISO 8601 UTC 文本或整数毫秒；拍摄日期另存 `YYYY-MM-DD` 便于分组。
+- 外部输入使用参数化 SQL；迁移使用版本号并在事务中执行。
 
-## 2. 表结构
+## 2. 迁移一览
 
-下面的 SQL 是建议基线，实际实现时可拆分为 `migrations/0001_initial.sql` 等迁移文件。
+| 版本 | 文件 | 内容 |
+| --- | --- | --- |
+| 1 | `0001_initial.sql` | libraries、media_items、media_files、favorites、tags、media_tags、backup_runs、app_settings + 索引 |
+| 2 | `0002_scan_runs.sql` | scan_runs（扫描任务结果） |
+| 3 | `0003_deletion_logs.sql` | deletion_logs（删除结果明细） |
+| 4 | `0004_backup_items.sql` | backup_items（备份单文件状态） |
+| 5 | `0005_media_ratings.sql` | media_ratings（1–5 星评分） |
+
+## 3. 表结构（与迁移对齐）
+
+下列 SQL 摘自迁移文件，便于阅读；**修改 schema 必须新增迁移文件**，不要只改本文。
+
+### 核心索引与用户状态（v1）
 
 ```sql
 PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
-
-CREATE TABLE schema_migrations (
-  version        INTEGER PRIMARY KEY,
-  applied_at     TEXT NOT NULL
-);
 
 CREATE TABLE libraries (
   id                 TEXT PRIMARY KEY,
@@ -75,7 +82,8 @@ CREATE TABLE media_files (
   file_identity      TEXT,
   exists_now         INTEGER NOT NULL DEFAULT 1 CHECK (exists_now IN (0,1)),
   last_scanned_at    TEXT NOT NULL,
-  UNIQUE (library_id, relative_path)
+  UNIQUE (library_id, relative_path),
+  UNIQUE (media_item_id, role)
 );
 
 CREATE TABLE favorites (
@@ -95,28 +103,6 @@ CREATE TABLE media_tags (
   tag_id             TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   created_at         TEXT NOT NULL,
   PRIMARY KEY (media_item_id, tag_id)
-);
-
-CREATE TABLE media_notes (
-  media_item_id      TEXT PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
-  rating             INTEGER CHECK (rating IS NULL OR rating BETWEEN 0 AND 5),
-  note               TEXT,
-  updated_at         TEXT NOT NULL
-);
-
-CREATE TABLE scan_runs (
-  id                 TEXT PRIMARY KEY,
-  library_id         TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
-  job_id             TEXT NOT NULL,
-  status             TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
-  started_at         TEXT NOT NULL,
-  finished_at        TEXT,
-  files_seen         INTEGER NOT NULL DEFAULT 0,
-  items_added        INTEGER NOT NULL DEFAULT 0,
-  items_updated      INTEGER NOT NULL DEFAULT 0,
-  items_missing      INTEGER NOT NULL DEFAULT 0,
-  errors             INTEGER NOT NULL DEFAULT 0,
-  error_summary      TEXT
 );
 
 CREATE TABLE backup_runs (
@@ -139,23 +125,29 @@ CREATE TABLE backup_runs (
   error_summary      TEXT
 );
 
-CREATE TABLE backup_items (
-  id                 TEXT PRIMARY KEY,
-  backup_run_id      TEXT NOT NULL REFERENCES backup_runs(id) ON DELETE CASCADE,
-  source_relative    TEXT NOT NULL,
-  destination_rel    TEXT,
-  source_size_bytes  INTEGER NOT NULL,
-  destination_size   INTEGER,
-  source_hash        TEXT,
-  destination_hash   TEXT,
-  status             TEXT NOT NULL CHECK (status IN ('planned','copied','skipped','failed','cancelled')),
-  error_message      TEXT
-);
-
 CREATE TABLE app_settings (
   key                TEXT PRIMARY KEY,
   value_json         TEXT NOT NULL,
   updated_at         TEXT NOT NULL
+);
+```
+
+### 扫描与删除（v2–v3）
+
+```sql
+CREATE TABLE scan_runs (
+  id                 TEXT PRIMARY KEY,
+  library_id         TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  job_id             TEXT NOT NULL,
+  status             TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
+  started_at         TEXT NOT NULL,
+  finished_at        TEXT,
+  files_seen         INTEGER NOT NULL DEFAULT 0,
+  items_added        INTEGER NOT NULL DEFAULT 0,
+  items_updated      INTEGER NOT NULL DEFAULT 0,
+  items_missing      INTEGER NOT NULL DEFAULT 0,
+  errors             INTEGER NOT NULL DEFAULT 0,
+  error_summary      TEXT
 );
 
 CREATE TABLE deletion_logs (
@@ -170,42 +162,70 @@ CREATE TABLE deletion_logs (
 );
 ```
 
-## 3. 索引和查询约定
+### 备份明细与评分（v4–v5）
 
 ```sql
-CREATE INDEX idx_items_library_date
-  ON media_items(library_id, capture_date DESC, display_name);
-CREATE INDEX idx_items_library_kind_date
-  ON media_items(library_id, kind, capture_date DESC);
-CREATE INDEX idx_items_scan_state
-  ON media_items(library_id, scan_state);
-CREATE INDEX idx_files_item
-  ON media_files(media_item_id, role);
-CREATE INDEX idx_files_path
-  ON media_files(library_id, relative_path);
-CREATE INDEX idx_burst_group
-  ON media_items(library_id, burst_group);
-CREATE INDEX idx_backup_items_run_status
-  ON backup_items(backup_run_id, status);
+CREATE TABLE backup_items (
+  id                 TEXT PRIMARY KEY,
+  backup_run_id      TEXT NOT NULL REFERENCES backup_runs(id) ON DELETE CASCADE,
+  source_relative    TEXT NOT NULL,
+  destination_rel    TEXT,
+  source_size_bytes  INTEGER NOT NULL,
+  destination_size   INTEGER,
+  source_hash        TEXT,
+  destination_hash   TEXT,
+  status             TEXT NOT NULL CHECK (status IN ('planned','copied','skipped','failed','cancelled')),
+  error_message      TEXT
+);
+
+CREATE TABLE media_ratings (
+  media_item_id      TEXT PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+  rating             INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  updated_at         TEXT NOT NULL
+);
 ```
 
-文件名搜索第一版可使用 `display_name LIKE ? ESCAPE '\\'`，并对用户输入做通配符转义；数据量增大后再评估 SQLite FTS5。日期导航、类型统计和收藏过滤都应由 SQL 聚合完成，不复制原型的全库 `ALL` 数组。
+说明：
 
-## 4. 扫描一致性
+- **没有** `media_notes` 备注表；备注若要做，需新增迁移。
+- 评分存在独立 `media_ratings` 表；`rating = 0` 表示未评分（删除行）。
+- 扫描 upsert **不得**改写 favorites / tags / ratings。
+
+## 4. 索引与查询约定
+
+v1 已建索引包括：
+
+```sql
+idx_media_items_library_date     -- (library_id, capture_date DESC, display_name)
+idx_media_items_library_kind_date
+idx_media_items_scan_state
+idx_media_items_burst_group
+idx_media_files_item_role
+idx_media_files_library_path
+idx_media_items_favorites
+idx_media_tags_tag
+idx_backup_runs_target_status
+idx_backup_items_run_status      -- v4
+idx_media_ratings_rating         -- v5
+```
+
+文件名搜索使用 `display_name LIKE ? ESCAPE '\\'` 并对用户输入做通配符转义；数据量增大后再评估 FTS5。日期导航、类型统计、收藏/评分过滤由 SQL 聚合完成，不在前端持有全库数组。
+
+## 5. 扫描一致性
 
 1. 扫描开始创建 `scan_runs`，记录本次 `scan_generation`。
-2. 枚举文件时只写入相对路径、大小、修改时间和可选的文件身份；对未变化文件跳过缩略图、EXIF 和哈希计算。
-3. 每批文件在短事务中 upsert；逻辑配对在同一目录/日期/规范化 stem 范围内完成，发生一对多或多对多时标记 `ambiguous`，不得静默覆盖。
-4. 扫描结束后，将本次 generation 未见到的文件标记 `exists_now=0`，将关联逻辑项标为 `missing`；不删除 favorites、tags、notes。
-5. 只有扫描成功提交后才更新 `libraries.last_scan_at`；取消或断盘时保留部分进度，但不把未完成扫描宣称为完整索引。
-6. 逻辑项 ID 使用数据库持久化 ID；重新扫描优先按文件相对路径/文件身份/哈希重连，避免仅因排序或清单分片变化导致收藏丢失。
+2. 枚举时只写入相对路径、大小、修改时间和可选文件身份；未变化文件跳过缩略图、EXIF 和哈希。
+3. 每批文件在短事务中 upsert；逻辑配对在同一目录/日期/规范化 stem 范围内完成；一对多或多对多标记 `ambiguous`，不得静默覆盖。
+4. 扫描结束后，本次 generation 未见到的文件标记 `exists_now=0`，关联逻辑项标为 `missing`；**不删除** favorites、tags、ratings。
+5. 只有扫描成功提交后才更新 `libraries.last_scan_at`；取消或断盘时保留部分进度，不把未完成扫描宣称为完整索引。
+6. 逻辑项 ID 使用数据库持久化 ID；重新扫描优先按相对路径/文件身份/哈希重连，避免收藏/评分丢失。
 
-## 5. 缩略图缓存键
+## 6. 缩略图缓存键
 
-缩略图不建为原始媒体表中的 BLOB。建议缓存键包含 `media_file_id`、`size_bytes`、`modified_at`、缩略图规格、处理器版本和可选 content hash，例如：
+缩略图不建为数据库 BLOB。缓存键包含文件身份与规格，例如：
 
 ```text
 <cache-root>\thumbs\<library-id>\<file-id>-<fingerprint>-<width>x<height>-v<processor>.jpg
 ```
 
-缓存失效只删除或覆盖缓存文件，不影响 SQLite 中的媒体记录和原始文件。
+缓存失效只删除或覆盖缓存文件，不影响 SQLite 记录和原始文件。

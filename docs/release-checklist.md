@@ -9,7 +9,7 @@
   - **PATCH**：修 bug、文案、安全加固，无数据迁移
   - **MINOR**：新功能、索引/设置向后兼容扩展
   - **MAJOR**：破坏性变更（需迁移或重新扫描）
-- SQLite 迁移版本见 `CURRENT_SCHEMA_VERSION`（`src-tauri/src/db/mod.rs`）；升级后首次启动自动迁移。
+- SQLite 迁移版本见 `CURRENT_SCHEMA_VERSION`（`src-tauri/src/db/mod.rs`，当前为 5）；升级后首次启动自动迁移。表结构说明见 `docs/data-model.md`。
 
 ## 2. 安全与权限
 
