@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Third-party binaries — see src-tauri/resources/ffmpeg/README.txt
+src-tauri/resources/ffmpeg/ffmpeg
+src-tauri/resources/ffmpeg/ffmpeg.exe
+src-tauri/target
