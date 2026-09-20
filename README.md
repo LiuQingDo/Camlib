@@ -167,7 +167,9 @@ Camlib/
 
 ## 许可证
 
-尚未添加 `LICENSE` 文件。开源托管前请在此处写明许可证名称与链接。
+[MIT](LICENSE) © 2026 LiuQingDo
+
+第三方组件（如 FFmpeg）各自遵循其许可证；本仓库不分发 FFmpeg 二进制。
 
 ## 致谢
 

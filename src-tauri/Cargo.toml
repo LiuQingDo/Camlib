@@ -1,9 +1,10 @@
 [package]
 name = "camlib"
 version = "0.1.2"
-description = "A Tauri App"
-authors = ["you"]
+description = "Personal camera media library desktop app (Windows-first)"
+authors = ["LiuQingDo"]
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
