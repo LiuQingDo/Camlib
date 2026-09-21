@@ -79,9 +79,7 @@ fn set_ui_prefs(
         None => None,
     };
     let preview_mode = match ui_preview_mode.as_deref() {
-        Some(value) => Some(
-            infrastructure::UiPreviewMode::parse(value).map_err(AppError::from)?,
-        ),
+        Some(value) => Some(infrastructure::UiPreviewMode::parse(value).map_err(AppError::from)?),
         None => None,
     };
     state.with_infrastructure(|infrastructure| {

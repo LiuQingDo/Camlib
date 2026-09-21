@@ -1231,11 +1231,7 @@ mod tests {
         assert!(defaults.auto_scan_on_startup);
 
         let updated = infrastructure
-            .set_ui_prefs(
-                Some(5),
-                Some(UiSort::Name),
-                Some(UiPreviewMode::Immersive),
-            )
+            .set_ui_prefs(Some(5), Some(UiSort::Name), Some(UiPreviewMode::Immersive))
             .expect("set ui prefs");
         assert_eq!(updated.ui_density, 5);
         assert_eq!(updated.ui_sort, UiSort::Name);
