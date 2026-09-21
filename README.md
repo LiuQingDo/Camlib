@@ -129,6 +129,8 @@ Windows NSIS 安装包默认输出：
 src-tauri\target\release\bundle\nsis\
 ```
 
+当前仅提供 Windows 安装包：我只有 Windows 构建环境。
+
 发布前请对照 [`docs/release-checklist.md`](docs/release-checklist.md)。
 
 ## ffmpeg（视频缩略图）

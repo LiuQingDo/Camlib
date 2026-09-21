@@ -129,6 +129,8 @@ Windows NSIS installers default to:
 src-tauri\target\release\bundle\nsis\
 ```
 
+Only Windows packages are currently provided because I only have a Windows build environment.
+
 Before shipping, follow [`docs/release-checklist.md`](docs/release-checklist.md) (Chinese).
 
 Published installers: [GitHub Releases](https://github.com/LiuQingDo/Camlib/releases).
