@@ -93,7 +93,10 @@ Camlib 把这件事收成一个本地闭环：
 ### 从源码运行
 
 ```powershell
-git clone git@github.com:LiuQingDo/Camlib.git
+# HTTPS
+git clone https://github.com/LiuQingDo/Camlib.git
+# 或 SSH
+# git clone git@github.com:LiuQingDo/Camlib.git
 cd Camlib
 pnpm install
 pnpm tauri dev
@@ -111,6 +114,8 @@ cargo test
 cargo fmt --check
 cargo check
 ```
+
+推送到 GitHub 后，CI（Windows）会自动跑同一套基线，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
 
 ### 构建安装包
 
@@ -198,17 +203,26 @@ Camlib/
 | [`docs/release-checklist.md`](docs/release-checklist.md) | 发布前检查清单 |
 | [`docs/usability-dev-sessions.md`](docs/usability-dev-sessions.md) | 可用性打磨记录与延后项 |
 | [`docs/ux-style-plan.md`](docs/ux-style-plan.md) | 样式与体验计划（草稿） |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南（环境、检查项、硬性约束） |
+| [`SECURITY.md`](SECURITY.md) | 漏洞报告渠道与安全边界 |
 
 数据表结构的真相来源是 `src-tauri/src/db/migrations/`，文档与代码不一致时以迁移文件为准。
 
 ## 贡献
 
-项目处于早期（v0.1.x），欢迎 Issue 与 PR。建议：
+项目处于早期（v0.1.x），欢迎 Issue 与 PR。完整说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。摘要：
 
 1. 大改动先开 Issue 对齐意图，避免方向跑偏
 2. 涉及文件系统 / 删除 / 备份的改动请补充或更新测试
 3. Schema 变更必须新增迁移文件，并同步更新 `docs/data-model.md`
 4. 提交前跑通：`pnpm build`、`cargo test`、`cargo fmt --check`
+
+安全问题请勿公开开 Issue，见 [SECURITY.md](SECURITY.md)。
+
+## 版本历史
+
+见 [CHANGELOG.md](CHANGELOG.md)；安装包见 [GitHub Releases](https://github.com/LiuQingDo/Camlib/releases)。
 
 ## 许可证
 

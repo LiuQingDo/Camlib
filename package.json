@@ -2,7 +2,28 @@
   "name": "camlib",
   "private": true,
   "version": "0.1.2",
+  "description": "Personal camera media library — Windows-first local desktop app for DCIM backup, browse, and manage",
   "license": "MIT",
+  "author": "LiuQingDo",
+  "homepage": "https://github.com/LiuQingDo/Camlib",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LiuQingDo/Camlib.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LiuQingDo/Camlib/issues"
+  },
+  "keywords": [
+    "tauri",
+    "camera",
+    "media-library",
+    "photo",
+    "video",
+    "backup",
+    "dcim",
+    "windows",
+    "sqlite"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

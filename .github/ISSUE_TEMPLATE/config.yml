@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/LiuQingDo/Camlib/security/advisories/new
+    about: Please report security issues privately (path escape, data loss, etc.)
+  - name: Contribution guide
+    url: https://github.com/LiuQingDo/Camlib/blob/master/CONTRIBUTING.md
+    about: Environment, tests, and hard rules before opening a PR

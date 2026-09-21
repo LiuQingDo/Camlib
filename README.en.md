@@ -93,7 +93,10 @@ To import `.dng` / `.lrv`, remove those extensions in settings and run backup ag
 ### Run from source
 
 ```powershell
-git clone git@github.com:LiuQingDo/Camlib.git
+# HTTPS
+git clone https://github.com/LiuQingDo/Camlib.git
+# or SSH
+# git clone git@github.com:LiuQingDo/Camlib.git
 cd Camlib
 pnpm install
 pnpm tauri dev
@@ -111,6 +114,8 @@ cargo test
 cargo fmt --check
 cargo check
 ```
+
+After you push to GitHub, CI runs the same baseline on Windows — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ### Build installers
 
@@ -200,17 +205,26 @@ Camlib/
 | [`docs/release-checklist.md`](docs/release-checklist.md) | Pre-release checklist (Chinese) |
 | [`docs/usability-dev-sessions.md`](docs/usability-dev-sessions.md) | Usability session notes (Chinese) |
 | [`docs/ux-style-plan.md`](docs/ux-style-plan.md) | UX/style plan draft (Chinese) |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide |
+| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |
 
 Schema truth source: `src-tauri/src/db/migrations/`. If docs disagree with code, trust the migrations.
 
 ## Contributing
 
-Early project (v0.1.x). Issues and PRs welcome:
+Early project (v0.1.x). Issues and PRs welcome. Full guide: [CONTRIBUTING.md](CONTRIBUTING.md). Summary:
 
 1. Open an Issue first for large changes
 2. Filesystem / delete / backup changes need tests
 3. Schema changes require a new migration and an update to `docs/data-model.md`
 4. Before commit: `pnpm build`, `cargo test`, `cargo fmt --check`
+
+For security issues, do not file a public Issue — see [SECURITY.md](SECURITY.md).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/LiuQingDo/Camlib/releases).
 
 ## License
 

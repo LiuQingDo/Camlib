@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a crash, wrong behavior, or data/path issue
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+        **Do not attach personal media files or full library paths that identify you.**
+        For security issues (path escape, data loss, privilege problems), prefer [SECURITY.md](../../SECURITY.md) instead of a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Camlib version
+      description: e.g. v0.1.2 (Settings → About, or the GitHub Release you installed)
+      placeholder: v0.1.2
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: Windows edition and build
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Library / scan
+        - Browse / filter / preview
+        - Favorites / tags / ratings
+        - Delete (Recycle Bin)
+        - Camera backup (USB)
+        - Settings / tray / window
+        - Install / update
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error codes from the UI if shown (e.g. LIBRARY_OFFLINE, PATH_OUTSIDE_ROOT)
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, screenshots (blur paths), ffmpeg available or not, offline library, etc.

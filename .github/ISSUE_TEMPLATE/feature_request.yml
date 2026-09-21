@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Camlib is intentionally focused: local camera media backup + browse/manage.
+        Out of scope for now (unless you make a strong case): cloud sync, RAW editing, AI classification, mobile, auto-update.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / need
+      description: What are you trying to do that Camlib does not support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should the app do? UI sketch or workflow description helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, other apps, or why existing features fall short
+  - type: dropdown
+    id: willingness
+    attributes:
+      label: Contribution
+      options:
+        - I can open a PR
+        - I can test on hardware
+        - Idea only for now
+    validations:
+      required: true

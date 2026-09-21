@@ -92,4 +92,12 @@ src-tauri\target\release\bundle\nsis\
 
 - 仓库**不包含** ffmpeg 二进制与用户媒体；构建机需单独放置 sidecar。
 - 若分发 zip/便携版，说明数据目录仍写在用户 AppData。
-- 自动更新与崩溃上报未实现（后续可选，见 roadmap）。
+- 自动更新与崩溃上报未实现（后续可选）。
+- 发布后同步更新 [`CHANGELOG.md`](../CHANGELOG.md)（把 `Unreleased` 内容落到新版本小节）。
+
+## 9. 开源仓库卫生（可选但推荐）
+
+- [ ] GitHub 描述与 Topics 仍符合当前产品定位
+- [ ] CI 在该 tag / 分支上为绿
+- [ ] Release notes 与 CHANGELOG 一致
+- [ ] 安装包已挂到 GitHub Release，并标明 Windows x64
