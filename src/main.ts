@@ -638,9 +638,38 @@ function prefetchPreviewNeighbors(index: number): void {
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return minutes ? `${minutes}:${String(seconds).padStart(2, "0")}` : `${seconds}秒`;
+  const mmss = `${minutes}:${String(seconds).padStart(2, "0")}`;
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}` : mmss;
+}
+
+/** Shared star path — keep in sync with `.icon-star-*` in card favorite buttons. */
+const STAR_PATH = "m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z";
+
+function starSvg(filled: boolean): string {
+  return filled
+    ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${STAR_PATH}" fill="currentColor"/></svg>`
+    : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${STAR_PATH}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`;
+}
+
+function starsHtml(rating: number, options: { interactive?: boolean; mediaId?: string } = {}): string {
+  const interactive = options.interactive ?? false;
+  const stars = [1, 2, 3, 4, 5].map((value) => {
+    const filled = value <= rating;
+    const svg = starSvg(filled);
+    if (interactive) {
+      return `<button type="button" class="star-button${filled ? " is-filled" : ""}" data-set-rating="${value}" data-media-id="${escapeHtml(options.mediaId ?? "")}" aria-label="${value} 星" aria-pressed="${filled}">${svg}</button>`;
+    }
+    return `<span class="star-glyph${filled ? " is-filled" : ""}" aria-hidden="true">${svg}</span>`;
+  }).join("");
+  return `<span class="star-row" role="img" aria-label="评分 ${rating} / 5">${stars}${rating === 0 ? `<span class="star-empty-label">未评分</span>` : ""}</span>`;
+}
+
+function cardRatingHtml(rating: number): string {
+  if (rating <= 0) return "";
+  return `<span class="card-rating" title="评分 ${rating} 星" aria-label="评分 ${rating} 星">${Array.from({ length: rating }, () => starSvg(true)).join("")}</span>`;
 }
 
 function formatCaptureAt(value: string | null): string | null {
@@ -1131,9 +1160,11 @@ function renderCard(item: MediaItemDto, index: number): string {
   // updated optimistically on toggle — no per-card detail fetch.
   const favorite = state.favorites.has(item.id);
   const favoritePending = state.favoritePendingIds.has(item.id);
+  const durationMs = item.durationMs != null && item.durationMs > 0 ? item.durationMs : null;
+  const durationBadge = durationMs != null ? `<span class="duration-badge">${formatDuration(durationMs)}</span>` : "";
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-loading">加载预览</span>`}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}</div>
-    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${item.rating > 0 ? `<span class="card-rating" title="评分 ${item.rating} 星">${"★".repeat(item.rating)}</span>` : ""}</div></div>
+    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-skeleton" aria-hidden="true"></span>`}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
+    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
   </article>`;
 }
 
@@ -1176,7 +1207,7 @@ function renderRatingFilter(): string {
   let selected = "";
   if (state.ratingEq !== null) selected = `eq:${state.ratingEq}`;
   else if (state.ratingMin !== null) selected = `min:${state.ratingMin}`;
-  return `<label class="select-wrap rating-filter"><span>评分</span><select id="rating-filter" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
+  return `<label class="select-wrap rating-filter${selected ? " is-active" : ""}"><span>评分</span><select id="rating-filter" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
 }
 
 function renderDateRangeControls(): string {
@@ -2583,7 +2614,7 @@ function applyThumbnailToCard(id: string, asset: Awaited<ReturnType<typeof getMe
   const item = state.page.items.find((entry) => entry.id === id);
   if (!target || !item) return;
   target.classList.add("has-preview");
-  target.querySelector(".preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
+  target.querySelector(".preview-skeleton, .preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
   const existing = target.querySelector("img");
   if (existing) {
     existing.src = asset.url;
@@ -2606,7 +2637,7 @@ function markThumbnailRetryable(id: string): void {
   const target = app.querySelector<HTMLElement>(`[data-preview="${CSS.escape(id)}"]`);
   if (!target) return;
   delete target.dataset.loaded;
-  target.querySelector(".preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
+  target.querySelector(".preview-skeleton, .preview-loading, .video-placeholder, .preview-fallback-row, .preview-fallback")?.remove();
   if (!target.querySelector(".preview-fallback-row")) {
     target.insertAdjacentHTML(
       "afterbegin",
@@ -2639,14 +2670,7 @@ function observePreviews(): void {
 }
 
 function renderStars(rating: number, interactive: boolean, mediaId?: string): string {
-  const stars = [1, 2, 3, 4, 5].map((value) => {
-    const filled = value <= rating;
-    if (interactive) {
-      return `<button type="button" class="star-button ${filled ? "is-filled" : ""}" data-set-rating="${value}" data-media-id="${escapeHtml(mediaId ?? "")}" aria-label="${value} 星" aria-pressed="${filled}">★</button>`;
-    }
-    return `<span class="star-glyph ${filled ? "is-filled" : ""}" aria-hidden="true">★</span>`;
-  }).join("");
-  return `<span class="star-row" role="img" aria-label="评分 ${rating} / 5">${stars}${rating === 0 ? `<span class="star-empty-label">未评分</span>` : ""}</span>`;
+  return starsHtml(rating, { interactive, mediaId });
 }
 
 function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): string {
@@ -3570,8 +3594,8 @@ app.addEventListener("click", (event) => {
       card.dataset.loaded = "true";
       card.classList.remove("has-preview");
       card.querySelector(".preview-fallback-row, .preview-fallback, .preview-retry")?.remove();
-      if (!card.querySelector(".preview-loading")) {
-        card.insertAdjacentHTML("afterbegin", `<span class="preview-loading">加载预览</span>`);
+      if (!card.querySelector(".preview-skeleton, .preview-loading")) {
+        card.insertAdjacentHTML("afterbegin", `<span class="preview-skeleton" aria-hidden="true"></span>`);
       }
     }
     void loadThumbnail(id, true)
