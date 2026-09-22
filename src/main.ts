@@ -74,6 +74,7 @@ import {
   type ThumbnailCacheStatsDto,
   type UiPreviewMode,
   type UiSortMode,
+  type UiTheme,
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toUserMessage } from "./api/errors";
@@ -128,6 +129,8 @@ interface AppState {
   density: Density;
   /** Default preview surface: framed modal or immersive pure media. */
   previewMode: UiPreviewMode;
+  /** Light / dark chrome; persisted via set_ui_prefs (not localStorage). */
+  theme: UiTheme;
   loading: boolean;
   scanning: boolean;
   scanProgress: ScanProgressDto | null;
@@ -217,6 +220,7 @@ const state: AppState = {
   sort: "newest",
   density: 3,
   previewMode: "standard",
+  theme: "light",
   loading: true,
   scanning: false,
   scanProgress: null,
@@ -1901,8 +1905,12 @@ function renderSettingsSystemSection(): string {
   return `<div class="settings-section-body">
     <div class="settings-status-card">
       <h3>查看偏好</h3>
-      <div class="settings-note">控制双击媒体卡片后默认打开的查看形式。查看过程中仍可用底部「沉浸」按钮临时切换。</div>
+      <div class="settings-note">主题与默认查看方式即时保存。查看过程中仍可用底部「沉浸」按钮临时切换。</div>
       <div class="settings-form">
+        <label><span>主题</span><select id="settings-theme" aria-label="界面主题">
+          <option value="light" ${state.theme === "light" ? "selected" : ""}>浅色</option>
+          <option value="dark" ${state.theme === "dark" ? "selected" : ""}>深色</option>
+        </select></label>
         <label><span>默认查看方式</span><select id="settings-preview-mode" aria-label="默认媒体查看方式">
           <option value="standard" ${state.previewMode === "standard" ? "selected" : ""}>标准查看（带信息与工具栏）</option>
           <option value="immersive" ${state.previewMode === "immersive" ? "selected" : ""}>沉浸式查看（纯媒体展示）</option>
@@ -1911,7 +1919,7 @@ function renderSettingsSystemSection(): string {
           <button class="primary-button" type="button" id="settings-save-preview-mode">保存查看方式</button>
         </div>
       </div>
-      <div class="settings-note">沉浸式：无多余边框，支持任意位置拖动平移，Ctrl+滚轮缩放，Esc 退出。</div>
+      <div class="settings-note">沉浸式：无多余边框，支持任意位置拖动平移，Ctrl+滚轮缩放，Esc 退出。主题与侧栏按钮同步。</div>
     </div>
     <div class="settings-status-card">
       <h3>系统集成</h3>
@@ -2026,7 +2034,7 @@ function render(): void {
     <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/camlib-icon.png" alt="" width="37" height="37" /></span><div><strong>Camlib</strong><span>媒体库</span></div><button class="icon-button brand-settings" type="button" id="settings-button-top" title="设置" aria-label="打开设置">⚙</button></div>
     <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
-    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
+    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button theme-toggle" type="button" title="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" id="theme-toggle" aria-label="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
@@ -2105,6 +2113,11 @@ function bindMediaCardEvents(): void {
 }
 
 function bindEvents(): void {
+  const themeToggle = app.querySelector<HTMLButtonElement>("#theme-toggle");
+  if (themeToggle && !themeToggle.dataset.bound) {
+    themeToggle.dataset.bound = "1";
+    themeToggle.addEventListener("click", () => void toggleTheme());
+  }
   app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => {
     const prefix = button.dataset.prefix || undefined;
     state.datePrefix = prefix;
@@ -2433,6 +2446,7 @@ function bindSettingsBodyEvents(): void {
   app.querySelector<HTMLButtonElement>("#settings-save-system")?.addEventListener("click", () => void saveSystemSettings());
   app.querySelector<HTMLButtonElement>("#settings-save-preview-mode")?.addEventListener("click", () => void savePreviewModeSetting());
   app.querySelector<HTMLSelectElement>("#settings-preview-mode")?.addEventListener("change", () => void savePreviewModeSetting());
+  app.querySelector<HTMLSelectElement>("#settings-theme")?.addEventListener("change", () => void saveThemeSetting());
   app.querySelector<HTMLButtonElement>("#settings-open-backup-panel")?.addEventListener("click", () => {
     closeSettings();
     void openBackupPanel();
@@ -2505,6 +2519,8 @@ async function loadSettingsSectionData(): Promise<void> {
       state.notificationsEnabled = infra.settings.notifications_enabled;
       state.closeBehavior = infra.settings.close_behavior;
       state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
+      state.theme = clampTheme(infra.settings.ui_theme);
+      applyTheme(state.theme);
       state.backupHistory = backups;
       if (state.library) {
         state.scanRuns = await listScanRuns(state.library.id, 8);
@@ -2675,6 +2691,18 @@ function clampPreviewMode(value: string | undefined | null): UiPreviewMode {
   return value === "immersive" ? "immersive" : "standard";
 }
 
+function clampTheme(value: string | undefined | null): UiTheme {
+  return value === "dark" ? "dark" : "light";
+}
+
+/** Apply data-theme without a full shell rebuild; chrome re-syncs liquid glass. */
+function applyTheme(theme: UiTheme): void {
+  document.documentElement.dataset.theme = theme;
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (meta) meta.content = theme === "dark" ? "#121212" : "#f0f0f0";
+  syncLiquidGlass();
+}
+
 async function savePreviewModeSetting(): Promise<void> {
   const select = app.querySelector<HTMLSelectElement>("#settings-preview-mode");
   const next = clampPreviewMode(select?.value);
@@ -2688,6 +2716,63 @@ async function savePreviewModeSetting(): Promise<void> {
   } finally {
     updateSettingsPanel();
   }
+}
+
+/** Instant-save theme from settings select; mirrors the sidebar toggle. */
+async function saveThemeSetting(): Promise<void> {
+  const select = app.querySelector<HTMLSelectElement>("#settings-theme");
+  const next = clampTheme(select?.value);
+  const previous = state.theme;
+  state.settingsError = null;
+  state.theme = next;
+  applyTheme(next);
+  syncThemeToggle();
+  try {
+    const settings = await setUiPrefs({ uiTheme: next });
+    state.theme = clampTheme(settings.ui_theme);
+    applyTheme(state.theme);
+    syncThemeToggle();
+  } catch (error) {
+    state.theme = previous;
+    applyTheme(previous);
+    syncThemeToggle();
+    state.settingsError = toUserMessage(error, "保存主题失败");
+    updateSettingsPanel();
+  }
+}
+
+/** Flip theme from the main shell; no full render — only CSS + liquid glass. */
+async function toggleTheme(): Promise<void> {
+  const next: UiTheme = state.theme === "dark" ? "light" : "dark";
+  state.theme = next;
+  applyTheme(next);
+  syncThemeToggle();
+  try {
+    const settings = await setUiPrefs({ uiTheme: next });
+    state.theme = clampTheme(settings.ui_theme);
+    applyTheme(state.theme);
+    syncThemeToggle();
+    const settingsSelect = app.querySelector<HTMLSelectElement>("#settings-theme");
+    if (settingsSelect) settingsSelect.value = state.theme;
+  } catch (error) {
+    // Roll back optimistic UI so the control never lies about persistence.
+    state.theme = next === "dark" ? "light" : "dark";
+    applyTheme(state.theme);
+    syncThemeToggle();
+    state.error = toUserMessage(error, "保存主题失败");
+  }
+}
+
+/** Keep sidebar theme button labels/icons aligned with state.theme. */
+function syncThemeToggle(): void {
+  const toggle = app.querySelector<HTMLButtonElement>("#theme-toggle");
+  if (!toggle) return;
+  const isDark = state.theme === "dark";
+  const nextLabel = isDark ? "切换到浅色模式" : "切换到深色模式";
+  toggle.textContent = isDark ? "☀" : "☾";
+  toggle.title = nextLabel;
+  toggle.setAttribute("aria-label", nextLabel);
+  toggle.setAttribute("aria-pressed", String(isDark));
 }
 
 async function openFolderForItem(mediaItemId: string): Promise<void> {
@@ -3423,12 +3508,14 @@ async function persistUiPrefs(input: {
   uiDensity?: number;
   uiSort?: SortMode;
   uiPreviewMode?: UiPreviewMode;
+  uiTheme?: UiTheme;
 }): Promise<void> {
   try {
     const settings = await setUiPrefs(input);
     state.density = clampDensity(settings.ui_density);
     state.sort = settings.ui_sort;
     state.previewMode = clampPreviewMode(settings.ui_preview_mode);
+    state.theme = clampTheme(settings.ui_theme);
   } catch (error) {
     state.error = toUserMessage(error, "保存界面偏好失败");
   }
@@ -3633,6 +3720,9 @@ async function bootstrap(): Promise<void> {
     state.density = clampDensity(infra.settings.ui_density);
     state.sort = infra.settings.ui_sort;
     state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
+    state.theme = clampTheme(infra.settings.ui_theme);
+    applyTheme(state.theme);
+    syncThemeToggle();
     state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
     state.notificationsEnabled = infra.settings.notifications_enabled;
     state.closeBehavior = infra.settings.close_behavior;

@@ -77,6 +77,9 @@ pub struct AppSettings {
     /// Default media preview mode when opening a card.
     #[serde(default)]
     pub ui_preview_mode: UiPreviewMode,
+    /// Light (default) or dark chrome theme; media stage stays as confirmed.
+    #[serde(default)]
+    pub ui_theme: UiTheme,
     /// Automatically start an incremental scan when the library is available.
     #[serde(default = "default_true")]
     pub auto_scan_on_startup: bool,
@@ -122,6 +125,27 @@ impl UiPreviewMode {
             "immersive" => Ok(Self::Immersive),
             other => Err(InfrastructureError::InvalidSettings(format!(
                 "默认查看方式无效: {other}"
+            ))),
+        }
+    }
+}
+
+/// Light / dark UI chrome theme. Persisted with other ui_prefs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    #[default]
+    Light,
+    Dark,
+}
+
+impl UiTheme {
+    pub fn parse(value: &str) -> Result<Self, InfrastructureError> {
+        match value {
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            other => Err(InfrastructureError::InvalidSettings(format!(
+                "主题无效: {other}"
             ))),
         }
     }
@@ -363,6 +387,7 @@ impl Infrastructure {
         ui_density: Option<u8>,
         ui_sort: Option<UiSort>,
         ui_preview_mode: Option<UiPreviewMode>,
+        ui_theme: Option<UiTheme>,
     ) -> Result<AppSettings, InfrastructureError> {
         if let Some(density) = ui_density {
             if !(1..=5).contains(&density) {
@@ -377,6 +402,9 @@ impl Infrastructure {
         }
         if let Some(mode) = ui_preview_mode {
             self.store.settings.ui_preview_mode = mode;
+        }
+        if let Some(theme) = ui_theme {
+            self.store.settings.ui_theme = theme;
         }
         self.store.save()?;
         self.settings()
@@ -551,6 +579,7 @@ impl SettingsStore {
                 ui_density: default_ui_density(),
                 ui_sort: UiSort::default(),
                 ui_preview_mode: UiPreviewMode::default(),
+                ui_theme: UiTheme::default(),
                 auto_scan_on_startup: true,
                 backup_ignore_extensions: default_backup_ignore_extensions(),
                 notifications_enabled: true,
@@ -601,6 +630,8 @@ struct DiskSettings {
     ui_sort: Option<UiSort>,
     #[serde(default)]
     ui_preview_mode: UiPreviewMode,
+    #[serde(default)]
+    ui_theme: UiTheme,
     #[serde(default = "default_true")]
     auto_scan_on_startup: bool,
     #[serde(default = "default_backup_ignore_extensions")]
@@ -643,6 +674,7 @@ impl DiskSettings {
             ui_density: self.ui_density,
             ui_sort: self.ui_sort.unwrap_or_default(),
             ui_preview_mode: self.ui_preview_mode,
+            ui_theme: self.ui_theme,
             auto_scan_on_startup: self.auto_scan_on_startup,
             backup_ignore_extensions: if self.backup_ignore_extensions.is_empty() {
                 default_backup_ignore_extensions()
@@ -666,6 +698,7 @@ impl From<&AppSettings> for DiskSettings {
             ui_density: settings.ui_density,
             ui_sort: Some(settings.ui_sort.clone()),
             ui_preview_mode: settings.ui_preview_mode,
+            ui_theme: settings.ui_theme,
             auto_scan_on_startup: settings.auto_scan_on_startup,
             backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
             notifications_enabled: settings.notifications_enabled,
@@ -1173,6 +1206,7 @@ mod tests {
             ui_density: default_ui_density(),
             ui_sort: None,
             ui_preview_mode: UiPreviewMode::default(),
+            ui_theme: UiTheme::default(),
             auto_scan_on_startup: true,
             backup_ignore_extensions: default_backup_ignore_extensions(),
             notifications_enabled: true,
@@ -1228,14 +1262,21 @@ mod tests {
         assert_eq!(defaults.ui_density, 3);
         assert_eq!(defaults.ui_sort, UiSort::Newest);
         assert_eq!(defaults.ui_preview_mode, UiPreviewMode::Standard);
+        assert_eq!(defaults.ui_theme, UiTheme::Light);
         assert!(defaults.auto_scan_on_startup);
 
         let updated = infrastructure
-            .set_ui_prefs(Some(5), Some(UiSort::Name), Some(UiPreviewMode::Immersive))
+            .set_ui_prefs(
+                Some(5),
+                Some(UiSort::Name),
+                Some(UiPreviewMode::Immersive),
+                Some(UiTheme::Dark),
+            )
             .expect("set ui prefs");
         assert_eq!(updated.ui_density, 5);
         assert_eq!(updated.ui_sort, UiSort::Name);
         assert_eq!(updated.ui_preview_mode, UiPreviewMode::Immersive);
+        assert_eq!(updated.ui_theme, UiTheme::Dark);
         let updated = infrastructure
             .set_auto_scan_on_startup(false)
             .expect("disable auto scan");
@@ -1248,7 +1289,31 @@ mod tests {
         assert_eq!(settings.ui_density, 5);
         assert_eq!(settings.ui_sort, UiSort::Name);
         assert_eq!(settings.ui_preview_mode, UiPreviewMode::Immersive);
+        assert_eq!(settings.ui_theme, UiTheme::Dark);
         assert!(!settings.auto_scan_on_startup);
+    }
+
+    #[test]
+    fn ui_theme_defaults_to_light_when_missing_on_disk() {
+        let (temp_dir, _infrastructure) = test_infrastructure();
+        let settings_path = temp_dir.path().join("app-data").join("settings.json");
+        let mut disk = DiskSettings::from(&_infrastructure.settings().unwrap());
+        // Simulate an older settings.json without ui_theme.
+        disk.ui_theme = UiTheme::Light;
+        let mut json = serde_json::to_value(&disk).expect("serialize settings");
+        json.as_object_mut().expect("object").remove("ui_theme");
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&json).expect("write"),
+        )
+        .expect("write settings");
+
+        let loaded = Infrastructure::open(settings_path, temp_dir.path().join("cache"))
+            .expect("load settings");
+        assert_eq!(loaded.settings().unwrap().ui_theme, UiTheme::Light);
+        assert_eq!(UiTheme::parse("light").unwrap(), UiTheme::Light);
+        assert_eq!(UiTheme::parse("dark").unwrap(), UiTheme::Dark);
+        assert!(UiTheme::parse("system").is_err());
     }
 
     #[test]
@@ -1281,8 +1346,15 @@ mod tests {
     #[test]
     fn rejects_invalid_ui_density() {
         let (_temp_dir, mut infrastructure) = test_infrastructure();
-        assert!(infrastructure.set_ui_prefs(Some(0), None, None).is_err());
-        assert!(infrastructure.set_ui_prefs(Some(6), None, None).is_err());
+        assert!(infrastructure
+            .set_ui_prefs(Some(0), None, None, None)
+            .is_err());
+        assert!(infrastructure
+            .set_ui_prefs(Some(6), None, None, None)
+            .is_err());
+        assert!(infrastructure
+            .set_ui_prefs(None, None, None, Some(UiTheme::Dark))
+            .is_ok());
     }
 
     #[test]

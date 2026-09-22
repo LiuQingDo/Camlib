@@ -11,6 +11,9 @@ export type UiSortMode = "newest" | "oldest" | "name" | "rating-desc" | "rating-
 /** Default media preview surface when a card is opened. */
 export type UiPreviewMode = "standard" | "immersive";
 
+/** Light (default) or dark UI chrome theme. */
+export type UiTheme = "light" | "dark";
+
 export type CloseBehavior = "quit" | "minimize_to_tray";
 
 export interface AppSettings {
@@ -21,6 +24,7 @@ export interface AppSettings {
   ui_density: number;
   ui_sort: UiSortMode;
   ui_preview_mode: UiPreviewMode;
+  ui_theme: UiTheme;
   auto_scan_on_startup: boolean;
   backup_ignore_extensions: string[];
   notifications_enabled: boolean;
@@ -121,11 +125,13 @@ export function setUiPrefs(input: {
   uiDensity?: number;
   uiSort?: UiSortMode;
   uiPreviewMode?: UiPreviewMode;
+  uiTheme?: UiTheme;
 }): Promise<AppSettings> {
   return invoke<AppSettings>("set_ui_prefs", {
     uiDensity: input.uiDensity,
     uiSort: input.uiSort,
     uiPreviewMode: input.uiPreviewMode,
+    uiTheme: input.uiTheme,
   });
 }
 

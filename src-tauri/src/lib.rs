@@ -15,7 +15,7 @@ use db::{MediaKind, MediaQuery, MediaSort};
 use errors::AppError;
 use infrastructure::{
     AppSettings, CloseBehavior, Infrastructure, InfrastructureError, InfrastructureState,
-    LibraryAvailability, LibraryStatus,
+    LibraryAvailability, LibraryStatus, UiTheme,
 };
 use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
@@ -66,12 +66,13 @@ fn set_backup_conflict_policy(
     state.with_infrastructure(|infrastructure| infrastructure.set_backup_conflict_policy(policy))
 }
 
-/// Persist grid density, sort, and default preview mode across launches.
+/// Persist grid density, sort, default preview mode, and theme across launches.
 #[tauri::command]
 fn set_ui_prefs(
     ui_density: Option<u8>,
     ui_sort: Option<String>,
     ui_preview_mode: Option<String>,
+    ui_theme: Option<String>,
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, AppError> {
     let sort = match ui_sort.as_deref() {
@@ -82,8 +83,12 @@ fn set_ui_prefs(
         Some(value) => Some(infrastructure::UiPreviewMode::parse(value).map_err(AppError::from)?),
         None => None,
     };
+    let theme = match ui_theme.as_deref() {
+        Some(value) => Some(UiTheme::parse(value).map_err(AppError::from)?),
+        None => None,
+    };
     state.with_infrastructure(|infrastructure| {
-        infrastructure.set_ui_prefs(ui_density, sort, preview_mode)
+        infrastructure.set_ui_prefs(ui_density, sort, preview_mode, theme)
     })
 }
 

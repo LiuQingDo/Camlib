@@ -339,11 +339,32 @@ function applyToElement(el: HTMLElement, filter: GlassFilter): void {
 export function syncLiquidGlass(): void {
   if (!supported) return;
   syncQueued = false;
+  // Dark chrome: skip SVG displacement (noisy on low-contrast glass); CSS blur remains.
+  const dark = document.documentElement.dataset.theme === "dark";
   for (const target of TARGETS) {
     const style = { ...DEFAULT_STYLE, ...target.style };
+    const nodes = document.querySelectorAll<HTMLElement>(target.selector);
+    if (dark) {
+      for (const el of nodes) {
+        if (el.dataset.liquidGlass === "off") {
+          el.style.removeProperty("backdrop-filter");
+          el.style.removeProperty("-webkit-backdrop-filter");
+          continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) {
+          el.style.removeProperty("backdrop-filter");
+          el.style.removeProperty("-webkit-backdrop-filter");
+          continue;
+        }
+        const value = `blur(${Math.round(style.blur * 0.65)}px) saturate(1.1) contrast(1.02)`;
+        el.style.backdropFilter = value;
+        el.style.setProperty("-webkit-backdrop-filter", value);
+      }
+      continue;
+    }
     const filter = getFilter(target.key, style);
     if (!filter) continue;
-    const nodes = document.querySelectorAll<HTMLElement>(target.selector);
     for (const el of nodes) {
       // Skip surfaces that opt out explicitly.
       if (el.dataset.liquidGlass === "off") {
