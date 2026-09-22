@@ -182,6 +182,10 @@ interface AppState {
   closeBehavior: CloseBehavior;
   /** Dismissible note about the newest interrupted/failed run after restart. */
   recentTaskNotice: string | null;
+  /** Sticky toolbar secondary filters (tags/date/rating) expanded state. */
+  filtersExpanded: boolean;
+  /** Load-more failure message; sticky in the sentinel until retry (not the top banner). */
+  loadMoreError: string | null;
 }
 
 const state: AppState = {
@@ -266,6 +270,8 @@ const state: AppState = {
   notificationsEnabled: true,
   closeBehavior: "minimize_to_tray",
   recentTaskNotice: null,
+  filtersExpanded: false,
+  loadMoreError: null,
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
@@ -302,6 +308,9 @@ const thumbnailQueue: Array<{
 // grid for selection/favorite changes; dropping these used to repeat one IPC +
 // Base64 transfer per card after every redraw.
 const thumbnailRequests = new Map<string, Promise<Awaited<ReturnType<typeof getMediaThumbnail>>>>();
+// Resolved thumbnail URLs so a full re-render (load-more, selection) can paint
+// `<img>` immediately instead of flashing the skeleton for one frame.
+const thumbnailUrlCache = new Map<string, string>();
 // The modal must not hand a camera original directly to WebView2. A bounded
 // cached preview is large enough for the modal while avoiding failures caused
 // by decoding very large textures at their native dimensions.
@@ -328,6 +337,9 @@ const PHOTO_ZOOM_MAX = 8;
 // Bumps on every full refresh so in-flight load-more/select-all pages from a
 // previous filter cannot append into the new result set.
 let mediaQueryToken = 0;
+// Infinite scroll: one in-flight page load + a sentinel observer recreated per render.
+let loadMoreInFlight = false;
+let loadMoreObserver: IntersectionObserver | null = null;
 
 function pumpThumbnailQueue(): void {
   while (activeThumbnailRequests < thumbnailConcurrency && thumbnailQueue.length) {
@@ -784,6 +796,37 @@ function hasAnyFilter(): boolean {
   return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null);
 }
 
+/** Secondary toolbar conditions live under the collapsible「筛选」panel. */
+function secondaryFilterParts(): string[] {
+  const parts: string[] = [];
+  if (state.tagIds.size) parts.push(`标签×${state.tagIds.size}`);
+  if (state.datePrefix || state.dateFrom || state.dateTo) parts.push("日期");
+  if (state.firstSeenFrom) parts.push("新导入");
+  if (state.ratingEq !== null || state.ratingMin !== null) parts.push("评分");
+  return parts;
+}
+
+function hasSecondaryFilter(): boolean {
+  return secondaryFilterParts().length > 0;
+}
+
+function clearAllFilters(): void {
+  state.search = "";
+  searchDraft = "";
+  state.kind = undefined;
+  state.favoriteOnly = false;
+  state.burstOnly = false;
+  state.datePrefix = undefined;
+  state.dateFrom = undefined;
+  state.dateTo = undefined;
+  state.firstSeenFrom = null;
+  state.tagIds.clear();
+  state.ratingEq = null;
+  state.ratingMin = null;
+  resetSidebarExpansionForSelection();
+  void refreshMedia();
+}
+
 function formatRangeLabel(): string {
   if (state.dateFrom && state.dateTo) return `${state.dateFrom} ~ ${state.dateTo}`;
   if (state.dateFrom) return `自 ${state.dateFrom}`;
@@ -1162,8 +1205,14 @@ function renderCard(item: MediaItemDto, index: number): string {
   const favoritePending = state.favoritePendingIds.has(item.id);
   const durationMs = item.durationMs != null && item.durationMs > 0 ? item.durationMs : null;
   const durationBadge = durationMs != null ? `<span class="duration-badge">${formatDuration(durationMs)}</span>` : "";
+  const cachedThumb = thumbnailUrlCache.get(item.id);
+  const previewContent = cachedThumb
+    ? `<img src="${escapeHtml(cachedThumb)}" alt="" decoding="async" />${isVideo ? `<span class="video-overlay">▶</span>` : ""}`
+    : isVideo
+      ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>`
+      : `<span class="preview-skeleton" aria-hidden="true"></span>`;
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}" data-preview="${escapeHtml(item.id)}">${isVideo ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>` : `<span class="preview-skeleton" aria-hidden="true"></span>`}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
+    <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
   </article>`;
 }
@@ -1178,17 +1227,52 @@ function renderMediaGrid(): string {
   return [...groups.entries()].map(([date, items]) => `<section class="media-day-group"><header class="day-heading"><h2>${date === "unknown" ? "日期未知" : formatDate(date)}</h2><span>${items.length} 个项目</span></header><div class="media-grid">${items.map((item) => renderCard(item, index++)).join("")}</div></section>`).join("");
 }
 
-function renderKindFilters(): string {
+/** Bottom sentinel: idle / loading / error+retry / all-loaded states. */
+function renderLoadMoreFooter(): string {
+  const shown = state.page.items.length;
+  const total = state.page.total;
+  if (shown <= 0 || total <= 0) return "";
+  if (shown >= total) {
+    return `<div class="load-more-sentinel is-done" id="load-more-sentinel"><span>已显示全部 ${formatCount(total)} 项</span></div>`;
+  }
+  if (state.loadMoreError) {
+    return `<div class="load-more-sentinel is-error" id="load-more-sentinel" role="alert"><span>${escapeHtml(state.loadMoreError)}</span><button class="load-more" id="load-more-retry" type="button">重试</button></div>`;
+  }
+  if (loadMoreInFlight) {
+    return `<div class="load-more-sentinel is-loading" id="load-more-sentinel" role="status"><span class="spinner"></span><span>正在加载更多…</span></div>`;
+  }
+  return `<div class="load-more-sentinel" id="load-more-sentinel"><button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${formatCount(shown)} / ${formatCount(total)}</button></div>`;
+}
+
+function renderMediaAreaInner(): string {
+  return state.page.items.length
+    ? `${renderMediaGrid()}${renderLoadMoreFooter()}`
+    : renderLibraryEmpty();
+}
+
+function renderPrimaryFilters(): string {
   // Type tabs are exclusive with 收藏/连拍 secondary filters, matching the
   // original 收藏 rule so switching tabs always replaces the whole filter set.
   const secondaryActive = state.favoriteOnly || state.burstOnly;
   const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
   const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
-  if (!state.tags.length) {
-    return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
-  }
-  const tags = state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}</button>`).join("");
-  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${tags}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`;
+  const secondaryParts = secondaryFilterParts();
+  const hasSecondary = secondaryParts.length > 0;
+  const expanded = state.filtersExpanded;
+  const toggleLabel = hasSecondary && !expanded
+    ? `筛选 (${secondaryParts.length})`
+    : expanded ? "筛选" : "筛选";
+  const summary = hasSecondary && !expanded
+    ? `<span class="filter-summary">${escapeHtml(secondaryParts.join(" · "))}</span><button class="text-button clear-summary-filters" type="button">清除</button>`
+    : "";
+  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><button class="filter-chip filter-toggle ${hasSecondary ? "has-active" : ""}" type="button" id="toggle-advanced-filters" aria-expanded="${expanded}" aria-controls="advanced-filters">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${expanded ? "▴" : "▾"}</span></button>${summary}`;
+}
+
+function renderAdvancedFilters(): string {
+  const tagBlock = state.tags.length
+    ? `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}</button>`).join("")}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`
+    : `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
+  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" type="button">清除筛选</button>` : ""}</div>`;
 }
 
 function renderRatingFilter(): string {
@@ -1946,11 +2030,13 @@ function render(): void {
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
-    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row">${renderKindFilters()}</div>${renderDateRangeControls()}</div><div class="toolbar-right">${renderRatingFilter()}<label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${hasItems ? `${renderMediaGrid()}${state.page.total > state.page.items.length ? `<button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${state.page.items.length} / ${state.page.total}</button>` : ""}` : renderLibraryEmpty()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
+    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
+    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
   if (hasItems) observePreviews();
+  bindLoadMoreEvents();
+  observeLoadMore();
   const nextContent = app.querySelector<HTMLElement>(".content");
   if (nextContent) {
     nextContent.scrollTop = previousScrollTop;
@@ -1985,6 +2071,37 @@ function renderPreview(): string {
     </footer>
     <button class="immersive-exit" id="preview-immersive-exit" type="button" aria-label="退出沉浸查看">退出沉浸</button>
   </div></div>`;
+}
+
+/** Rebind grid card interactions after a media-area-only patch. */
+function bindMediaCardEvents(): void {
+  app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
+    if (card.dataset.bound) return;
+    card.dataset.bound = "1";
+    const open = () => {
+      state.previewIndex = Number(card.dataset.index);
+      previewImmersiveOpen = state.previewMode === "immersive";
+      render();
+      void loadModalAsset();
+    };
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const card = button.closest<HTMLElement>(".media-card");
+      const index = Number(card?.dataset.index ?? 0);
+      toggleSelection(button.dataset.select!, index, event.shiftKey);
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); });
+  });
 }
 
 function bindEvents(): void {
@@ -2095,21 +2212,12 @@ function bindEvents(): void {
     state.datePrefix = undefined;
     void refreshMedia();
   }));
-  app.querySelector<HTMLButtonElement>("#clear-all-filters")?.addEventListener("click", () => {
-    state.search = "";
-    searchDraft = "";
-    state.kind = undefined;
-    state.favoriteOnly = false;
-    state.burstOnly = false;
-    state.datePrefix = undefined;
-    state.dateFrom = undefined;
-    state.dateTo = undefined;
-    state.firstSeenFrom = null;
-    state.tagIds.clear();
-    state.ratingEq = null;
-    state.ratingMin = null;
-    resetSidebarExpansionForSelection();
-    void refreshMedia();
+  app.querySelectorAll<HTMLButtonElement>("#clear-all-filters, .clear-summary-filters, .advanced-clear").forEach((button) => {
+    button.addEventListener("click", () => clearAllFilters());
+  });
+  app.querySelector<HTMLButtonElement>("#toggle-advanced-filters")?.addEventListener("click", () => {
+    state.filtersExpanded = !state.filtersExpanded;
+    render();
   });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
@@ -2207,7 +2315,6 @@ function bindEvents(): void {
     state.error = null;
     render();
   });
-  app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
   bindSelectionToolbarEvents();
   app.querySelector<HTMLButtonElement>("#cancel-delete-confirm")?.addEventListener("click", cancelDeleteConfirm);
   app.querySelector<HTMLButtonElement>("#cancel-delete-confirm-footer")?.addEventListener("click", cancelDeleteConfirm);
@@ -2224,23 +2331,7 @@ function bindEvents(): void {
     render();
   });
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
-  app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
-    const open = () => {
-      state.previewIndex = Number(card.dataset.index);
-      previewImmersiveOpen = state.previewMode === "immersive";
-      render();
-      void loadModalAsset();
-    };
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const card = button.closest<HTMLElement>(".media-card");
-    const index = Number(card?.dataset.index ?? 0);
-    toggleSelection(button.dataset.select!, index, event.shiftKey);
-  }));
-  app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); }));
+  bindMediaCardEvents();
   app.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
     void openFolderForItem(button.dataset.openFolder!);
@@ -2610,6 +2701,7 @@ async function openFolderForItem(mediaItemId: string): Promise<void> {
 }
 
 function applyThumbnailToCard(id: string, asset: Awaited<ReturnType<typeof getMediaThumbnail>>): void {
+  thumbnailUrlCache.set(id, asset.url);
   const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find((element) => element.dataset.preview === id);
   const item = state.page.items.find((entry) => entry.id === id);
   if (!target || !item) return;
@@ -3050,6 +3142,10 @@ function movePreview(delta: number): void {
 async function refreshMedia(): Promise<void> {
   if (!state.library) { renderSettingsAware(); return; }
   const token = ++mediaQueryToken;
+  // Abandon any in-flight load-more from the previous filter/page.
+  loadMoreInFlight = false;
+  state.loadMoreError = null;
+  disconnectLoadMoreObserver();
   state.loading = true; state.error = null; renderSettingsAware();
   try {
     const page = await queryMedia({ ...currentQueryFields(), limit: 120 });
@@ -3075,9 +3171,78 @@ async function refreshMedia(): Promise<void> {
   }
 }
 
+function disconnectLoadMoreObserver(): void {
+  loadMoreObserver?.disconnect();
+  loadMoreObserver = null;
+}
+
+/** Scroll root: prefer `.content` when it is the scroller; else viewport (mobile). */
+function loadMoreScrollRoot(): Element | null {
+  const content = app.querySelector<HTMLElement>(".content");
+  if (content && content.scrollHeight > content.clientHeight + 1) return content;
+  return null;
+}
+
+function bindLoadMoreEvents(): void {
+  app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
+  app.querySelector<HTMLButtonElement>("#load-more-retry")?.addEventListener("click", () => {
+    state.loadMoreError = null;
+    void loadMore();
+  });
+}
+
+function observeLoadMore(): void {
+  disconnectLoadMoreObserver();
+  const sentinel = app.querySelector<HTMLElement>("#load-more-sentinel");
+  if (!sentinel || state.loadMoreError || loadMoreInFlight) return;
+  if (state.page.items.length >= state.page.total) return;
+  if (!("IntersectionObserver" in window)) return;
+  const token = mediaQueryToken;
+  loadMoreObserver = new IntersectionObserver((entries) => {
+    if (token !== mediaQueryToken) {
+      disconnectLoadMoreObserver();
+      return;
+    }
+    if (entries.some((entry) => entry.isIntersecting)) void loadMore();
+  }, { root: loadMoreScrollRoot(), rootMargin: "200px" });
+  loadMoreObserver.observe(sentinel);
+}
+
+/** Patch only the media area so appended pages keep scroll + existing thumbs. */
+function updateMediaArea(): void {
+  const area = app.querySelector<HTMLElement>(".media-area");
+  if (!area) {
+    render();
+    return;
+  }
+  area.innerHTML = renderMediaAreaInner();
+  if (state.page.items.length) {
+    bindMediaCardEvents();
+    observePreviews();
+  }
+  bindLoadMoreEvents();
+  observeLoadMore();
+}
+
+function updateLoadMoreFooter(): void {
+  const existing = app.querySelector<HTMLElement>("#load-more-sentinel");
+  const html = renderLoadMoreFooter();
+  if (existing) {
+    if (!html) existing.remove();
+    else existing.outerHTML = html;
+  } else if (html) {
+    app.querySelector<HTMLElement>(".media-area")?.insertAdjacentHTML("beforeend", html);
+  }
+  bindLoadMoreEvents();
+  observeLoadMore();
+}
+
 async function loadMore(): Promise<void> {
+  if (loadMoreInFlight || state.loadMoreError) return;
   if (!state.library || state.page.items.length >= state.page.total) return;
   const token = mediaQueryToken;
+  loadMoreInFlight = true;
+  updateLoadMoreFooter();
   try {
     const next = await queryMedia({ ...currentQueryFields(), offset: state.page.items.length, limit: 120 });
     // Discard pages that finished after a filter switch.
@@ -3087,11 +3252,18 @@ async function loadMore(): Promise<void> {
       if (item.favorite) state.favorites.add(item.id);
       if (item.rating > 0) state.ratings.set(item.id, item.rating);
     });
-    render();
+    state.loadMoreError = null;
   }
   catch (error) {
     if (token !== mediaQueryToken) return;
-    state.error = toUserMessage(error, "加载更多媒体失败"); render();
+    // Keep the failure in the sentinel (persistent + retry), not the top banner.
+    state.loadMoreError = toUserMessage(error, "加载更多媒体失败");
+  }
+  finally {
+    if (token === mediaQueryToken) {
+      loadMoreInFlight = false;
+      updateMediaArea();
+    }
   }
 }
 
@@ -3149,6 +3321,7 @@ function applyDeleteToGrid(result: DeleteResultDto, requestedIds: string[]): voi
     state.ratings.delete(id);
     if (deleted.has(id)) {
       thumbnailRequests.delete(id);
+      thumbnailUrlCache.delete(id);
       modalThumbnailRequests.delete(id);
       previewAssetCache.delete(id);
     }
