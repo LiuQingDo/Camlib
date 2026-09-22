@@ -955,19 +955,39 @@ async function applyBatchFavorite(favorite: boolean): Promise<void> {
   }
 }
 
-/** Lightweight success toast that does not rebuild the media grid. */
-function showTransientNotice(message: string): void {
-  if (!message) return;
+/** Module-level timer so successive toasts never stack dismiss handles. */
+let transientNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearTransientNotice(): void {
+  if (transientNoticeTimer !== null) {
+    clearTimeout(transientNoticeTimer);
+    transientNoticeTimer = null;
+  }
   app.querySelector("#batch-notice")?.remove();
+}
+
+/**
+ * Lightweight toast that does not rebuild the media grid.
+ * Success auto-dismisses (~3s); error stays until closed.
+ */
+function showTransientNotice(message: string, kind: "success" | "error" = "success"): void {
+  if (!message) return;
+  clearTransientNotice();
   const sticky = app.querySelector(".sticky-controls");
   if (!sticky) return;
   sticky.insertAdjacentHTML(
     "afterend",
-    `<div class="notice-banner is-success" id="batch-notice" role="status"><span class="notice-icon">✓</span><span>${escapeHtml(message)}</span><button class="text-button" id="dismiss-batch-notice" type="button">关闭</button></div>`,
+    `<div class="notice-banner toast-in${kind === "error" ? " is-error" : " is-success"}" id="batch-notice" role="${kind === "error" ? "alert" : "status"}"><span class="notice-icon">${kind === "error" ? "!" : "✓"}</span><span>${escapeHtml(message)}</span><button class="text-button" id="dismiss-batch-notice" type="button">关闭</button></div>`,
   );
   app.querySelector<HTMLButtonElement>("#dismiss-batch-notice")?.addEventListener("click", () => {
-    app.querySelector("#batch-notice")?.remove();
+    clearTransientNotice();
   });
+  if (kind === "success") {
+    transientNoticeTimer = setTimeout(() => {
+      transientNoticeTimer = null;
+      app.querySelector("#batch-notice")?.remove();
+    }, 3000);
+  }
 }
 
 async function applyBatchTag(attach: boolean): Promise<void> {
@@ -1197,7 +1217,7 @@ function renderStatusBannerBase(): string {
   }
   if (state.availability === "disconnected") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。已禁用扫描、删除、缩略图重建与备份目标写入。请重新连接磁盘，或在设置中更换媒体库路径。</span></div><button class="text-button" id="rescan-button" type="button">重新检测</button></div>`;
   if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>当前卷与记录的媒体库不一致。请在设置中重新选择可访问的媒体库目录。</span></div><button class="text-button" id="open-settings-from-banner" type="button">打开设置</button></div>`;
-  if (state.error) return `<div class="notice-banner is-error"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span></div>`;
+  if (state.error) return `<div class="notice-banner is-error" role="alert"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span><button class="text-button" id="dismiss-state-error" type="button">关闭</button></div>`;
   if (state.recentTaskNotice) return `<div class="notice-banner is-info"><span class="notice-icon">i</span><div><strong>最近任务</strong><span>${escapeHtml(state.recentTaskNotice)}</span></div><button class="text-button" id="dismiss-recent-task" type="button">知道了</button></div>`;
   return "";
 }
@@ -1841,7 +1861,7 @@ function renderSettingsPanel(): string {
       <header class="settings-header">
         <div>
           <h2 id="settings-title">设置</h2>
-          <span>库状态 · 索引 · 缩略图 · 备份 · 查看与系统 · 关于</span>
+          <span>${SETTINGS_SECTIONS.map((section) => section.label).join(" · ")}</span>
         </div>
         <button class="icon-button" type="button" id="settings-close" aria-label="关闭设置">×</button>
       </header>
@@ -2150,6 +2170,10 @@ function bindEvents(): void {
   app.querySelector<HTMLButtonElement>("#open-settings-from-banner")?.addEventListener("click", () => void openSettings("library"));
   app.querySelector<HTMLButtonElement>("#dismiss-recent-task")?.addEventListener("click", () => {
     state.recentTaskNotice = null;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>("#dismiss-state-error")?.addEventListener("click", () => {
+    state.error = null;
     render();
   });
   app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
