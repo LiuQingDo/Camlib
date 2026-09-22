@@ -1,6 +1,6 @@
 [package]
 name = "camlib"
-version = "0.1.2"
+version = "0.2.0"
 description = "Personal camera media library desktop app (Windows-first)"
 authors = ["LiuQingDo"]
 edition = "2021"

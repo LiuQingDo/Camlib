@@ -1,7 +1,7 @@
 {
   "name": "camlib",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Personal camera media library — Windows-first local desktop app for DCIM backup, browse, and manage",
   "license": "MIT",
   "author": "LiuQingDo",

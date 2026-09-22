@@ -15,8 +15,16 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
+Assets: [GitHub Release v0.2.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.2.0) — `Camlib_0.2.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.2.0_x64_en-US.msi` (WiX)
+
 ### Added
 
+- Persisted light/dark `ui_theme` preference
+- Collapsible filters, infinite-scroll load-more, and thumbnail cache
+- SVG star ratings, duration badge, and preview skeleton
+- Auto-dismissing toast kinds and dismissible error banner
 - Open-source scaffolding: GitHub Actions CI, issue / PR templates, `CONTRIBUTING.md`, `SECURITY.md`, this changelog
 - Repo and package metadata (description, repository links, keywords)
 
@@ -55,7 +63,8 @@ Initial line: local media library (scan, browse, filter), favorites / tags / rat
 
 <!-- Link refs -->
 
-[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.2.0
 [0.1.2]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.1.2
-[0.1.1]: https://github.com/LiuQingDo/Camlib/compare/v0.1.0...v0.1.2
+[0.1.1]: https://github.com/LiuQingDo/Camlib/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.1.0
