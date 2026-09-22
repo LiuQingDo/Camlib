@@ -192,7 +192,7 @@ Camlib/
 │  │  ├─ deletion.rs       # Recycle Bin deletes
 │  │  └─ db/               # SQLite migrations & queries
 │  └─ resources/ffmpeg/    # Local ffmpeg placement (not in Git)
-├─ docs/                   # Requirements, architecture, data model, notes (Chinese)
+├─ docs/                   # Requirements, architecture, data model, contracts, release checklist (Chinese)
 └─ package.json
 ```
 
@@ -203,10 +203,8 @@ Camlib/
 | [`docs/requirements.md`](docs/requirements.md) | Product requirements & acceptance (Chinese) |
 | [`docs/architecture.md`](docs/architecture.md) | Current architecture & module boundaries (Chinese) |
 | [`docs/data-model.md`](docs/data-model.md) | SQLite model (migrations win on conflict) (Chinese) |
-| [`docs/development-notes.md`](docs/development-notes.md) | Command API, errors, path safety, tests (Chinese) |
+| [`docs/development-notes.md`](docs/development-notes.md) | Command API, errors, path safety, test contracts (Chinese) |
 | [`docs/release-checklist.md`](docs/release-checklist.md) | Pre-release checklist (Chinese) |
-| [`docs/usability-dev-sessions.md`](docs/usability-dev-sessions.md) | Usability session notes (Chinese) |
-| [`docs/ux-style-plan.md`](docs/ux-style-plan.md) | UX/style plan draft (Chinese) |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |

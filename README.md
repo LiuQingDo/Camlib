@@ -190,7 +190,7 @@ Camlib/
 │  │  ├─ deletion.rs       # 回收站删除
 │  │  └─ db/               # SQLite 迁移与查询
 │  └─ resources/ffmpeg/    # 本地放置 ffmpeg（不进 Git）
-├─ docs/                   # 需求、架构、数据模型、开发笔记
+├─ docs/                   # 需求、架构、数据模型、开发合约、发布清单
 └─ package.json
 ```
 
@@ -201,10 +201,8 @@ Camlib/
 | [`docs/requirements.md`](docs/requirements.md) | 产品需求与验收标准 |
 | [`docs/architecture.md`](docs/architecture.md) | 当前架构与模块边界 |
 | [`docs/data-model.md`](docs/data-model.md) | SQLite 数据模型（以 migrations 为准） |
-| [`docs/development-notes.md`](docs/development-notes.md) | Command API、错误契约、路径安全、测试 |
+| [`docs/development-notes.md`](docs/development-notes.md) | Command API、错误契约、路径安全、测试合约 |
 | [`docs/release-checklist.md`](docs/release-checklist.md) | 发布前检查清单 |
-| [`docs/usability-dev-sessions.md`](docs/usability-dev-sessions.md) | 可用性打磨记录与延后项 |
-| [`docs/ux-style-plan.md`](docs/ux-style-plan.md) | 样式与体验计划（草稿） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南（环境、检查项、硬性约束） |
 | [`SECURITY.md`](SECURITY.md) | 漏洞报告渠道与安全边界 |

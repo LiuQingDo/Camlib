@@ -1,6 +1,6 @@
 # Camlib 开发合约
 
-> 对齐当前实现（S9 后）。命令注册见 `src-tauri/src/lib.rs` `invoke_handler`；前端封装见 `src/api/`。  
+> 对齐当前实现。命令注册见 `src-tauri/src/lib.rs` `invoke_handler`；前端封装见 `src/api/`。  
 > 错误契约被 `src-tauri/src/errors.rs` 与 `src/api/errors.ts` 引用，改动需两边同步。
 
 ## 1. Command API（已实现）
@@ -19,7 +19,7 @@ JSON 字段使用 camelCase（Rust 内部 snake_case，`serde` 负责映射）�
 | `set_thumbnail_cache_dir` | 设置缩略图缓存目录 |
 | `set_backup_conflict_policy` | 备份冲突策略 |
 | `set_backup_ignore_extensions` | 备份忽略扩展名 |
-| `set_ui_prefs` | UI 偏好（density / sort 等，走 Rust，非 localStorage） |
+| `set_ui_prefs` | UI 偏好（density / sort / ui_theme 等，走 Rust，非 localStorage） |
 | `set_auto_scan_on_startup` | 启动自动增量扫描开关 |
 | `set_notifications_enabled` | 系统通知开关 |
 | `set_close_behavior` | 关闭行为（退出 / 托盘） |
@@ -194,4 +194,5 @@ cargo check
 2. 原始媒体默认只读；删除必须进 Windows 回收站；备份不得改相机源盘。
 3. 前端不拼物理路径、不把业务状态写入 `localStorage`。
 4. 一会话一主题；`pnpm build` + `cargo test` 通过后再收工。
-5. 修改 command / 错误码 / 表结构时，同步更新本文、`data-model.md` 与前端 `api` 层。
+5. UI 偏好（含浅色/深色主题）一律走 `set_ui_prefs` / `app_settings`，禁止 `localStorage`。
+6. 修改 command / 错误码 / 表结构时，同步更新本文、`data-model.md` 与前端 `api` 层。
