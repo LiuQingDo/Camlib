@@ -6,7 +6,14 @@ export interface VolumeInfo {
   volume_id: string | null;
 }
 
-export type UiSortMode = "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
+export type UiSortMode =
+  | "newest"
+  | "oldest"
+  | "name"
+  | "rating-desc"
+  | "rating-asc"
+  | "size-desc"
+  | "size-asc";
 
 /** Default media preview surface when a card is opened. */
 export type UiPreviewMode = "standard" | "immersive";

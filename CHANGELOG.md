@@ -15,6 +15,14 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Added
+
+- Sort media by file size (`文件大→小` / `文件小→大`); the choice persists as part of UI preferences
+
+### Fixed
+
+- Sort dropdown reverted to 最新 after choosing 评分/大小 sorts: `ui_sort` was serialized as camelCase (`ratingDesc`) while the frontend expects kebab-case (`rating-desc`); persisted values from older builds still load correctly
+
 ## [0.2.0] - 2026-09-21
 
 Assets: [GitHub Release v0.2.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.2.0) — `Camlib_0.2.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.2.0_x64_en-US.msi` (WiX)

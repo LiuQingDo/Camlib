@@ -752,6 +752,16 @@ impl Repository {
                  CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
                  m.capture_date DESC, m.display_name COLLATE NATURAL_NOCASE DESC, m.id DESC"
             ),
+            // `total_size_bytes` is always populated (0 when unknown), so size
+            // sorts have no NULL branch; date/name tie breakers keep runs stable.
+            MediaSort::SizeDesc => "m.total_size_bytes DESC,
+                 CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
+                 m.capture_date DESC, m.display_name COLLATE NATURAL_NOCASE DESC, m.id DESC"
+                .to_owned(),
+            MediaSort::SizeAsc => "m.total_size_bytes ASC,
+                 CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
+                 m.capture_date DESC, m.display_name COLLATE NATURAL_NOCASE DESC, m.id DESC"
+                .to_owned(),
             MediaSort::Newest => format!(
                 "CASE WHEN m.capture_date IS NULL THEN 1 ELSE 0 END,
                  m.capture_date DESC, m.capture_at DESC,
@@ -2002,6 +2012,8 @@ pub enum MediaSort {
     Name,
     RatingDesc,
     RatingAsc,
+    SizeDesc,
+    SizeAsc,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -3118,6 +3130,47 @@ mod tests {
             .set_rating("photo-low", 9, "2026-01-04T00:00:00Z")
             .unwrap_err();
         assert!(error.to_string().contains("0–5"));
+    }
+
+    #[test]
+    fn size_sort_orders_by_total_size_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("camlib.sqlite3");
+        let repository = Repository::open(&database).unwrap();
+        repository.create_library(library()).unwrap();
+        for (id, size) in [
+            ("photo-small", 100_i64),
+            ("photo-large", 9000),
+            ("photo-mid", 1000),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.total_size_bytes = size;
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let ids = |sort: MediaSort| -> Vec<String> {
+            repository
+                .query_media(MediaQuery {
+                    library_id: "library-1".into(),
+                    limit: 10,
+                    sort,
+                    ..Default::default()
+                })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|media| media.id)
+                .collect()
+        };
+
+        assert_eq!(
+            ids(MediaSort::SizeDesc),
+            ["photo-large", "photo-mid", "photo-small"]
+        );
+        assert_eq!(
+            ids(MediaSort::SizeAsc),
+            ["photo-small", "photo-mid", "photo-large"]
+        );
     }
 
     #[test]

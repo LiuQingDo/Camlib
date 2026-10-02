@@ -130,7 +130,7 @@ export interface MediaQueryInput {
   ratingMin?: number;
   offset?: number;
   limit?: number;
-  sort?: "newest" | "oldest" | "name" | "rating-desc" | "rating-asc";
+  sort?: "newest" | "oldest" | "name" | "rating-desc" | "rating-asc" | "size-desc" | "size-asc";
 }
 
 export interface DateFacetDto {

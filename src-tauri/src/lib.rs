@@ -369,6 +369,8 @@ fn media_query(
         Some("name") => MediaSort::Name,
         Some("rating-desc") => MediaSort::RatingDesc,
         Some("rating-asc") => MediaSort::RatingAsc,
+        Some("size-desc") => MediaSort::SizeDesc,
+        Some("size-asc") => MediaSort::SizeAsc,
         _ => MediaSort::Newest,
     };
     state.with_infrastructure(|infrastructure| {

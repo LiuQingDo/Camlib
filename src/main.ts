@@ -2155,7 +2155,7 @@ function render(): void {
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
-    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
+    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
     <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
@@ -2863,6 +2863,12 @@ async function saveSystemSettings(): Promise<void> {
 
 function clampPreviewMode(value: string | undefined | null): UiPreviewMode {
   return value === "immersive" ? "immersive" : "standard";
+}
+
+function clampSort(value: string | undefined | null): SortMode {
+  return value === "oldest" || value === "name" || value === "rating-desc" || value === "rating-asc" || value === "size-desc" || value === "size-asc"
+    ? value
+    : "newest";
 }
 
 function clampTheme(value: string | undefined | null): UiTheme {
@@ -3687,7 +3693,7 @@ async function persistUiPrefs(input: {
   try {
     const settings = await setUiPrefs(input);
     state.density = clampDensity(settings.ui_density);
-    state.sort = settings.ui_sort;
+    state.sort = clampSort(settings.ui_sort);
     state.previewMode = clampPreviewMode(settings.ui_preview_mode);
     state.theme = clampTheme(settings.ui_theme);
   } catch (error) {
@@ -4010,7 +4016,7 @@ async function bootstrap(): Promise<void> {
     state.backupMergeSegments = infra.settings.backup_merge_segments;
     state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
     state.density = clampDensity(infra.settings.ui_density);
-    state.sort = infra.settings.ui_sort;
+    state.sort = clampSort(infra.settings.ui_sort);
     state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
     state.theme = clampTheme(infra.settings.ui_theme);
     applyTheme(state.theme);

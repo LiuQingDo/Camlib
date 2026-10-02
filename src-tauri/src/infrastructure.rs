@@ -5,7 +5,7 @@
 //! registered library volume.
 
 use crate::db::{ConflictPolicy, DbError, LibraryState, NewLibrary, Repository};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -21,14 +21,18 @@ pub struct VolumeInfo {
     pub volume_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+// Serialized in kebab-case ("rating-desc") so the JSON matches `UiSort::parse`
+// and the frontend `UiSortMode` union. Values written by older builds use the
+// camelCase spelling ("ratingDesc"); loading still accepts those.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiSort {
     Newest,
     Oldest,
     Name,
     RatingDesc,
     RatingAsc,
+    SizeDesc,
+    SizeAsc,
 }
 
 impl Default for UiSort {
@@ -38,7 +42,6 @@ impl Default for UiSort {
 }
 
 impl UiSort {
-    #[allow(dead_code)]
     fn as_str(&self) -> &'static str {
         match self {
             Self::Newest => "newest",
@@ -46,6 +49,8 @@ impl UiSort {
             Self::Name => "name",
             Self::RatingDesc => "rating-desc",
             Self::RatingAsc => "rating-asc",
+            Self::SizeDesc => "size-desc",
+            Self::SizeAsc => "size-asc",
         }
     }
 
@@ -54,12 +59,35 @@ impl UiSort {
             "newest" => Ok(Self::Newest),
             "oldest" => Ok(Self::Oldest),
             "name" => Ok(Self::Name),
-            "rating-desc" => Ok(Self::RatingDesc),
-            "rating-asc" => Ok(Self::RatingAsc),
+            // Second spelling: settings.json written by builds that serialized
+            // this enum as camelCase.
+            "rating-desc" | "ratingDesc" => Ok(Self::RatingDesc),
+            "rating-asc" | "ratingAsc" => Ok(Self::RatingAsc),
+            "size-desc" | "sizeDesc" => Ok(Self::SizeDesc),
+            "size-asc" | "sizeAsc" => Ok(Self::SizeAsc),
             other => Err(InfrastructureError::InvalidSettings(format!(
                 "排序方式无效: {other}"
             ))),
         }
+    }
+}
+
+impl Serialize for UiSort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for UiSort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1309,6 +1337,34 @@ mod tests {
         assert_eq!(settings.ui_preview_mode, UiPreviewMode::Immersive);
         assert_eq!(settings.ui_theme, UiTheme::Dark);
         assert!(!settings.auto_scan_on_startup);
+    }
+
+    #[test]
+    fn ui_sort_persists_kebab_case_and_still_loads_legacy_camel_case() {
+        let (temp_dir, infrastructure) = test_infrastructure();
+        let settings_path = temp_dir.path().join("app-data").join("settings.json");
+
+        // The persisted JSON must match the frontend UiSortMode union exactly.
+        let mut disk = DiskSettings::from(&infrastructure.settings().unwrap());
+        disk.ui_sort = Some(UiSort::RatingDesc);
+        let json = serde_json::to_value(&disk).expect("serialize settings");
+        assert_eq!(json["ui_sort"], "rating-desc");
+
+        // settings.json written before kebab-case serialization carries camelCase.
+        let mut legacy = json;
+        legacy["ui_sort"] = serde_json::Value::String("ratingAsc".into());
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy settings"),
+        )
+        .expect("write legacy settings");
+        let loaded = Infrastructure::open(settings_path, temp_dir.path().join("cache"))
+            .expect("load legacy settings");
+        assert_eq!(loaded.settings().unwrap().ui_sort, UiSort::RatingAsc);
+
+        assert_eq!(UiSort::parse("size-desc").unwrap(), UiSort::SizeDesc);
+        assert_eq!(UiSort::parse("sizeAsc").unwrap(), UiSort::SizeAsc);
+        assert!(UiSort::parse("bogus").is_err());
     }
 
     #[test]
