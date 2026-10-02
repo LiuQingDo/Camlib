@@ -696,7 +696,11 @@ fn run(
         let display_name = if merge_sources.len() < 2 {
             item.source_relative.clone()
         } else {
-            format!("{}（合并 {} 段）", item.file_name_hint(), merge_sources.len())
+            format!(
+                "{}（合并 {} 段）",
+                item.file_name_hint(),
+                merge_sources.len()
+            )
         };
         emit(
             app,
@@ -1197,9 +1201,15 @@ pub(crate) fn merge_and_verify(
         .map_err(|error| CopyError::Message(format!("刷新合并列表失败: {error}")))?;
     drop(list);
     if expected_size > 0 && listed < expected_size {
-        return Err(CopyError::Message("源分段大小已变化，请重新预览".to_owned()));
+        return Err(CopyError::Message(
+            "源分段大小已变化，请重新预览".to_owned(),
+        ));
     }
-    let expected_size = if expected_size > 0 { expected_size } else { listed };
+    let expected_size = if expected_size > 0 {
+        expected_size
+    } else {
+        listed
+    };
 
     let mut log_file = OpenOptions::new()
         .write(true)
@@ -1235,11 +1245,9 @@ pub(crate) fn merge_and_verify(
     command
         .arg(ffmpeg_path_string(&temp))
         .stdout(Stdio::null())
-        .stderr(Stdio::from(
-            log_file
-                .try_clone()
-                .map_err(|error| CopyError::Message(format!("打开合并日志失败: {error}")))?,
-        ));
+        .stderr(Stdio::from(log_file.try_clone().map_err(|error| {
+            CopyError::Message(format!("打开合并日志失败: {error}"))
+        })?));
     hide_console_window(&mut command);
     let mut child = command
         .spawn()
@@ -1501,7 +1509,10 @@ impl BackupItemHint for BackupItem {
 /// trailing file counter (`_333`, `_334`). Different timestamps mean different
 /// recordings even when the counters are consecutive.
 pub(crate) fn parse_segment_key(file_name: &str) -> Option<(String, u64)> {
-    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file_name);
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
     let (prefix, seq) = stem.rsplit_once('_')?;
     if !seq.bytes().all(|byte| byte.is_ascii_digit()) || seq.is_empty() {
         return None;
@@ -1627,7 +1638,10 @@ fn collapse_segment_groups(items: Vec<BackupItemPreviewDto>) -> Vec<BackupItemPr
         if item.kind.as_deref() != Some("视频") {
             continue;
         }
-        if !matches!(item.status, BackupItemStatus::Ready | BackupItemStatus::Conflict) {
+        if !matches!(
+            item.status,
+            BackupItemStatus::Ready | BackupItemStatus::Conflict
+        ) {
             continue;
         }
         let Some((key, _seq)) = parse_segment_key(&item.file_name) else {
@@ -1661,11 +1675,9 @@ fn collapse_segment_groups(items: Vec<BackupItemPreviewDto>) -> Vec<BackupItemPr
             if run.iter().any(|index| {
                 let item = &items[*index];
                 item.extension.to_ascii_lowercase() != extension
-                    || item
-                        .destination_relative
-                        .as_ref()
-                        .and_then(|path| Path::new(path).parent().map(|parent| parent.to_path_buf()))
-                        != dest_dir
+                    || item.destination_relative.as_ref().and_then(|path| {
+                        Path::new(path).parent().map(|parent| parent.to_path_buf())
+                    }) != dest_dir
             }) {
                 continue;
             }
@@ -2385,14 +2397,8 @@ mod tests {
 
     #[test]
     fn output_format_for_maps_camera_containers() {
-        assert_eq!(
-            output_format_for(Path::new("VID_x.mp4")),
-            Some("mp4")
-        );
-        assert_eq!(
-            output_format_for(Path::new("VID_x.MOV")),
-            Some("mov")
-        );
+        assert_eq!(output_format_for(Path::new("VID_x.mp4")), Some("mp4"));
+        assert_eq!(output_format_for(Path::new("VID_x.MOV")), Some("mov"));
         assert_eq!(output_format_for(Path::new("clip.bin")), None);
     }
 
@@ -2655,7 +2661,9 @@ mod tests {
         assert_eq!(preview.ready_files, 2);
         assert_eq!(preview.total_bytes, 35);
 
-        let items = repository.list_backup_items(&preview.backup_run_id).unwrap();
+        let items = repository
+            .list_backup_items(&preview.backup_run_id)
+            .unwrap();
         let merge_item = items
             .iter()
             .find(|item| item.source_relative.contains("VID_20261001_153408_333"))

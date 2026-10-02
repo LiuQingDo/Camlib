@@ -996,7 +996,11 @@ mod tests {
         fs::write(day.join("IMG_0002.PNG"), b"duplicate-b").unwrap();
         fs::write(day.join("README.txt"), b"ignored").unwrap();
         fs::write(day.join(".VID_20260811_201416.camlib-part.mp4"), b"scratch").unwrap();
-        fs::write(day.join(".VID_20260811_201416.camlib-merge.mp4"), b"scratch").unwrap();
+        fs::write(
+            day.join(".VID_20260811_201416.camlib-merge.mp4"),
+            b"scratch",
+        )
+        .unwrap();
 
         let repository = Repository::open_in_memory().unwrap();
         repository

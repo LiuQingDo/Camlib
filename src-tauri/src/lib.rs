@@ -139,9 +139,7 @@ fn set_backup_merge_segments(
     enabled: bool,
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, AppError> {
-    state.with_infrastructure(|infrastructure| {
-        infrastructure.set_backup_merge_segments(enabled)
-    })
+    state.with_infrastructure(|infrastructure| infrastructure.set_backup_merge_segments(enabled))
 }
 
 /// Recent scan_runs rows for the settings index summary.
@@ -1125,12 +1123,13 @@ fn library_merge_preview(
     library_id: String,
     state: State<'_, InfrastructureState>,
 ) -> Result<library_merge::LibraryMergePreviewDto, AppError> {
-    state.with_infrastructure(|infrastructure| {
-        library_merge::preview(infrastructure.repository(), &library_id).map_err(|error| {
-            infrastructure::InfrastructureError::InvalidPath(error.to_string())
+    state
+        .with_infrastructure(|infrastructure| {
+            library_merge::preview(infrastructure.repository(), &library_id).map_err(|error| {
+                infrastructure::InfrastructureError::InvalidPath(error.to_string())
+            })
         })
-    })
-    .map_err(AppError::from)
+        .map_err(AppError::from)
 }
 
 /// Start merging library segments. Sources stay untouched unless recycle is on.

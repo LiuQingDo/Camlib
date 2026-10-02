@@ -148,10 +148,7 @@ pub fn preview(
     let root = library_root(repository, library_id)?;
     let groups = discover_groups(&root)?;
     let group_count = groups.len() as u64;
-    let segment_count = groups
-        .iter()
-        .map(|group| group.sources.len() as u64)
-        .sum();
+    let segment_count = groups.iter().map(|group| group.sources.len() as u64).sum();
     let total_bytes = groups.iter().map(|group| group.size_bytes).sum();
     let required_temp_bytes = total_bytes;
     let free_bytes = available_space(&root);
@@ -572,17 +569,11 @@ fn collect_video_files(
     output: &mut Vec<(String, String, u64, String)>,
 ) -> Result<(), crate::errors::AppError> {
     let entries = fs::read_dir(path).map_err(|error| {
-        crate::errors::AppError::from(format!(
-            "读取媒体库目录失败 {}: {error}",
-            path.display()
-        ))
+        crate::errors::AppError::from(format!("读取媒体库目录失败 {}: {error}", path.display()))
     })?;
     for entry in entries {
         let entry = entry.map_err(|error| {
-            crate::errors::AppError::from(format!(
-                "读取媒体库目录失败 {}: {error}",
-                path.display()
-            ))
+            crate::errors::AppError::from(format!("读取媒体库目录失败 {}: {error}", path.display()))
         })?;
         let file_type = entry
             .file_type()
@@ -642,9 +633,8 @@ fn library_root(
         .get_library(library_id)
         .map_err(crate::errors::AppError::from)?
         .ok_or_else(|| crate::errors::AppError::from("媒体库不存在"))?;
-    let root = fs::canonicalize(&library.root_path).map_err(|error| {
-        crate::errors::AppError::from(format!("媒体库根目录不可用: {error}"))
-    })?;
+    let root = fs::canonicalize(&library.root_path)
+        .map_err(|error| crate::errors::AppError::from(format!("媒体库根目录不可用: {error}")))?;
     if !root.is_dir() {
         return Err(crate::errors::AppError::from("媒体库根目录不是目录"));
     }
@@ -744,34 +734,49 @@ mod tests {
     fn discovers_only_same_timestamp_groups_inside_library() {
         let root = TempDir::new().unwrap();
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
             &vec![1_u8; 10],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_153408_334.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_153408_334.mp4"),
             &vec![2_u8; 20],
         );
         write(
-            &root.path().join("2026/08/2026-08-16/视频/VID_20260816_150035_122.mp4"),
+            &root
+                .path()
+                .join("2026/08/2026-08-16/视频/VID_20260816_150035_122.mp4"),
             &vec![3_u8; 5],
         );
         write(
-            &root.path().join("2026/08/2026-08-16/视频/VID_20260816_150534_123.mp4"),
+            &root
+                .path()
+                .join("2026/08/2026-08-16/视频/VID_20260816_150534_123.mp4"),
             &vec![4_u8; 6],
         );
 
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
             &vec![5_u8; 3],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
             &vec![6_u8; 4],
         );
 
         let groups = discover_groups(root.path()).unwrap();
         assert_eq!(groups.len(), 2);
-        let keys = groups.iter().map(|group| group.group_key.as_str()).collect::<Vec<_>>();
+        let keys = groups
+            .iter()
+            .map(|group| group.group_key.as_str())
+            .collect::<Vec<_>>();
         assert!(keys.contains(&"VID_20261001_153408"));
         assert!(keys.contains(&"VID_20261001_144056"));
     }
@@ -780,23 +785,33 @@ mod tests {
     fn skips_already_merged_destination_and_nonconsecutive_counters() {
         let root = TempDir::new().unwrap();
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
             &vec![1_u8; 3],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
             &vec![2_u8; 4],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_144056.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_144056.mp4"),
             &vec![3_u8; 7],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
             &vec![4_u8; 10],
         );
         write(
-            &root.path().join("2026/10/2026-10-01/视频/VID_20261001_153408_335.mp4"),
+            &root
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_153408_335.mp4"),
             &vec![5_u8; 11],
         );
 
