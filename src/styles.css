@@ -1841,6 +1841,52 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   border-color:rgba(0,0,0,.22);
   box-shadow:0 0 0 3px rgba(0,0,0,.06);
 }
+.merge-pick-tools {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-top:10px;
+}
+.merge-pick-tools input {
+  flex:1;
+  min-width:0;
+  height:34px;
+  padding:0 10px;
+  border:1px solid rgba(0,0,0,.1);
+  border-radius:10px;
+  color:#222222;
+  background:rgba(255,255,255,.7);
+  font-size:12px;
+  outline:0;
+}
+.merge-pick-tools input:focus {
+  border-color:rgba(0,0,0,.22);
+  box-shadow:0 0 0 3px rgba(0,0,0,.06);
+}
+.merge-pick-list {
+  max-height:320px;
+  margin-top:8px;
+  overflow:auto;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  scrollbar-width:thin;
+}
+.merge-pick {
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  grid-template-areas:"check name" "check meta";
+  column-gap:8px;
+  row-gap:2px;
+  align-items:center;
+  padding:8px 10px;
+  border-radius:10px;
+  background:rgba(0,0,0,.04);
+  cursor:pointer;
+}
+.merge-pick input { grid-area:check; margin:0; }
+.merge-pick-name { grid-area:name; color:#222222; font-size:12px; word-break:break-all; }
+.merge-pick-meta { grid-area:meta; color:#6b6b6b; font-size:11px; word-break:break-all; }
 .settings-form label.settings-checkbox {
   flex-direction:row;
   align-items:center;
@@ -2258,6 +2304,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   border-color: rgba(255,255,255,.3);
   box-shadow: 0 0 0 3px rgba(255,255,255,.06);
 }
+[data-theme="dark"] .merge-pick-tools input {
+  border-color: var(--border-control);
+  color: var(--ink);
+  background: var(--control-bg);
+}
+[data-theme="dark"] .merge-pick { background: var(--inset); }
+[data-theme="dark"] .merge-pick-name { color: var(--ink); }
+[data-theme="dark"] .merge-pick-meta { color: var(--muted); }
 [data-theme="dark"] .settings-ffmpeg.is-ok { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
 [data-theme="dark"] .settings-ffmpeg.is-missing { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
 

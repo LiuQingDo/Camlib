@@ -43,18 +43,26 @@ import {
   listBackupRunItems,
   startLibraryScan,
   cancelLibraryScan,
+  previewLibraryMerge,
+  startLibraryMerge,
+  cancelLibraryMerge,
+  onLibraryMergeProgress,
   type BackupPreviewDto,
   type BackupVolumeDto,
   type BackupProgressDto,
   type BackupRunDto,
   type BackupItemDto,
   type ConflictPolicy,
+  type LibraryMergeGroupDto,
+  type LibraryMergePreviewDto,
+  type LibraryMergeProgressDto,
 } from "./api/media";
 import {
   getInfrastructureState,
   setAutoScanOnStartup,
   setBackupConflictPolicy,
   setBackupIgnoreExtensions,
+  setBackupMergeSegments,
   setLibraryRoot,
   setThumbnailCacheDir,
   setUiPrefs,
@@ -156,6 +164,7 @@ interface AppState {
   backupSourceId: string | null;
   backupTargetId: string | null;
   backupIgnoreExtensions: string;
+  backupMergeSegments: boolean;
   backupHistory: BackupRunDto[];
   backupFailedItems: BackupItemDto[];
   backupHistoryItems: BackupItemDto[];
@@ -189,6 +198,17 @@ interface AppState {
   filtersExpanded: boolean;
   /** Load-more failure message; sticky in the sentinel until retry (not the top banner). */
   loadMoreError: string | null;
+  /** Library segment-merge maintenance. */
+  libraryMergePreview: LibraryMergePreviewDto | null;
+  libraryMergeLoading: boolean;
+  libraryMergeConfirm: boolean;
+  libraryMergeRecycle: boolean;
+  /** Destination paths chosen after a library-merge preview. */
+  libraryMergeSelected: Set<string>;
+  libraryMergeFilter: string;
+  libraryMergeProgress: LibraryMergeProgressDto | null;
+  libraryMergeJobId: string | null;
+  libraryMergeNotice: string | null;
 }
 
 const state: AppState = {
@@ -246,6 +266,7 @@ const state: AppState = {
   backupSourceId: null,
   backupTargetId: null,
   backupIgnoreExtensions: ".dng, .lrv",
+  backupMergeSegments: true,
   backupHistory: [],
   backupFailedItems: [],
   backupHistoryItems: [],
@@ -276,6 +297,15 @@ const state: AppState = {
   recentTaskNotice: null,
   filtersExpanded: false,
   loadMoreError: null,
+  libraryMergePreview: null,
+  libraryMergeLoading: false,
+  libraryMergeConfirm: false,
+  libraryMergeRecycle: false,
+  libraryMergeSelected: new Set(),
+  libraryMergeFilter: "",
+  libraryMergeProgress: null,
+  libraryMergeJobId: null,
+  libraryMergeNotice: null,
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
@@ -722,6 +752,16 @@ function formatDate(date: string | null): string {
 }
 
 function formatCount(value: number): string { return new Intl.NumberFormat("zh-CN").format(value); }
+function pathBaseName(value: string): string {
+  const parts = value.split(/[/\\]/);
+  return parts[parts.length - 1] || value;
+}
+
+function mergeGroupMatches(group: LibraryMergeGroupDto, query: string): boolean {
+  if (!query) return true;
+  const haystack = [group.fileName, group.groupKey, ...group.sources.map(pathBaseName)].join("\n").toLowerCase();
+  return haystack.includes(query);
+}
 function formatSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "未知";
   if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
@@ -1406,10 +1446,16 @@ function renderBackupPanel(): string {
           <span>冲突 ${formatCount(preview.conflictFiles)}</span>
           <span>忽略 ${formatCount(preview.ignoredFiles)}</span>
           <span>素材总量 ${formatCount(preview.totalFiles)} · ${formatSize(preview.totalBytes)}</span>
+          ${preview.mergeGroupCount > 0
+            ? `<span>分段合并 <strong>${formatCount(preview.mergeGroupCount)}</strong> 组（${formatCount(preview.mergeSegmentCount)} 个分段）</span>`
+            : ""}
         </div>
+        ${preview.mergeGroups.length ? `<div class="backup-failed-list">${preview.mergeGroups.slice(0, 8).map((group) => `<div class="backup-failed-item"><span>${escapeHtml(group.segments.join(" + "))}</span><span>→ ${escapeHtml(group.fileName)} · ${formatSize(group.sizeBytes)}</span></div>`).join("")}${preview.mergeGroups.length > 8 ? `<div class="backup-failed-item"><span>…</span><span>共 ${formatCount(preview.mergeGroups.length)} 组</span></div>` : ""}</div>` : ""}
         <div class="backup-note${spaceOk ? "" : " is-danger"}">${!spaceOk
           ? `目标盘空间不足：还需约 ${formatSize(Math.max(0, preview.requiredBytes - (preview.freeBytes ?? 0)))}。请更换目标盘或释放空间后再开始；预览已保存但不会执行复制。`
-          : `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。相机源盘始终只读，复制完成后会自动扫描入库。`}</div>
+          : preview.mergeGroupCount > 0
+            ? `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。同一 VID_日期_时间 且序号连续的分段会合并成完整视频；时间不同的相邻序号保持分开。源盘只读，合并用 ffmpeg 无损拼接。复制完成后会自动扫描入库。`
+            : `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。相机源盘始终只读，复制完成后会自动扫描入库。`}</div>
         <div class="backup-actions">
           <button class="primary-button" id="backup-start-button" type="button" ${running || state.backupLoading || !spaceOk || willCopy === 0 ? "disabled" : ""}>${willCopy === 0 ? "没有需要复制的文件" : spaceOk ? "确认并开始备份" : "空间不足，无法开始"}</button>
         </div>
@@ -1428,7 +1474,9 @@ function renderBackupPanel(): string {
       ? `${formatSpeed(progress.speedBytesPerSec)} · ${formatEtaSeconds(progress.etaSeconds)}`
       : "";
     const safePoint = progress.state === "running"
-      ? "取消会在安全点停止：当前临时文件不会提交；已复制完成的文件会保留。"
+      ? progress.phase === "merging"
+        ? "正在合并分段视频。取消会在安全点停止：当前临时文件不会提交；已复制完成的文件会保留。"
+        : "取消会在安全点停止：当前临时文件不会提交；已复制完成的文件会保留。"
       : cancelled
         ? `已取消。已复制 ${formatCount(progress.fileProcessed)} 个文件保留在目标盘；可继续重试未完成项，或重新预览。`
         : done
@@ -1445,7 +1493,7 @@ function renderBackupPanel(): string {
         <div class="progress-track${progress.state === "running" && progress.bytesTotal <= 0 ? " is-indeterminate" : ""}">
           <span style="width:${progress.state === "running" && progress.bytesTotal <= 0 ? "35%" : `${progressPercent}%`}"></span>
         </div>
-        <div class="scan-current">${escapeHtml(progress.currentFile || (progress.state === "running" ? "准备中" : ""))}${liveMeta ? ` · ${liveMeta}` : ""} · ${bytesLabel}</div>
+        <div class="scan-current">${escapeHtml(progress.currentFile || (progress.state === "running" ? (progress.phase === "merging" ? "正在合并分段" : "准备中") : ""))}${liveMeta ? ` · ${liveMeta}` : ""} · ${bytesLabel}</div>
         <div class="backup-note">${safePoint}</div>
         ${progress.error || failed ? `<div class="backup-note is-danger">${escapeHtml(progress.error || "备份过程中出现错误")}</div>` : ""}
         ${(failed || cancelled) && state.backupLastRunId && state.backupFailedItems.length ? `
@@ -1494,6 +1542,7 @@ function renderBackupPanel(): string {
         <label><span>源相机盘</span><select id="backup-source" ${formDisabled || !state.backupSources.length ? "disabled" : ""}>${sourceOptions}</select></label>
         <label><span>目标媒体库</span><select id="backup-target" ${formDisabled || !state.libraries.length ? "disabled" : ""}>${targetOptions}</select></label>
         <label><span>冲突策略</span><select id="backup-conflict" ${formDisabled ? "disabled" : ""}><option value="skip_same" ${state.backupConflictPolicy === "skip_same" ? "selected" : ""}>跳过冲突</option><option value="rename" ${state.backupConflictPolicy === "rename" ? "selected" : ""}>自动重命名</option><option value="overwrite" ${state.backupConflictPolicy === "overwrite" ? "selected" : ""}>覆盖目标</option></select></label>
+        <label><span>合并分段</span><select id="backup-merge" ${formDisabled ? "disabled" : ""}><option value="on" ${state.backupMergeSegments ? "selected" : ""}>合并为完整视频</option><option value="off" ${state.backupMergeSegments ? "" : "selected"}>保留原分段</option></select></label>
         <label><span>忽略扩展名</span><input id="backup-ignore" value="${escapeHtml(state.backupIgnoreExtensions)}" aria-label="忽略扩展名" ${formDisabled ? "disabled" : ""} /></label>
         <button class="primary-button" id="backup-preview-button" type="button" ${canPreview ? "" : "disabled"}>${state.backupLoading ? "生成预览中…" : preview ? "刷新预览" : "生成预览"}</button>
       </div>
@@ -1791,6 +1840,23 @@ function renderSettingsLibrarySection(): string {
 function renderSettingsIndexSection(): string {
   const summary = state.indexSummary;
   const runs = state.scanRuns;
+  const mergePreview = state.libraryMergePreview;
+  const mergeProgress = state.libraryMergeProgress;
+  const mergeRunning = Boolean(state.libraryMergeJobId) || mergeProgress?.state === "running";
+  const mergePercent = mergeProgress && mergeProgress.bytesTotal > 0
+    ? Math.min(100, Math.max(0, Math.round(mergeProgress.bytesProcessed / mergeProgress.bytesTotal * 100)))
+    : 0;
+  const selectedGroups = mergePreview
+    ? mergePreview.groups.filter((group) => state.libraryMergeSelected.has(group.destinationRelative))
+    : [];
+  const selectedBytes = selectedGroups.reduce((sum, group) => sum + group.sizeBytes, 0);
+  const selectedSegments = selectedGroups.reduce((sum, group) => sum + group.sources.length, 0);
+  const mergeSpaceOk = !mergePreview || mergePreview.freeBytes === null || mergePreview.freeBytes >= selectedBytes;
+  const mergeQuery = state.libraryMergeFilter.trim().toLowerCase();
+  const visibleGroups = mergePreview
+    ? mergePreview.groups.filter((group) => mergeGroupMatches(group, mergeQuery))
+    : [];
+  const canStartMerge = Boolean(mergePreview) && selectedGroups.length > 0 && mergeSpaceOk && !mergeRunning;
   return `<div class="settings-section-body">
     <div class="settings-status-card">
       <h3>索引摘要</h3>
@@ -1816,6 +1882,51 @@ function renderSettingsIndexSection(): string {
         </div>
       </div>` : ""}
       ${state.scanning && state.scanProgress ? `<div class="settings-note">当前：${escapeHtml(scanStatusLabel(state.scanProgress))} · ${escapeHtml(scanPercentLabel(state.scanProgress))}<button class="text-button" type="button" id="settings-scan-cancel">取消扫描</button></div>` : ""}
+    </div>
+    <div class="settings-status-card">
+      <h3>整理历史分段</h3>
+      <div class="settings-note">把媒体库里相机自动截断的分段视频无损合并成完整长视频。只合并同一 VID_日期_时间、且末尾序号连续的文件；时间不同的相邻序号（例如 150035_122 和 150534_123）不会合并。生成预览后可以勾选其中几组，不必一次处理全部。合并成功后可选把原分段移入回收站，并自动增量扫描入库。</div>
+      ${state.libraryMergeNotice ? `<div class="settings-note">${escapeHtml(state.libraryMergeNotice)}</div>` : ""}
+      ${mergePreview ? `<div class="settings-stat-grid">
+        <div><span>已选</span><strong>${formatCount(selectedGroups.length)} / ${formatCount(mergePreview.groupCount)} 组</strong></div>
+        <div><span>分段</span><strong>${formatCount(selectedSegments)}</strong></div>
+        <div><span>大小</span><strong>${formatSize(selectedBytes)}</strong></div>
+        <div><span>目标剩余</span><strong class="${mergeSpaceOk ? "" : "is-danger"}">${mergePreview.freeBytes === null ? "不可用" : formatSize(mergePreview.freeBytes)}</strong></div>
+      </div>
+      ${mergePreview.groupCount === 0 ? `<div class="settings-note">没有需要合并的分段视频。</div>` : `
+      <div class="merge-pick-tools">
+        <input id="library-merge-filter" value="${escapeHtml(state.libraryMergeFilter)}" placeholder="筛选文件名或时间戳" aria-label="筛选分段" ${mergeRunning ? "disabled" : ""} />
+        <button class="text-button" type="button" id="library-merge-select-visible" ${mergeRunning || visibleGroups.length === 0 ? "disabled" : ""}>${mergeQuery ? "全选当前" : "全选"}</button>
+        <button class="text-button" type="button" id="library-merge-clear-visible" ${mergeRunning || visibleGroups.length === 0 ? "disabled" : ""}>${mergeQuery ? "清除当前" : "全不选"}</button>
+      </div>
+      <div class="merge-pick-list" id="library-merge-list">${visibleGroups.map((group) => `<label class="merge-pick"><input type="checkbox" data-merge-dest="${escapeHtml(group.destinationRelative)}" ${state.libraryMergeSelected.has(group.destinationRelative) ? "checked" : ""} ${mergeRunning ? "disabled" : ""} /><span class="merge-pick-name">${escapeHtml(group.sources.map(pathBaseName).join(" + "))}</span><span class="merge-pick-meta">→ ${escapeHtml(group.fileName)} · ${formatSize(group.sizeBytes)}</span></label>`).join("")}${visibleGroups.length === 0 ? `<div class="settings-note">没有符合筛选的分组。</div>` : ""}</div>
+      ${selectedGroups.length === 0 ? `<div class="settings-note">请至少勾选一组再合并。</div>` : ""}
+      ${selectedGroups.length > 0 && !mergeSpaceOk ? `<div class="settings-note is-danger">所选分段需要的空间超过目标盘剩余，无法开始合并。</div>` : ""}`}` : `<div class="settings-note">${state.libraryMergeLoading ? "正在扫描分段…" : "先生成预览，再勾选要合并的组。"}</div>`}
+      <div class="settings-actions">
+        <button class="outline-button" type="button" id="library-merge-preview" ${!state.library || state.availability !== "available" || mergeRunning || state.libraryMergeLoading ? "disabled" : ""}>${state.libraryMergeLoading ? "扫描中…" : mergePreview ? "刷新预览" : "生成预览"}</button>
+        <button class="primary-button" type="button" id="library-merge-start" ${canStartMerge ? "" : "disabled"}>${mergeRunning ? "合并中…" : selectedGroups.length > 0 && mergePreview && selectedGroups.length < mergePreview.groupCount ? `合并所选 ${formatCount(selectedGroups.length)}` : "开始合并"}</button>
+      </div>
+      ${mergePreview && mergePreview.groupCount > 0 && !mergeRunning ? `<label class="settings-note"><input type="checkbox" id="library-merge-recycle" ${state.libraryMergeRecycle ? "checked" : ""} /> 合并成功后把原分段移入回收站（可再从回收站恢复）</label>` : ""}
+      ${state.libraryMergeConfirm ? `<div class="settings-confirm">
+        <p>将合并已勾选的 ${formatCount(selectedGroups.length)} 组（约 ${formatSize(selectedBytes)}，共 ${formatCount(mergePreview?.groupCount ?? 0)} 组可选）。合并过程用 ffmpeg 无损拼接，源分段在校验成功前不会删除。${state.libraryMergeRecycle ? "成功后原分段会移入回收站。" : "原分段会保留在库里。"}是否开始？</p>
+        <div class="settings-actions">
+          <button class="outline-button" type="button" id="library-merge-confirm-cancel">取消</button>
+          <button class="primary-button" type="button" id="library-merge-confirm-start">确认合并</button>
+        </div>
+      </div>` : ""}
+      ${mergeProgress ? `<div class="scan-banner" role="status" aria-live="polite">
+        <div class="scan-copy">
+          ${mergeProgress.state === "running" ? `<span class="spinner"></span>` : ""}
+          <span>${mergeProgress.state === "completed" ? "分段整理完成" : mergeProgress.state === "cancelled" ? "分段整理已取消" : mergeProgress.state === "failed" ? "分段整理失败" : "正在合并分段"}</span>
+          <strong>${mergeProgress.state === "running" ? `${mergePercent}%` : `${formatCount(mergeProgress.groupProcessed)} / ${formatCount(mergeProgress.groupTotal)} 组`}</strong>
+          ${mergeRunning ? `<button class="text-button" type="button" id="library-merge-cancel">取消</button>` : ""}
+        </div>
+        <div class="progress-track${mergeProgress.state === "running" && mergeProgress.bytesTotal <= 0 ? " is-indeterminate" : ""}">
+          <span style="width:${mergeProgress.state === "running" && mergeProgress.bytesTotal <= 0 ? "35%" : `${mergePercent}%`}"></span>
+        </div>
+        <div class="scan-current">${escapeHtml(mergeProgress.currentFile || (mergeProgress.state === "running" ? "准备中" : ""))} · ${formatCount(mergeProgress.groupProcessed)} / ${formatCount(mergeProgress.groupTotal)} 组 · ${formatSize(mergeProgress.bytesProcessed)} / ${formatSize(mergeProgress.bytesTotal)}${mergeProgress.speedBytesPerSec > 0 ? ` · ${formatSpeed(mergeProgress.speedBytesPerSec)}` : ""}${mergeProgress.etaSeconds ? ` · 剩余 ${formatEtaSeconds(mergeProgress.etaSeconds)}` : ""}</div>
+        <div class="backup-note">${mergeProgress.state === "running" ? "取消会在当前分段的安全点停止：未提交的临时文件会删除；已合并完成的文件会保留。" : mergeProgress.error ? escapeHtml(mergeProgress.error) : ""}</div>
+      </div>` : ""}
     </div>
     <div class="settings-status-card">
       <h3>最近扫描</h3>
@@ -1865,6 +1976,10 @@ function renderSettingsBackupSection(): string {
           <option value="skip_same" ${state.backupConflictPolicy === "skip_same" ? "selected" : ""}>跳过冲突</option>
           <option value="rename" ${state.backupConflictPolicy === "rename" ? "selected" : ""}>自动重命名</option>
           <option value="overwrite" ${state.backupConflictPolicy === "overwrite" ? "selected" : ""}>覆盖目标</option>
+        </select></label>
+        <label><span>默认分段合并</span><select id="settings-merge-segments">
+          <option value="on" ${state.backupMergeSegments ? "selected" : ""}>合并为完整视频</option>
+          <option value="off" ${state.backupMergeSegments ? "" : "selected"}>保留原分段</option>
         </select></label>
         <div class="settings-actions">
           <button class="primary-button" type="button" id="settings-save-backup-defaults">保存默认项</button>
@@ -2004,7 +2119,7 @@ function renderSettingsPanel(): string {
  * Patch only the settings dialog. Full `render()` rebuilds the whole shell and
  * remounts every media thumbnail — that is what made tab switches flicker.
  */
-function updateSettingsPanel(): void {
+function updateSettingsPanel(options?: { animate?: boolean }): void {
   if (!state.settingsOpen) return;
   const content = app.querySelector<HTMLElement>("#settings-content");
   if (!content) {
@@ -2012,10 +2127,12 @@ function updateSettingsPanel(): void {
     return;
   }
   content.innerHTML = settingsContentHtml();
-  content.classList.remove("is-swap");
-  // Restart the fade so consecutive tab switches stay calm instead of popping.
-  void content.offsetWidth;
-  content.classList.add("is-swap");
+  if (options?.animate !== false) {
+    content.classList.remove("is-swap");
+    // Restart the fade so consecutive tab switches stay calm instead of popping.
+    void content.offsetWidth;
+    content.classList.add("is-swap");
+  }
   app.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.settingsSection === state.settingsSection);
   });
@@ -2287,6 +2404,7 @@ function bindEvents(): void {
     state.backupIgnoreExtensions = (event.target as HTMLInputElement).value;
   });
   app.querySelector<HTMLSelectElement>("#backup-conflict")?.addEventListener("change", (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy));
+  app.querySelector<HTMLSelectElement>("#backup-merge")?.addEventListener("change", (event) => void saveBackupMerge((event.target as HTMLSelectElement).value === "on"));
   app.querySelector<HTMLButtonElement>("#backup-start-button")?.addEventListener("click", () => void startConfirmedBackup());
   app.querySelector<HTMLButtonElement>("#backup-cancel-button")?.addEventListener("click", () => void cancelCurrentBackup());
   app.querySelector<HTMLButtonElement>("#backup-retry-button")?.addEventListener("click", () => void retryCurrentBackup());
@@ -2434,6 +2552,57 @@ function bindSettingsBodyEvents(): void {
   });
   app.querySelector<HTMLButtonElement>("#settings-full-rebuild-confirm")?.addEventListener("click", () => void runSettingsScan(true));
   app.querySelector<HTMLButtonElement>("#settings-scan-cancel")?.addEventListener("click", () => void cancelCurrentScan());
+  app.querySelector<HTMLButtonElement>("#library-merge-preview")?.addEventListener("click", () => void loadLibraryMergePreview());
+  app.querySelector<HTMLButtonElement>("#library-merge-start")?.addEventListener("click", () => {
+    if (!state.libraryMergePreview || state.libraryMergeSelected.size === 0) return;
+    state.libraryMergeConfirm = true;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLInputElement>("#library-merge-filter")?.addEventListener("input", (event) => {
+    state.libraryMergeFilter = (event.target as HTMLInputElement).value;
+    refreshMergeSelectionView();
+  });
+  app.querySelector<HTMLButtonElement>("#library-merge-select-visible")?.addEventListener("click", () => {
+    if (!state.libraryMergePreview) return;
+    const query = state.libraryMergeFilter.trim().toLowerCase();
+    const next = new Set(state.libraryMergeSelected);
+    for (const group of state.libraryMergePreview.groups) {
+      if (mergeGroupMatches(group, query)) next.add(group.destinationRelative);
+    }
+    state.libraryMergeSelected = next;
+    state.libraryMergeConfirm = false;
+    refreshMergeSelectionView();
+  });
+  app.querySelector<HTMLButtonElement>("#library-merge-clear-visible")?.addEventListener("click", () => {
+    if (!state.libraryMergePreview) return;
+    const query = state.libraryMergeFilter.trim().toLowerCase();
+    const next = new Set(state.libraryMergeSelected);
+    for (const group of state.libraryMergePreview.groups) {
+      if (mergeGroupMatches(group, query)) next.delete(group.destinationRelative);
+    }
+    state.libraryMergeSelected = next;
+    state.libraryMergeConfirm = false;
+    refreshMergeSelectionView();
+  });
+  app.querySelector<HTMLElement>("#library-merge-list")?.addEventListener("change", (event) => {
+    const box = event.target;
+    if (!(box instanceof HTMLInputElement) || !box.dataset.mergeDest) return;
+    const next = new Set(state.libraryMergeSelected);
+    if (box.checked) next.add(box.dataset.mergeDest);
+    else next.delete(box.dataset.mergeDest);
+    state.libraryMergeSelected = next;
+    state.libraryMergeConfirm = false;
+    refreshMergeSelectionView();
+  });
+  app.querySelector<HTMLButtonElement>("#library-merge-confirm-cancel")?.addEventListener("click", () => {
+    state.libraryMergeConfirm = false;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#library-merge-confirm-start")?.addEventListener("click", () => void startLibraryMergeJob());
+  app.querySelector<HTMLButtonElement>("#library-merge-cancel")?.addEventListener("click", () => void cancelLibraryMergeJob());
+  app.querySelector<HTMLInputElement>("#library-merge-recycle")?.addEventListener("change", (event) => {
+    state.libraryMergeRecycle = (event.target as HTMLInputElement).checked;
+  });
   app.querySelector<HTMLButtonElement>("#settings-choose-thumbnail")?.addEventListener("click", () => void chooseThumbnailCacheFolder());
   app.querySelector<HTMLFormElement>("#settings-thumbnail-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2509,6 +2678,7 @@ async function loadSettingsSectionData(): Promise<void> {
       const infra = await getInfrastructureState();
       state.backupConflictPolicy = infra.settings.backup_conflict_policy;
       state.backupIgnoreExtensions = extensionsToInput(infra.settings.backup_ignore_extensions);
+      state.backupMergeSegments = infra.settings.backup_merge_segments;
       state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
       state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
       state.notificationsEnabled = infra.settings.notifications_enabled;
@@ -2648,15 +2818,19 @@ async function cancelThumbnailRebuild(): Promise<void> {
 async function saveBackupDefaults(): Promise<void> {
   const ignoreInput = app.querySelector<HTMLInputElement>("#settings-ignore-extensions");
   const policySelect = app.querySelector<HTMLSelectElement>("#settings-conflict-policy");
+  const mergeSelect = app.querySelector<HTMLSelectElement>("#settings-merge-segments");
   const extensions = parseExtensionsInput(ignoreInput?.value ?? state.backupIgnoreExtensions);
   const policy = (policySelect?.value as ConflictPolicy | undefined) ?? state.backupConflictPolicy;
+  const mergeEnabled = mergeSelect ? mergeSelect.value === "on" : state.backupMergeSegments;
   state.settingsBusy = true;
   state.settingsError = null;
   try {
     await setBackupIgnoreExtensions(extensions);
+    await setBackupMergeSegments(mergeEnabled);
     const settings = await setBackupConflictPolicy(policy);
     state.backupConflictPolicy = settings.backup_conflict_policy;
     state.backupIgnoreExtensions = extensionsToInput(settings.backup_ignore_extensions);
+    state.backupMergeSegments = settings.backup_merge_segments;
     state.settingsNotice = "备份默认项已保存";
   } catch (error) {
     state.settingsError = toUserMessage(error, "保存备份默认项失败");
@@ -3569,9 +3743,11 @@ async function createBackupPreview(): Promise<void> {
   const sourceSelect = app.querySelector<HTMLSelectElement>("#backup-source");
   const targetSelect = app.querySelector<HTMLSelectElement>("#backup-target");
   const ignoreInput = app.querySelector<HTMLInputElement>("#backup-ignore");
+  const mergeSelect = app.querySelector<HTMLSelectElement>("#backup-merge");
   if (sourceSelect?.value) state.backupSourceId = sourceSelect.value;
   if (targetSelect?.value) state.backupTargetId = targetSelect.value;
   if (ignoreInput) state.backupIgnoreExtensions = ignoreInput.value;
+  if (mergeSelect) state.backupMergeSegments = mergeSelect.value === "on";
   const source = state.backupSourceId;
   const target = state.backupTargetId;
   if (!source || !target) return;
@@ -3583,7 +3759,13 @@ async function createBackupPreview(): Promise<void> {
   state.error = null;
   render();
   try {
-    state.backupPreview = await previewBackup({ sourceVolumeId: source, targetLibraryId: target, conflictPolicy: state.backupConflictPolicy, ignoreExtensions: ignore });
+    state.backupPreview = await previewBackup({
+      sourceVolumeId: source,
+      targetLibraryId: target,
+      conflictPolicy: state.backupConflictPolicy,
+      ignoreExtensions: ignore,
+      mergeSegments: state.backupMergeSegments,
+    });
   } catch (error) {
     state.error = toUserMessage(error, "生成备份预览失败");
   } finally {
@@ -3599,6 +3781,17 @@ async function saveBackupConflict(policy: ConflictPolicy): Promise<void> {
     render();
   } catch (error) {
     state.error = toUserMessage(error, "保存冲突策略失败");
+    render();
+  }
+}
+
+async function saveBackupMerge(enabled: boolean): Promise<void> {
+  try {
+    const settings = await setBackupMergeSegments(enabled);
+    state.backupMergeSegments = settings.backup_merge_segments;
+    render();
+  } catch (error) {
+    state.error = toUserMessage(error, "保存分段合并设置失败");
     render();
   }
 }
@@ -3706,6 +3899,104 @@ async function cancelCurrentScan(): Promise<void> {
   catch (error) { state.error = toUserMessage(error, "无法取消扫描"); renderSettingsAware(); }
 }
 
+function refreshMergeSelectionView(): void {
+  const content = app.querySelector<HTMLElement>("#settings-content");
+  const contentScroll = content?.scrollTop ?? 0;
+  const list = app.querySelector<HTMLElement>("#library-merge-list");
+  const listScroll = list?.scrollTop ?? 0;
+  const filter = app.querySelector<HTMLInputElement>("#library-merge-filter");
+  const filterFocused = document.activeElement === filter;
+  const cursor = filter?.selectionStart ?? null;
+  updateSettingsPanel({ animate: false });
+  const nextContent = app.querySelector<HTMLElement>("#settings-content");
+  if (nextContent) nextContent.scrollTop = contentScroll;
+  const nextList = app.querySelector<HTMLElement>("#library-merge-list");
+  if (nextList) nextList.scrollTop = listScroll;
+  const nextFilter = app.querySelector<HTMLInputElement>("#library-merge-filter");
+  if (filterFocused && nextFilter) {
+    nextFilter.focus();
+    if (cursor !== null) nextFilter.setSelectionRange(cursor, cursor);
+  }
+}
+
+async function loadLibraryMergePreview(): Promise<void> {
+  if (!state.library || state.libraryMergeLoading) return;
+  if (state.availability !== "available") {
+    state.settingsError = state.libraryStatusReason || "媒体库不可用";
+    updateSettingsPanel();
+    return;
+  }
+  state.libraryMergeLoading = true;
+  state.libraryMergeConfirm = false;
+  state.libraryMergeNotice = null;
+  updateSettingsPanel();
+  try {
+    state.libraryMergePreview = await previewLibraryMerge(state.library.id);
+    state.libraryMergeSelected = new Set(state.libraryMergePreview.groups.map((group) => group.destinationRelative));
+    state.libraryMergeFilter = "";
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "扫描分段失败");
+    state.libraryMergePreview = null;
+    state.libraryMergeSelected = new Set();
+  } finally {
+    state.libraryMergeLoading = false;
+    updateSettingsPanel();
+  }
+}
+
+async function startLibraryMergeJob(): Promise<void> {
+  if (!state.library || !state.libraryMergePreview || state.libraryMergeJobId) return;
+  state.libraryMergeConfirm = false;
+  state.libraryMergeNotice = null;
+  state.settingsError = null;
+  try {
+    const destinations = state.libraryMergePreview.groups
+      .filter((group) => state.libraryMergeSelected.has(group.destinationRelative))
+      .map((group) => group.destinationRelative);
+    if (destinations.length === 0) {
+      updateSettingsPanel({ animate: false });
+      return;
+    }
+    const selectedBytes = state.libraryMergePreview.groups
+      .filter((group) => state.libraryMergeSelected.has(group.destinationRelative))
+      .reduce((sum, group) => sum + group.sizeBytes, 0);
+    const start = await startLibraryMerge(state.library.id, state.libraryMergeRecycle, destinations);
+    state.libraryMergeJobId = start.jobId;
+    state.libraryMergeProgress = {
+      jobId: start.jobId,
+      kind: "library_merge",
+      seq: 0,
+      phase: "merging",
+      state: "running",
+      currentFile: null,
+      groupProcessed: 0,
+      groupTotal: destinations.length,
+      bytesProcessed: 0,
+      bytesTotal: selectedBytes,
+      speedBytesPerSec: 0,
+      etaSeconds: null,
+      errors: [],
+      error: null,
+    };
+    updateSettingsPanel();
+  } catch (error) {
+    state.libraryMergeJobId = null;
+    state.settingsError = toUserMessage(error, "无法开始分段整理");
+    updateSettingsPanel();
+  }
+}
+
+async function cancelLibraryMergeJob(): Promise<void> {
+  const jobId = state.libraryMergeProgress?.jobId ?? state.libraryMergeJobId;
+  if (!jobId) return;
+  try {
+    await cancelLibraryMerge(jobId);
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "无法取消分段整理");
+    updateSettingsPanel();
+  }
+}
+
 async function bootstrap(): Promise<void> {
   state.loading = true; state.error = null; renderSettingsAware();
   try {
@@ -3716,6 +4007,7 @@ async function bootstrap(): Promise<void> {
     ]);
     state.backupConflictPolicy = infra.settings.backup_conflict_policy;
     state.backupIgnoreExtensions = extensionsToInput(infra.settings.backup_ignore_extensions);
+    state.backupMergeSegments = infra.settings.backup_merge_segments;
     state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
     state.density = clampDensity(infra.settings.ui_density);
     state.sort = infra.settings.ui_sort;
@@ -3998,6 +4290,39 @@ void onBackupProgress((progress) => {
       .catch(() => { state.backupFailedItems = []; render(); });
   }
   render();
+});
+void onLibraryMergeProgress((progress) => {
+  if (state.libraryMergeJobId && progress.jobId !== state.libraryMergeJobId && progress.state === "running") return;
+  if (!state.libraryMergeJobId && progress.state === "running") return;
+  state.libraryMergeProgress = progress;
+  if (progress.state === "running") {
+    state.libraryMergeJobId = progress.jobId;
+    if (state.settingsOpen) updateSettingsPanel();
+    return;
+  }
+  state.libraryMergeJobId = null;
+  state.libraryMergeConfirm = false;
+  const detail = progress.errors.slice(0, 3).join("；");
+  state.libraryMergeNotice =
+    progress.state === "completed"
+      ? "分段整理完成，已触发增量扫描"
+      : progress.state === "cancelled"
+        ? "分段整理已取消"
+        : progress.error
+          ? `分段整理失败：${progress.error}${detail ? `｜${detail}` : ""}`
+          : "分段整理结束";
+  if (progress.state !== "completed") {
+    // Keep the preview so the user can retry after fixing the cause.
+  } else {
+    state.libraryMergePreview = null;
+  }
+  if (state.settingsOpen) {
+    updateSettingsPanel();
+    void loadSettingsSectionData().then(() => updateSettingsPanel());
+  } else {
+    render();
+    void bootstrap();
+  }
 });
 initLiquidGlass();
 initTitlebar();

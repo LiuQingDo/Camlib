@@ -87,6 +87,9 @@ pub struct AppSettings {
     /// backup preview when the request does not override them.
     #[serde(default = "default_backup_ignore_extensions")]
     pub backup_ignore_extensions: Vec<String>,
+    /// Collapse camera-split video segments into one merged file during backup.
+    #[serde(default = "default_true")]
+    pub backup_merge_segments: bool,
     /// System notifications for scan/backup/disk events.
     #[serde(default = "default_true")]
     pub notifications_enabled: bool,
@@ -429,6 +432,15 @@ impl Infrastructure {
         self.settings()
     }
 
+    pub fn set_backup_merge_segments(
+        &mut self,
+        enabled: bool,
+    ) -> Result<AppSettings, InfrastructureError> {
+        self.store.settings.backup_merge_segments = enabled;
+        self.store.save()?;
+        self.settings()
+    }
+
     pub fn set_notifications_enabled(
         &mut self,
         enabled: bool,
@@ -582,6 +594,7 @@ impl SettingsStore {
                 ui_theme: UiTheme::default(),
                 auto_scan_on_startup: true,
                 backup_ignore_extensions: default_backup_ignore_extensions(),
+                backup_merge_segments: true,
                 notifications_enabled: true,
                 close_behavior: CloseBehavior::default(),
             }
@@ -637,6 +650,8 @@ struct DiskSettings {
     #[serde(default = "default_backup_ignore_extensions")]
     backup_ignore_extensions: Vec<String>,
     #[serde(default = "default_true")]
+    backup_merge_segments: bool,
+    #[serde(default = "default_true")]
     notifications_enabled: bool,
     #[serde(default)]
     close_behavior: CloseBehavior,
@@ -681,6 +696,7 @@ impl DiskSettings {
             } else {
                 self.backup_ignore_extensions
             },
+            backup_merge_segments: self.backup_merge_segments,
             notifications_enabled: self.notifications_enabled,
             close_behavior: self.close_behavior,
         })
@@ -701,6 +717,7 @@ impl From<&AppSettings> for DiskSettings {
             ui_theme: settings.ui_theme,
             auto_scan_on_startup: settings.auto_scan_on_startup,
             backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
+            backup_merge_segments: settings.backup_merge_segments,
             notifications_enabled: settings.notifications_enabled,
             close_behavior: settings.close_behavior,
         }
@@ -1209,6 +1226,7 @@ mod tests {
             ui_theme: UiTheme::default(),
             auto_scan_on_startup: true,
             backup_ignore_extensions: default_backup_ignore_extensions(),
+            backup_merge_segments: true,
             notifications_enabled: true,
             close_behavior: CloseBehavior::default(),
         };

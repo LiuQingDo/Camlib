@@ -670,6 +670,10 @@ fn scan_file(
     }
 }
 
+fn is_merge_scratch(name: &str) -> bool {
+    name.to_ascii_lowercase().contains(".camlib-")
+}
+
 fn is_skipped_directory_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("System Volume Information")
         || name.eq_ignore_ascii_case("$RECYCLE.BIN")
@@ -756,6 +760,11 @@ fn discover(
                 continue;
             }
             if !file_type.is_file() {
+                continue;
+            }
+            // Merge writes `.VID_….camlib-part.mp4` / `.camlib-merge.mp4` beside
+            // the finished video. They are scratch files, not library media.
+            if is_merge_scratch(&name) {
                 continue;
             }
             let Some(extension) = entry
@@ -986,6 +995,8 @@ mod tests {
         fs::write(day.join("IMG_0002.JPG"), b"duplicate-a").unwrap();
         fs::write(day.join("IMG_0002.PNG"), b"duplicate-b").unwrap();
         fs::write(day.join("README.txt"), b"ignored").unwrap();
+        fs::write(day.join(".VID_20260811_201416.camlib-part.mp4"), b"scratch").unwrap();
+        fs::write(day.join(".VID_20260811_201416.camlib-merge.mp4"), b"scratch").unwrap();
 
         let repository = Repository::open_in_memory().unwrap();
         repository
@@ -1079,6 +1090,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(burst_page.total, 3);
+    }
+
+    #[test]
+    fn rescan_drops_indexed_merge_scratch_and_keeps_real_media() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = Repository::open_in_memory().unwrap();
+        repository
+            .create_library(test_library(temp.path()))
+            .unwrap();
+        let photo = ScanGroup {
+            logical_key: "photo".to_owned(),
+            display_name: "IMG_1.JPG".to_owned(),
+            kind: MediaKind::Photo,
+            capture_at: None,
+            capture_date: None,
+            ambiguous: false,
+            burst_group: None,
+            files: vec![ScanGroupFile {
+                relative_path: "2026/IMG_1.JPG".to_owned(),
+                role: MediaFileRole::Single,
+                size_bytes: 4,
+                modified_at: "unix-ms:1".to_owned(),
+                needs_reprocess: true,
+            }],
+        };
+        let mut scratch_part = photo.clone();
+        scratch_part.logical_key = "part".to_owned();
+        scratch_part.display_name = ".VID_20260811_201416.camlib-part.mp4".to_owned();
+        scratch_part.kind = MediaKind::Video;
+        scratch_part.files[0].relative_path =
+            "2026/08/.VID_20260811_201416.camlib-part.mp4".to_owned();
+        let mut scratch_merge = scratch_part.clone();
+        scratch_merge.logical_key = "merge".to_owned();
+        scratch_merge.display_name = ".VID_20260811_201416.camlib-merge.mp4".to_owned();
+        scratch_merge.files[0].relative_path =
+            "2026/08/.VID_20260811_201416.camlib-merge.mp4".to_owned();
+        repository
+            .apply_scan_snapshot(
+                "library-test",
+                1,
+                "unix-ms:2",
+                &[photo.clone(), scratch_part, scratch_merge],
+            )
+            .unwrap();
+        repository
+            .apply_scan_snapshot("library-test", 2, "unix-ms:3", &[photo])
+            .unwrap();
+        let page = repository
+            .query_media(MediaQuery {
+                library_id: "library-test".to_owned(),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].display_name, "IMG_1.JPG");
     }
 
     #[test]

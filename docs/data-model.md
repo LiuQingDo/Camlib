@@ -1,7 +1,7 @@
 # Camlib SQLite 数据模型
 
 > 真相来源：`src-tauri/src/db/migrations/`  
-> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 5`（`src-tauri/src/db/mod.rs`）  
+> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 6`（`src-tauri/src/db/mod.rs`）  
 > 迁移在应用启动时按版本顺序自动执行；版本过高时拒绝打开，避免降级损坏。
 
 ## 1. 设计原则
@@ -22,6 +22,7 @@
 | 3 | `0003_deletion_logs.sql` | deletion_logs（删除结果明细） |
 | 4 | `0004_backup_items.sql` | backup_items（备份单文件状态） |
 | 5 | `0005_media_ratings.sql` | media_ratings（1–5 星评分） |
+| 6 | `0006_backup_merge.sql` | backup_items.merge_sources_json（相机分段合并源列表） |
 
 ## 3. 表结构（与迁移对齐）
 

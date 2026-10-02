@@ -14,11 +14,12 @@
 | `lib.rs` | Tauri commands、状态装配、`ensure_library_ready` |
 | `errors.rs` | 结构化 `AppError` / `ErrorCode`，command 错误合约 |
 | `infrastructure.rs` | 设置、库根、卷身份、断盘状态 |
-| `db/` | SQLite 迁移（当前 schema v5）、查询、收藏/标签/评分、扫描与备份 runs |
+| `db/` | SQLite 迁移（当前 schema v6）、查询、收藏/标签/评分、扫描与备份 runs |
 | `scanner.rs` | 增量扫描、实况配对、连拍、进度 Channel |
 | `media.rs` | 缩略图、ffmpeg 适配器、`camlib` 流协议与 Range |
 | `deletion.rs` | 路径解析、回收站删除预检与执行 |
-| `backup.rs` | DCIM 发现、预览、复制校验、重试 |
+| `backup.rs` | DCIM 发现、预览、复制校验、分段视频合并、重试 |
+| `library_merge.rs` | 媒体库内已备份分段视频的预览与合并 |
 | `system.rs` | 托盘、关闭行为、通知、卷监视 |
 
 **前端边界**（`src/`）：
@@ -88,7 +89,8 @@ src-tauri/src/
   scanner.rs         增量扫描与 job
   media.rs           缩略图、ffmpeg、流协议
   deletion.rs        路径解析与回收站删除
-  backup.rs          备份发现/预览/复制/重试
+  backup.rs          备份发现/预览/复制/分段合并/重试
+  library_merge.rs   库内历史分段预览与合并
   system.rs          托盘、通知、卷监视
 ```
 

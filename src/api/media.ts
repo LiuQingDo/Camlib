@@ -271,6 +271,10 @@ export interface BackupItemPreviewDto {
   extension: string;
   status: BackupItemStatus;
   reason: string | null;
+  /** Extra source paths when this item merges camera-split video segments. */
+  mergeSources: string[];
+  /** Segment group key, e.g. `VID_20261001_153408`. */
+  mergeGroup: string | null;
 }
 
 export interface BackupPreviewDto {
@@ -290,6 +294,16 @@ export interface BackupPreviewDto {
   requiredBytes: number;
   freeBytes: number | null;
   spaceSufficient: boolean | null;
+  mergeSegments: boolean;
+  mergeGroupCount: number;
+  mergeSegmentCount: number;
+  mergeGroups: BackupMergeGroupDto[];
+}
+
+export interface BackupMergeGroupDto {
+  fileName: string;
+  segments: string[];
+  sizeBytes: number;
 }
 
 export interface BackupPreviewInput {
@@ -297,6 +311,7 @@ export interface BackupPreviewInput {
   targetLibraryId: string;
   conflictPolicy?: ConflictPolicy;
   ignoreExtensions?: string[];
+  mergeSegments?: boolean;
 }
 
 export interface BackupStartDto {
@@ -315,13 +330,14 @@ export interface BackupItemDto {
   status: BackupItemState;
   copiedBytes: number;
   errorMessage: string | null;
+  mergeSourcesJson: string | null;
 }
 
 export interface BackupProgressDto {
   jobId: string;
   kind: "backup";
   seq: number;
-  phase: "copying" | "finalizing";
+  phase: "copying" | "merging" | "finalizing";
   state: "running" | "completed" | "cancelled" | "failed";
   currentFile: string | null;
   fileProcessed: number;
@@ -367,6 +383,84 @@ export function listBackupRunItems(
 
 export function onBackupProgress(callback: (event: BackupProgressDto) => void): Promise<UnlistenFn> {
   return listen<BackupProgressDto>("backup-progress", (event) => callback(event.payload));
+}
+
+export interface LibraryMergeGroupDto {
+  groupKey: string;
+  fileName: string;
+  sources: string[];
+  sizeBytes: number;
+  destinationRelative: string;
+}
+
+export interface LibraryMergePreviewDto {
+  libraryId: string;
+  groups: LibraryMergeGroupDto[];
+  groupCount: number;
+  segmentCount: number;
+  totalBytes: number;
+  requiredTempBytes: number;
+  freeBytes: number | null;
+  spaceSufficient: boolean | null;
+}
+
+export interface LibraryMergeProgressDto {
+  jobId: string;
+  kind: "library_merge";
+  seq: number;
+  phase: "merging";
+  state: "running" | "completed" | "cancelled" | "failed";
+  currentFile: string | null;
+  groupProcessed: number;
+  groupTotal: number;
+  bytesProcessed: number;
+  bytesTotal: number;
+  speedBytesPerSec: number;
+  etaSeconds: number | null;
+  errors: string[];
+  error: string | null;
+}
+
+export interface LibraryMergeResultDto {
+  jobId: string;
+  groupsMerged: number;
+  segmentsRecycled: number;
+  segmentsKept: number;
+  failedGroups: number;
+  errors: string[];
+  cancelled: boolean;
+}
+
+export interface LibraryMergeStartDto {
+  jobId: string;
+}
+
+export function previewLibraryMerge(libraryId: string): Promise<LibraryMergePreviewDto> {
+  return invoke<LibraryMergePreviewDto>("library_merge_preview", { libraryId });
+}
+
+export function startLibraryMerge(
+  libraryId: string,
+  recycleSources = false,
+  destinations?: string[],
+): Promise<LibraryMergeStartDto> {
+  return invoke<LibraryMergeStartDto>("library_merge_start", {
+    libraryId,
+    recycleSources,
+    destinations,
+  });
+}
+
+export function cancelLibraryMerge(jobId: string): Promise<void> {
+  return invoke<void>("library_merge_cancel", { jobId });
+}
+
+export function onLibraryMergeProgress(
+  callback: (event: LibraryMergeProgressDto) => void,
+): Promise<UnlistenFn> {
+  return listen<LibraryMergeProgressDto>("library-merge-progress", (event) =>
+    callback(event.payload),
+  );
 }
 
 export function listLibraries(): Promise<LibraryDto[]> {

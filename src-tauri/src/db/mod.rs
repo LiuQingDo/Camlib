@@ -18,6 +18,7 @@ mod migrations {
     pub const DELETION_LOGS: &str = include_str!("migrations/0003_deletion_logs.sql");
     pub const BACKUP_ITEMS: &str = include_str!("migrations/0004_backup_items.sql");
     pub const MEDIA_RATINGS: &str = include_str!("migrations/0005_media_ratings.sql");
+    pub const BACKUP_MERGE: &str = include_str!("migrations/0006_backup_merge.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -27,7 +28,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -374,6 +375,20 @@ impl Repository {
              WHERE library_id = ?1 AND NOT EXISTS
              (SELECT 1 FROM media_files f WHERE f.media_item_id = media_items.id AND f.exists_now = 1)",
             params![library_id, now],
+        )?;
+        // Merge scratch (`.VID_….camlib-part.mp4`, `.camlib-merge.mp4`) can be
+        // indexed if a scan runs while ffmpeg is writing. Once it is gone, drop
+        // the row instead of leaving an offline card in the library.
+        transaction.execute(
+            "DELETE FROM media_items
+             WHERE library_id = ?1
+               AND scan_state = 'missing'
+               AND id IN (
+                 SELECT media_item_id FROM media_files
+                 WHERE library_id = ?1
+                   AND (file_name LIKE '%.camlib-%' OR relative_path LIKE '%.camlib-%')
+               )",
+            params![library_id],
         )?;
         transaction.execute(
             "UPDATE libraries SET last_scan_at = ?2, scan_generation = ?3, updated_at = ?2
@@ -1283,8 +1298,8 @@ impl Repository {
         self.connection.execute(
             "INSERT INTO backup_items
              (id, backup_run_id, source_relative, destination_relative, size_bytes,
-              status, copied_bytes, error_message)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+              status, copied_bytes, error_message, merge_sources_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 input.id,
                 input.backup_run_id,
@@ -1294,6 +1309,7 @@ impl Repository {
                 input.status,
                 input.copied_bytes,
                 input.error_message,
+                input.merge_sources_json,
             ],
         )?;
         Ok(())
@@ -1313,8 +1329,8 @@ impl Repository {
             let mut statement = transaction.prepare(
                 "INSERT INTO backup_items
                  (id, backup_run_id, source_relative, destination_relative, size_bytes,
-                  status, copied_bytes, error_message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  status, copied_bytes, error_message, merge_sources_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for input in inputs {
                 statement.execute(params![
@@ -1326,6 +1342,7 @@ impl Repository {
                     input.status,
                     input.copied_bytes,
                     input.error_message,
+                    input.merge_sources_json,
                 ])?;
             }
         }
@@ -1336,7 +1353,7 @@ impl Repository {
     pub fn list_backup_items(&self, backup_run_id: &str) -> DbResult<Vec<BackupItem>> {
         let mut statement = self.connection.prepare(
             "SELECT id, backup_run_id, source_relative, destination_relative, size_bytes,
-                    status, copied_bytes, error_message
+                    status, copied_bytes, error_message, merge_sources_json
              FROM backup_items WHERE backup_run_id = ?1 ORDER BY id",
         )?;
         let rows = statement
@@ -1518,6 +1535,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         transaction.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             [5_i64],
+        )?;
+        transaction.commit()?;
+    }
+    if max_version < 6 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::BACKUP_MERGE)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [6_i64],
         )?;
         transaction.commit()?;
     }
@@ -1912,6 +1938,9 @@ pub struct BackupItem {
     pub status: String,
     pub copied_bytes: i64,
     pub error_message: Option<String>,
+    /// JSON array of source_relative paths when this item merges camera-split
+    /// video segments. `None` for ordinary single-file copies.
+    pub merge_sources_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1924,6 +1953,7 @@ pub struct NewBackupItem {
     pub status: String,
     pub copied_bytes: i64,
     pub error_message: Option<String>,
+    pub merge_sources_json: Option<String>,
 }
 
 /// List-query filters for `media_items`.
@@ -2317,6 +2347,7 @@ fn map_backup_item(row: &Row<'_>) -> rusqlite::Result<BackupItem> {
         status: row.get(5)?,
         copied_bytes: row.get(6)?,
         error_message: row.get(7)?,
+        merge_sources_json: row.get(8)?,
     })
 }
 
@@ -2440,7 +2471,7 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 5);
+        assert_eq!(repository.schema_version().unwrap(), 6);
         apply_migrations(&mut repository.connection).unwrap();
         let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','media_ratings','backup_runs','backup_items','app_settings','deletion_logs')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 11);
@@ -2453,6 +2484,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexes, 13);
+        let has_merge_column: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('backup_items') WHERE name = 'merge_sources_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_merge_column, 1);
     }
 
     #[test]

@@ -27,6 +27,7 @@ export interface AppSettings {
   ui_theme: UiTheme;
   auto_scan_on_startup: boolean;
   backup_ignore_extensions: string[];
+  backup_merge_segments: boolean;
   notifications_enabled: boolean;
   close_behavior: CloseBehavior;
 }
@@ -119,6 +120,10 @@ export function setBackupConflictPolicy(policy: AppSettings["backup_conflict_pol
 
 export function setBackupIgnoreExtensions(extensions: string[]): Promise<AppSettings> {
   return invoke<AppSettings>("set_backup_ignore_extensions", { extensions });
+}
+
+export function setBackupMergeSegments(enabled: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("set_backup_merge_segments", { enabled });
 }
 
 export function setUiPrefs(input: {

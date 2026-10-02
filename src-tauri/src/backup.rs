@@ -1,18 +1,28 @@
 //! Camera-volume discovery, read-only planning, and safe backup execution.
+//!
+//! Long camera recordings are often auto-split into ~30 minute files that share
+//! `VID_YYYYMMDD_HHMMSS` and differ only in a trailing sequence number. When
+//! merge is enabled those segments become one backup item and one ffmpeg concat
+//! output, so the library keeps a single complete video.
 
 use crate::db::{
     BackupItem, BackupStatus, ConflictPolicy, NewBackupItem, NewBackupRun, Repository,
 };
+use crate::media::resolve_ffmpeg;
 use crate::scanner;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 const DEFAULT_IGNORED_EXTENSIONS: &[&str] = &[".dng", ".lrv"];
 const PHOTO_EXTENSIONS: &[&str] = &[
@@ -41,6 +51,8 @@ pub struct BackupPreviewRequest {
     pub target_library_id: String,
     pub conflict_policy: Option<ConflictPolicy>,
     pub ignore_extensions: Option<Vec<String>>,
+    /// Collapse camera-split video segments into one merged file. Defaults on.
+    pub merge_segments: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +77,13 @@ pub struct BackupItemPreviewDto {
     pub extension: String,
     pub status: BackupItemStatus,
     pub reason: Option<String>,
+    /// Extra source_relative paths (in playback order) when this item will
+    /// merge camera-split segments. Empty for ordinary single-file copies.
+    #[serde(default)]
+    pub merge_sources: Vec<String>,
+    /// Human label for a merge group, e.g. `VID_20261001_153408`.
+    #[serde(default)]
+    pub merge_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +112,24 @@ pub struct BackupPreviewDto {
     pub required_bytes: u64,
     pub free_bytes: Option<u64>,
     pub space_sufficient: Option<bool>,
+    pub merge_segments: bool,
+    /// Number of merge groups that will be produced (0 when merge is off).
+    pub merge_group_count: u64,
+    /// Number of source segment files that will be collapsed by merging.
+    pub merge_segment_count: u64,
+    /// Groups that this backup will actually merge. Already-present results are omitted.
+    #[serde(default)]
+    pub merge_groups: Vec<BackupMergeGroupDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupMergeGroupDto {
+    /// Output file name, e.g. `VID_20261001_153408.mp4`.
+    pub file_name: String,
+    /// Source file names in playback order.
+    pub segments: Vec<String>,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,6 +286,7 @@ pub fn preview(
         request.conflict_policy.unwrap_or(ConflictPolicy::SkipSame),
         request.ignore_extensions,
         free_bytes,
+        request.merge_segments,
     )
 }
 
@@ -260,6 +298,7 @@ fn preview_paths(
     conflict_policy: ConflictPolicy,
     ignore_extensions: Option<Vec<String>>,
     free_bytes: Option<u64>,
+    request_merge_segments: Option<bool>,
 ) -> Result<BackupPreviewDto, BackupError> {
     let source_root = fs::canonicalize(&source.root_path).map_err(|error| BackupError::Io {
         path: source.root_path.clone(),
@@ -282,7 +321,12 @@ fn preview_paths(
     let ignore_extensions =
         normalize_extensions(ignore_extensions.unwrap_or_else(default_ignore_extensions));
     let ignore_extensions_list = sorted_extensions(&ignore_extensions);
-    let items = collect_items(&source_root, &dcim_path, &target_root, &ignore_extensions)?;
+    let mut items = collect_items(&source_root, &dcim_path, &target_root, &ignore_extensions)?;
+    let merge_segments = request_merge_segments.unwrap_or(true);
+    if merge_segments {
+        items = collapse_segment_groups(items);
+        refresh_merged_destinations(&mut items, &target_root)?;
+    }
     let source_dto = volume_dto(&source);
     let total_files = items.len() as u64;
     let total_bytes = items.iter().map(|item| item.size_bytes).sum();
@@ -305,6 +349,13 @@ fn preview_paths(
     let error_summary = space_sufficient
         .filter(|sufficient| !sufficient)
         .map(|_| format!("目标盘空间不足，需要 {required_bytes} 字节"));
+
+    let merge_groups = merge_group_summaries(&items, &conflict_policy);
+    let merge_group_count = merge_groups.len() as u64;
+    let merge_segment_count = merge_groups
+        .iter()
+        .map(|group| group.segments.len() as u64)
+        .sum();
 
     repository.create_backup_run(NewBackupRun {
         id: backup_run_id.clone(),
@@ -330,21 +381,33 @@ fn preview_paths(
     let backup_items = items
         .iter()
         .enumerate()
-        .map(|(index, item)| NewBackupItem {
-            id: format!("{}-item-{index}", backup_run_id),
-            backup_run_id: backup_run_id.clone(),
-            source_relative: item.source_relative.clone(),
-            destination_relative: item.destination_relative.clone(),
-            size_bytes: item.size_bytes as i64,
-            status: match &item.status {
-                BackupItemStatus::Ready | BackupItemStatus::Conflict => "planned",
-                BackupItemStatus::AlreadyExists | BackupItemStatus::Ignored => "skipped",
-            }
-            .to_owned(),
-            copied_bytes: 0,
-            error_message: item.reason.clone(),
+        .map(|(index, item)| {
+            let merge_sources_json = if item.merge_sources.is_empty() {
+                None
+            } else {
+                let mut all = vec![item.source_relative.clone()];
+                all.extend(item.merge_sources.iter().cloned());
+                Some(serde_json::to_string(&all).map_err(|error| {
+                    BackupError::Invalid(format!("合并源列表无法序列化: {error}"))
+                })?)
+            };
+            Ok(NewBackupItem {
+                id: format!("{}-item-{index}", backup_run_id),
+                backup_run_id: backup_run_id.clone(),
+                source_relative: item.source_relative.clone(),
+                destination_relative: item.destination_relative.clone(),
+                size_bytes: item.size_bytes as i64,
+                status: match &item.status {
+                    BackupItemStatus::Ready | BackupItemStatus::Conflict => "planned",
+                    BackupItemStatus::AlreadyExists | BackupItemStatus::Ignored => "skipped",
+                }
+                .to_owned(),
+                copied_bytes: 0,
+                error_message: item.reason.clone(),
+                merge_sources_json,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, BackupError>>()?;
     repository.create_backup_items(&backup_items)?;
 
     Ok(BackupPreviewDto {
@@ -365,6 +428,10 @@ fn preview_paths(
         required_bytes,
         free_bytes,
         space_sufficient,
+        merge_segments,
+        merge_group_count,
+        merge_segment_count,
+        merge_groups,
     })
 }
 
@@ -600,6 +667,8 @@ fn run(
                 Some("用户取消备份".to_owned()),
             );
         }
+        let merge_sources =
+            merge_segment_relatives(&item.source_relative, item.merge_sources_json.as_deref());
         let source_path = safe_join(&source_root, &item.source_relative)?;
         let Some(destination_relative) = item.destination_relative.as_deref() else {
             repository
@@ -624,12 +693,17 @@ fn run(
         } else {
             destination
         };
+        let display_name = if merge_sources.len() < 2 {
+            item.source_relative.clone()
+        } else {
+            format!("{}（合并 {} 段）", item.file_name_hint(), merge_sources.len())
+        };
         emit(
             app,
             progress(
                 job_id,
                 "running",
-                Some(item.source_relative.clone()),
+                Some(display_name.clone()),
                 &items,
                 completed_files,
                 completed_bytes,
@@ -639,33 +713,80 @@ fn run(
             ),
         );
         let base_bytes = completed_bytes;
-        let current_name = item.source_relative.clone();
+        let current_name = display_name.clone();
         let mut last_progress = Instant::now();
-        let result = copy_and_verify(
-            &source_path,
-            &destination,
-            item.size_bytes as u64,
-            cancel,
-            &mut |file_bytes| {
-                if last_progress.elapsed() >= Duration::from_millis(100) {
-                    emit(
-                        app,
-                        progress(
-                            job_id,
-                            "running",
-                            Some(current_name.clone()),
-                            &items,
-                            completed_files,
-                            base_bytes + file_bytes,
-                            started,
-                            errors.clone(),
-                            None,
-                        ),
-                    );
-                    last_progress = Instant::now();
+        let result = if merge_sources.len() < 2 {
+            copy_and_verify(
+                &source_path,
+                &destination,
+                item.size_bytes as u64,
+                cancel,
+                &mut |file_bytes| {
+                    if last_progress.elapsed() >= Duration::from_millis(100) {
+                        emit(
+                            app,
+                            progress(
+                                job_id,
+                                "running",
+                                Some(current_name.clone()),
+                                &items,
+                                completed_files,
+                                base_bytes + file_bytes,
+                                started,
+                                errors.clone(),
+                                None,
+                            ),
+                        );
+                        last_progress = Instant::now();
+                    }
+                },
+            )
+        } else {
+            let mut segment_paths = Vec::with_capacity(merge_sources.len());
+            let mut join_error = None;
+            for relative in &merge_sources {
+                match safe_join(&source_root, relative) {
+                    Ok(path) => segment_paths.push(path),
+                    Err(error) => {
+                        join_error = Some(error);
+                        break;
+                    }
                 }
-            },
-        );
+            }
+            if let Some(error) = join_error {
+                Err(CopyError::Message(error))
+            } else {
+                match resolve_ffmpeg(app) {
+                    Ok(ffmpeg) => merge_and_verify(
+                        &ffmpeg,
+                        &segment_paths,
+                        &destination,
+                        item.size_bytes as u64,
+                        cancel,
+                        &mut |file_bytes| {
+                            if last_progress.elapsed() >= Duration::from_millis(100) {
+                                emit(
+                                    app,
+                                    progress(
+                                        job_id,
+                                        "running",
+                                        Some(current_name.clone()),
+                                        &items,
+                                        completed_files,
+                                        base_bytes + file_bytes,
+                                        started,
+                                        errors.clone(),
+                                        None,
+                                    ),
+                                );
+                                last_progress = Instant::now();
+                            }
+                        },
+                    ),
+                    Err(error) => Err(CopyError::Message(error.to_string())),
+                }
+            }
+        };
         match result {
             Ok(copied) => {
                 let relative = relative_string(&target_root, &destination)?;
@@ -869,7 +990,14 @@ fn progress(
         } else {
             bytes_processed
         },
-        phase: "copying",
+        phase: if current_file
+            .as_deref()
+            .is_some_and(|name| name.contains("（合并"))
+        {
+            "merging"
+        } else {
+            "copying"
+        },
         state,
         current_file,
         file_processed,
@@ -895,9 +1023,315 @@ fn progress(
 }
 
 #[derive(Debug)]
-enum CopyError {
+pub(crate) enum CopyError {
     Cancelled,
     Message(String),
+}
+
+fn parse_merge_sources(json: Option<&str>) -> Vec<String> {
+    let Some(json) = json else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
+}
+
+/// Ordered source paths for a merge item. The persisted JSON is the complete
+/// playback list; `source_relative` is prepended only when older rows stored
+/// extra segments without repeating the head path.
+fn merge_segment_relatives(source_relative: &str, json: Option<&str>) -> Vec<String> {
+    let parsed = parse_merge_sources(json);
+    if parsed.is_empty() {
+        return Vec::new();
+    }
+    if parsed.iter().any(|path| path == source_relative) {
+        parsed
+    } else {
+        let mut all = vec![source_relative.to_owned()];
+        all.extend(parsed);
+        all
+    }
+}
+
+/// Split `(sequence, payload)` pairs into runs whose sequence numbers increase
+/// by exactly one. Camera splits are consecutive file counters; a gap means a
+/// different recording even if the `VID_YYYYMMDD_HHMMSS` stamp matches.
+pub(crate) fn split_consecutive_runs<T>(mut parts: Vec<(u64, T)>) -> Vec<Vec<T>> {
+    parts.sort_by_key(|(seq, _)| *seq);
+    let mut runs = Vec::new();
+    let mut current: Vec<(u64, T)> = Vec::new();
+    for part in parts {
+        if let Some((last_seq, _)) = current.last() {
+            if part.0 != last_seq + 1 {
+                if current.len() >= 2 {
+                    runs.push(current.into_iter().map(|(_, value)| value).collect());
+                }
+                current = Vec::new();
+            }
+        }
+        current.push(part);
+    }
+    if current.len() >= 2 {
+        runs.push(current.into_iter().map(|(_, value)| value).collect());
+    }
+    runs
+}
+
+/// Windows GUI apps flash a console when spawning ffmpeg without CREATE_NO_WINDOW.
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
+/// Explicit muxer for common camera containers. ffmpeg cannot infer a format
+/// from a `.camlib-part` suffix.
+fn output_format_for(path: &Path) -> Option<&'static str> {
+    let extension = path
+        .extension()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "mp4" | "m4v" => Some("mp4"),
+        "mov" => Some("mov"),
+        "mkv" => Some("matroska"),
+        "avi" => Some("avi"),
+        "ts" | "mts" | "m2ts" => Some("mpegts"),
+        "3gp" => Some("3gp"),
+        _ => None,
+    }
+}
+
+/// Windows `fs::canonicalize` returns `\\?\` prefixes that ffmpeg's concat
+/// demuxer often rejects. Present DOS-style forward-slash paths instead.
+pub(crate) fn ffmpeg_path_string(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    let trimmed = value
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| value.strip_prefix(r"\\?\").map(str::to_owned))
+        .unwrap_or_else(|| value.into_owned());
+    trimmed.replace('\\', "/")
+}
+
+/// Losslessly join camera-split segments with ffmpeg's concat demuxer.
+/// Sources are read-only; output is written to a temp file and committed only
+/// after ffmpeg succeeds. Expected size is the sum of inputs (stream copy).
+pub(crate) fn merge_and_verify(
+    ffmpeg: &Path,
+    segments: &[PathBuf],
+    destination: &Path,
+    expected_size: u64,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> Result<u64, CopyError> {
+    if segments.len() < 2 {
+        return Err(CopyError::Message("合并至少需要两个分段".to_owned()));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| CopyError::Message("目标路径无效".to_owned()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| CopyError::Message(format!("创建目标目录失败: {error}")))?;
+    let dest_name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let dest_stem = destination
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let dest_extension = destination
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+    let list_path = parent.join(format!(".{dest_name}.camlib-concat"));
+    // Keep a real media extension on the temp output so ffmpeg can infer (or we
+    // can force) the muxer; a bare `.camlib-part` suffix makes ffmpeg refuse.
+    let temp = parent.join(format!(".{dest_stem}.camlib-part{dest_extension}"));
+    let log_path = parent.join(format!(".{dest_name}.camlib-ffmpeg.log"));
+    let _ = fs::remove_file(&temp);
+    let _ = fs::remove_file(&log_path);
+    remove_merge_scratch(parent, &dest_stem);
+    let mut temp_guard = TempGuard {
+        path: temp.clone(),
+        armed: true,
+    };
+    let list_guard = TempGuard {
+        path: list_path.clone(),
+        armed: true,
+    };
+    let log_guard = TempGuard {
+        path: log_path.clone(),
+        armed: true,
+    };
+
+    let mut listed = 0_u64;
+    let mut list = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&list_path)
+        .map_err(|error| CopyError::Message(format!("创建合并列表失败: {error}")))?;
+    for segment in segments {
+        let meta = fs::metadata(segment).map_err(|error| {
+            CopyError::Message(format!("读取分段失败 {}: {error}", segment.display()))
+        })?;
+        if !meta.is_file() {
+            return Err(CopyError::Message(format!(
+                "分段不存在: {}",
+                segment.display()
+            )));
+        }
+        listed += meta.len();
+        // concat demuxer: single-quoted forward-slash paths; double any quote.
+        let escaped = ffmpeg_path_string(segment).replace('\'', "'\\''");
+        writeln!(list, "file '{escaped}'")
+            .map_err(|error| CopyError::Message(format!("写入合并列表失败: {error}")))?;
+    }
+    list.sync_all()
+        .map_err(|error| CopyError::Message(format!("刷新合并列表失败: {error}")))?;
+    drop(list);
+    if expected_size > 0 && listed < expected_size {
+        return Err(CopyError::Message("源分段大小已变化，请重新预览".to_owned()));
+    }
+    let expected_size = if expected_size > 0 { expected_size } else { listed };
+
+    let mut log_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&log_path)
+        .map_err(|error| CopyError::Message(format!("创建合并日志失败: {error}")))?;
+    let mut command = Command::new(ffmpeg);
+    command
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+        ])
+        .arg(ffmpeg_path_string(&list_path))
+        .args(["-c", "copy"]);
+    if let Some(format) = output_format_for(destination) {
+        command.args(["-f", format]);
+    }
+    if dest_extension.eq_ignore_ascii_case(".mp4")
+        || dest_extension.eq_ignore_ascii_case(".mov")
+        || dest_extension.eq_ignore_ascii_case(".m4v")
+    {
+        command.args(["-movflags", "+faststart"]);
+    }
+    command
+        .arg(ffmpeg_path_string(&temp))
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            log_file
+                .try_clone()
+                .map_err(|error| CopyError::Message(format!("打开合并日志失败: {error}")))?,
+        ));
+    hide_console_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| CopyError::Message(format!("启动 ffmpeg 合并失败: {error}")))?;
+
+    // Stream copy has no reliable byte meter; report input size as the target
+    // and advance by polling the growing output plus a final full-credit step.
+    on_bytes(0);
+    let mut last_reported = 0_u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CopyError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let _ = log_file.flush();
+                    let detail = fs::read_to_string(&log_path)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    let detail = if detail.is_empty() {
+                        format!("ffmpeg 退出码 {}", status)
+                    } else {
+                        detail
+                    };
+                    return Err(CopyError::Message(format!("ffmpeg 合并失败: {detail}")));
+                }
+                break;
+            }
+            Ok(None) => {
+                if let Ok(meta) = fs::metadata(&temp) {
+                    let written = meta.len().min(expected_size);
+                    if written > last_reported {
+                        last_reported = written;
+                        on_bytes(written);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CopyError::Message(format!("等待 ffmpeg 合并失败: {error}")));
+            }
+        }
+    }
+
+    let merged = fs::metadata(&temp)
+        .map_err(|error| CopyError::Message(format!("校验合并结果失败: {error}")))?
+        .len();
+    if merged == 0 {
+        return Err(CopyError::Message("合并结果为空".to_owned()));
+    }
+    // Stream copy of same-codec segments should land near the input total; allow
+    // container overhead but reject obvious truncation.
+    if expected_size > 0 && merged + expected_size / 20 < expected_size {
+        return Err(CopyError::Message(format!(
+            "合并结果大小异常: {} 字节，期望约 {expected_size}",
+            merged
+        )));
+    }
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|error| CopyError::Message(format!("替换冲突文件失败: {error}")))?;
+    }
+    fs::rename(&temp, destination)
+        .map_err(|error| CopyError::Message(format!("提交合并文件失败: {error}")))?;
+    temp_guard.armed = false;
+    drop(list_guard);
+    drop(log_guard);
+    remove_merge_scratch(parent, &dest_stem);
+    on_bytes(expected_size);
+    Ok(merged)
+}
+
+/// Drop `.VID_….camlib-part` / `.camlib-merge` leftovers from this stem.
+/// The committed file is `VID_….mp4` and does not match the scratch prefix.
+fn remove_merge_scratch(parent: &Path, dest_stem: &str) {
+    let prefix = format!(".{dest_stem}.camlib-");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 struct TempGuard {
@@ -1063,6 +1497,218 @@ impl BackupItemHint for BackupItem {
     }
 }
 
+/// Camera auto-split segments share `VID_YYYYMMDD_HHMMSS` and differ only in a
+/// trailing file counter (`_333`, `_334`). Different timestamps mean different
+/// recordings even when the counters are consecutive.
+pub(crate) fn parse_segment_key(file_name: &str) -> Option<(String, u64)> {
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file_name);
+    let (prefix, seq) = stem.rsplit_once('_')?;
+    if !seq.bytes().all(|byte| byte.is_ascii_digit()) || seq.is_empty() {
+        return None;
+    }
+    let seq = seq.parse::<u64>().ok()?;
+    let mut parts = prefix.split('_');
+    let _tag = parts.next()?;
+    let date = parts.next()?;
+    let time = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if date.len() != 8 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if time.len() != 6 || !time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((prefix.to_ascii_uppercase(), seq))
+}
+
+/// One continuous split keeps the timestamp as the file name. A gap in the
+/// counter produces separate runs; those runs must not share one output path.
+pub(crate) fn merged_output_name(
+    key: &str,
+    extension: &str,
+    start_seq: u64,
+    end_seq: u64,
+    run_count: usize,
+) -> String {
+    if run_count <= 1 {
+        format!("{key}{extension}")
+    } else {
+        // A bare `_{start}` would collide with the first segment's own file name.
+        format!("{key}_{start_seq}-{end_seq}{extension}")
+    }
+}
+
+fn file_name_from_relative(relative: &str) -> String {
+    relative
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(relative)
+        .to_owned()
+}
+
+fn merged_size_matches(actual: u64, expected: u64) -> bool {
+    if expected == 0 {
+        return actual == 0;
+    }
+    let slack = expected / 20;
+    actual + slack >= expected && actual <= expected.saturating_add(slack)
+}
+
+/// The collapsed destination is a new file name. Re-read that path so a previous
+/// merge is not planned again, and a same-named stranger stays a conflict.
+fn refresh_merged_destinations(
+    items: &mut [BackupItemPreviewDto],
+    target_root: &Path,
+) -> Result<(), BackupError> {
+    for item in items
+        .iter_mut()
+        .filter(|item| !item.merge_sources.is_empty())
+    {
+        let Some(relative) = item.destination_relative.clone() else {
+            continue;
+        };
+        let destination = safe_join(target_root, &relative).map_err(BackupError::Invalid)?;
+        if !destination.exists() {
+            item.status = BackupItemStatus::Ready;
+            continue;
+        }
+        let actual = fs::metadata(&destination)
+            .map_err(|error| BackupError::Io {
+                path: destination,
+                source: error,
+            })?
+            .len();
+        if merged_size_matches(actual, item.size_bytes) {
+            item.status = BackupItemStatus::AlreadyExists;
+            item.reason = Some("合并后的视频已在媒体库中".to_owned());
+        } else {
+            item.status = BackupItemStatus::Conflict;
+            item.reason = Some("合并目标已存在，且大小与分段合计不一致".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn merge_group_summaries(
+    items: &[BackupItemPreviewDto],
+    conflict_policy: &ConflictPolicy,
+) -> Vec<BackupMergeGroupDto> {
+    items
+        .iter()
+        .filter(|item| {
+            !item.merge_sources.is_empty()
+                && (item.status == BackupItemStatus::Ready
+                    || (item.status == BackupItemStatus::Conflict
+                        && *conflict_policy != ConflictPolicy::SkipSame))
+        })
+        .map(|item| {
+            let mut segments = vec![file_name_from_relative(&item.source_relative)];
+            segments.extend(
+                item.merge_sources
+                    .iter()
+                    .map(|path| file_name_from_relative(path)),
+            );
+            BackupMergeGroupDto {
+                file_name: item.file_name.clone(),
+                segments,
+                size_bytes: item.size_bytes,
+            }
+        })
+        .collect()
+}
+
+/// Collapse ready/conflict video items that share a segment key into a single
+/// merge item. Already-exists/ignored files stay as independent rows.
+fn collapse_segment_groups(items: Vec<BackupItemPreviewDto>) -> Vec<BackupItemPreviewDto> {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.kind.as_deref() != Some("视频") {
+            continue;
+        }
+        if !matches!(item.status, BackupItemStatus::Ready | BackupItemStatus::Conflict) {
+            continue;
+        }
+        let Some((key, _seq)) = parse_segment_key(&item.file_name) else {
+            continue;
+        };
+        groups.entry(key).or_default().push(index);
+    }
+
+    let mut output: Vec<BackupItemPreviewDto> = Vec::with_capacity(items.len());
+    let mut taken = vec![false; items.len()];
+
+    for (key, indices) in groups {
+        let keyed = indices
+            .into_iter()
+            .filter_map(|index| {
+                parse_segment_key(&items[index].file_name).map(|(_, seq)| (seq, index))
+            })
+            .collect::<Vec<_>>();
+        let candidate_runs = split_consecutive_runs(keyed);
+        let mut accepted = Vec::new();
+        for run in candidate_runs {
+            if run.len() < 2 {
+                continue;
+            }
+            let head = &items[run[0]];
+            let extension = head.extension.to_ascii_lowercase();
+            let dest_dir = head
+                .destination_relative
+                .as_ref()
+                .and_then(|path| Path::new(path).parent().map(|parent| parent.to_path_buf()));
+            if run.iter().any(|index| {
+                let item = &items[*index];
+                item.extension.to_ascii_lowercase() != extension
+                    || item
+                        .destination_relative
+                        .as_ref()
+                        .and_then(|path| Path::new(path).parent().map(|parent| parent.to_path_buf()))
+                        != dest_dir
+            }) {
+                continue;
+            }
+            accepted.push((run, extension, dest_dir));
+        }
+        let run_count = accepted.len();
+        for (run, extension, dest_dir) in accepted {
+            let head = &items[run[0]];
+            let segment_count = run.len();
+            let size_bytes = run.iter().map(|index| items[*index].size_bytes).sum();
+            let mut merge_sources = Vec::with_capacity(segment_count.saturating_sub(1));
+            for index in run.iter().skip(1) {
+                merge_sources.push(items[*index].source_relative.clone());
+                taken[*index] = true;
+            }
+            let start_seq = parse_segment_key(&head.file_name)
+                .map(|(_, seq)| seq)
+                .unwrap_or(0);
+            let end_seq = parse_segment_key(&items[*run.last().unwrap_or(&run[0])].file_name)
+                .map(|(_, seq)| seq)
+                .unwrap_or(start_seq);
+            let file_name = merged_output_name(&key, &extension, start_seq, end_seq, run_count);
+            let destination_relative = dest_dir.map(|dir| path_to_string(&dir.join(&file_name)));
+            let mut head_item = head.clone();
+            head_item.file_name = file_name;
+            head_item.size_bytes = size_bytes;
+            head_item.destination_relative = destination_relative;
+            head_item.merge_sources = merge_sources;
+            head_item.merge_group = Some(key.clone());
+            head_item.reason = Some(format!("合并 {segment_count} 个相机分段视频"));
+            output.push(head_item);
+            taken[run[0]] = true;
+        }
+    }
+
+    for (index, item) in items.into_iter().enumerate() {
+        if !taken[index] {
+            output.push(item);
+        }
+    }
+    output
+}
+
 fn collect_items(
     source_root: &Path,
     dcim_path: &Path,
@@ -1137,6 +1783,8 @@ fn plan_item(
             extension,
             status: BackupItemStatus::Ignored,
             reason: Some("扩展名按备份设置忽略".to_owned()),
+            merge_sources: Vec::new(),
+            merge_group: None,
         });
     }
     let kind = if PHOTO_EXTENSIONS.contains(&extension.as_str()) {
@@ -1155,6 +1803,8 @@ fn plan_item(
             extension,
             status: BackupItemStatus::Ignored,
             reason: Some("不支持的媒体扩展名".to_owned()),
+            merge_sources: Vec::new(),
+            merge_group: None,
         });
     };
 
@@ -1182,6 +1832,8 @@ fn plan_item(
             extension,
             status: BackupItemStatus::Ignored,
             reason: Some("无法确定拍摄日期".to_owned()),
+            merge_sources: Vec::new(),
+            merge_group: None,
         });
     };
     let destination_path = target_root.join(&destination_relative_path);
@@ -1216,6 +1868,8 @@ fn plan_item(
         extension,
         status,
         reason: None,
+        merge_sources: Vec::new(),
+        merge_group: None,
     })
 }
 
@@ -1580,6 +2234,7 @@ mod tests {
             ConflictPolicy::SkipSame,
             None,
             Some(5),
+            Some(true),
         )
         .unwrap();
 
@@ -1625,6 +2280,7 @@ mod tests {
             ConflictPolicy::SkipSame,
             Some(vec!["LRV".to_owned()]),
             Some(u64::MAX),
+            Some(false),
         )
         .unwrap();
         let item = preview
@@ -1664,6 +2320,7 @@ mod tests {
             ConflictPolicy::SkipSame,
             None,
             Some(u64::MAX),
+            Some(false),
         )
         .unwrap();
 
@@ -1694,6 +2351,323 @@ mod tests {
     }
 
     #[test]
+    fn parse_segment_key_groups_same_timestamp_and_rejects_different_ones() {
+        let (key_a, seq_a) = parse_segment_key("VID_20261001_153408_333.mp4").unwrap();
+        let (key_b, seq_b) = parse_segment_key("VID_20261001_153408_334.mp4").unwrap();
+        assert_eq!(key_a, "VID_20261001_153408");
+        assert_eq!(key_a, key_b);
+        assert_eq!((seq_a, seq_b), (333, 334));
+
+        let (key_c, _) = parse_segment_key("VID_20260816_150035_122.mp4").unwrap();
+        let (key_d, _) = parse_segment_key("VID_20260816_150534_123.mp4").unwrap();
+        assert_ne!(key_c, key_d);
+
+        assert!(parse_segment_key("IMG_20240102_123456.JPG").is_none());
+        assert!(parse_segment_key("VID_20261001_153408.mp4").is_none());
+        assert!(parse_segment_key("VID_2026101_153408_333.mp4").is_none());
+    }
+
+    #[test]
+    fn ffmpeg_path_string_strips_extended_prefix_and_uses_forward_slashes() {
+        assert_eq!(
+            ffmpeg_path_string(Path::new(r"\\?\H:\DCIM-local\2026\视频\a.mp4")),
+            "H:/DCIM-local/2026/视频/a.mp4"
+        );
+        assert_eq!(
+            ffmpeg_path_string(Path::new(r"\\?\UNC\server\share\a.mp4")),
+            "//server/share/a.mp4"
+        );
+        assert_eq!(
+            ffmpeg_path_string(Path::new(r"H:\plain\a.mp4")),
+            "H:/plain/a.mp4"
+        );
+    }
+
+    #[test]
+    fn output_format_for_maps_camera_containers() {
+        assert_eq!(
+            output_format_for(Path::new("VID_x.mp4")),
+            Some("mp4")
+        );
+        assert_eq!(
+            output_format_for(Path::new("VID_x.MOV")),
+            Some("mov")
+        );
+        assert_eq!(output_format_for(Path::new("clip.bin")), None);
+    }
+
+    #[test]
+    fn collapse_segment_groups_merges_same_timestamp_only() {
+        let base = |name: &str, size: u64, dest: &str| BackupItemPreviewDto {
+            source_relative: format!("DCIM\\100MEDIA\\{name}"),
+            destination_relative: Some(dest.to_owned()),
+            file_name: name.to_owned(),
+            kind: Some("视频".to_owned()),
+            capture_date: Some("2026-10-01".to_owned()),
+            date_source: Some("filename".to_owned()),
+            size_bytes: size,
+            extension: ".mp4".to_owned(),
+            status: BackupItemStatus::Ready,
+            reason: None,
+            merge_sources: Vec::new(),
+            merge_group: None,
+        };
+        let items = vec![
+            base(
+                "VID_20261001_153408_333.mp4",
+                10,
+                "2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4",
+            ),
+            base(
+                "VID_20261001_153408_334.mp4",
+                20,
+                "2026/10/2026-10-01/视频/VID_20261001_153408_334.mp4",
+            ),
+            base(
+                "VID_20260816_150035_122.mp4",
+                5,
+                "2026/08/2026-08-16/视频/VID_20260816_150035_122.mp4",
+            ),
+            base(
+                "VID_20260816_150534_123.mp4",
+                6,
+                "2026/08/2026-08-16/视频/VID_20260816_150534_123.mp4",
+            ),
+            base(
+                "VID_20261001_144056_327.mp4",
+                3,
+                "2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4",
+            ),
+            base(
+                "VID_20261001_144056_328.mp4",
+                4,
+                "2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4",
+            ),
+        ];
+        let collapsed = collapse_segment_groups(items);
+        assert_eq!(collapsed.len(), 4);
+
+        let merged = collapsed
+            .iter()
+            .find(|item| item.file_name == "VID_20261001_153408.mp4")
+            .unwrap();
+        assert_eq!(merged.size_bytes, 30);
+        assert_eq!(merged.merge_sources.len(), 1);
+        assert_eq!(
+            merged.destination_relative.as_deref(),
+            Some("2026\\10\\2026-10-01\\视频\\VID_20261001_153408.mp4")
+        );
+
+        let merged_327 = collapsed
+            .iter()
+            .find(|item| item.file_name == "VID_20261001_144056.mp4")
+            .unwrap();
+        assert_eq!(merged_327.size_bytes, 7);
+
+        assert!(collapsed
+            .iter()
+            .any(|item| item.file_name == "VID_20260816_150035_122.mp4"));
+        assert!(collapsed
+            .iter()
+            .any(|item| item.file_name == "VID_20260816_150534_123.mp4"));
+    }
+
+    #[test]
+    fn merge_segment_relatives_does_not_duplicate_the_head_path() {
+        let head = "DCIM\\100MEDIA\\VID_20261001_153408_333.mp4";
+        let extra = "DCIM\\100MEDIA\\VID_20261001_153408_334.mp4";
+        let complete = serde_json::to_string(&vec![head, extra]).unwrap();
+        let extras_only = serde_json::to_string(&vec![extra]).unwrap();
+        assert_eq!(
+            merge_segment_relatives(head, Some(&complete)),
+            vec![head.to_owned(), extra.to_owned()]
+        );
+        assert_eq!(
+            merge_segment_relatives(head, Some(&extras_only)),
+            vec![head.to_owned(), extra.to_owned()]
+        );
+        assert!(merge_segment_relatives(head, None).is_empty());
+    }
+
+    #[test]
+    fn collapse_skips_nonconsecutive_sequence_numbers() {
+        let base = |name: &str, dest: &str| BackupItemPreviewDto {
+            source_relative: format!("DCIM\\100MEDIA\\{name}"),
+            destination_relative: Some(dest.to_owned()),
+            file_name: name.to_owned(),
+            kind: Some("视频".to_owned()),
+            capture_date: Some("2026-10-01".to_owned()),
+            date_source: Some("filename".to_owned()),
+            size_bytes: 10,
+            extension: ".mp4".to_owned(),
+            status: BackupItemStatus::Ready,
+            reason: None,
+            merge_sources: Vec::new(),
+            merge_group: None,
+        };
+        let items = vec![
+            base(
+                "VID_20261001_153408_333.mp4",
+                "2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4",
+            ),
+            base(
+                "VID_20261001_153408_335.mp4",
+                "2026/10/2026-10-01/视频/VID_20261001_153408_335.mp4",
+            ),
+        ];
+        let collapsed = collapse_segment_groups(items);
+        assert_eq!(collapsed.len(), 2);
+        assert!(collapsed.iter().all(|item| item.merge_sources.is_empty()));
+    }
+
+    #[test]
+    fn collapse_joins_three_consecutive_segments_and_splits_a_counter_gap() {
+        let base = |name: &str| BackupItemPreviewDto {
+            source_relative: format!("DCIM\\100MEDIA\\{name}"),
+            destination_relative: Some(format!("2026/10/2026-10-01/视频/{name}")),
+            file_name: name.to_owned(),
+            kind: Some("视频".to_owned()),
+            capture_date: Some("2026-10-01".to_owned()),
+            date_source: Some("filename".to_owned()),
+            size_bytes: 10,
+            extension: ".mp4".to_owned(),
+            status: BackupItemStatus::Ready,
+            reason: None,
+            merge_sources: Vec::new(),
+            merge_group: None,
+        };
+        let continuous = collapse_segment_groups(vec![
+            base("VID_20261001_153408_333.mp4"),
+            base("VID_20261001_153408_334.mp4"),
+            base("VID_20261001_153408_335.mp4"),
+        ]);
+        assert_eq!(continuous.len(), 1);
+        assert_eq!(continuous[0].file_name, "VID_20261001_153408.mp4");
+        assert_eq!(continuous[0].merge_sources.len(), 2);
+        assert_eq!(continuous[0].size_bytes, 30);
+
+        let gapped = collapse_segment_groups(vec![
+            base("VID_20261001_153408_333.mp4"),
+            base("VID_20261001_153408_334.mp4"),
+            base("VID_20261001_153408_336.mp4"),
+            base("VID_20261001_153408_337.mp4"),
+        ]);
+        assert_eq!(gapped.len(), 2);
+        let names = gapped
+            .iter()
+            .map(|item| item.file_name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"VID_20261001_153408_333-334.mp4"));
+        assert!(names.contains(&"VID_20261001_153408_336-337.mp4"));
+        assert_ne!(
+            gapped[0].destination_relative,
+            gapped[1].destination_relative
+        );
+    }
+
+    #[test]
+    fn preview_treats_an_existing_merged_file_as_already_backed_up() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let repository = Repository::open_in_memory().unwrap();
+        library(&repository, target.path());
+        write(
+            &source
+                .path()
+                .join("DCIM/100MEDIA/VID_20261001_153408_333.mp4"),
+            &vec![1_u8; 10],
+        );
+        write(
+            &source
+                .path()
+                .join("DCIM/100MEDIA/VID_20261001_153408_334.mp4"),
+            &vec![2_u8; 20],
+        );
+        write(
+            &target
+                .path()
+                .join("2026/10/2026-10-01/视频/VID_20261001_153408.mp4"),
+            &vec![0_u8; 30],
+        );
+
+        let preview = preview_paths(
+            &repository,
+            source_candidate(source.path()),
+            target.path().to_string_lossy().into_owned(),
+            "library-test".to_owned(),
+            ConflictPolicy::SkipSame,
+            None,
+            Some(u64::MAX),
+            Some(true),
+        )
+        .unwrap();
+
+        assert_eq!(preview.merge_group_count, 0);
+        let merged = preview
+            .items
+            .iter()
+            .find(|item| item.file_name == "VID_20261001_153408.mp4")
+            .unwrap();
+        assert_eq!(merged.status, BackupItemStatus::AlreadyExists);
+        assert_eq!(preview.ready_files, 0);
+    }
+
+    #[test]
+    fn preview_reports_merge_groups_and_persists_merge_sources() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let repository = Repository::open_in_memory().unwrap();
+        library(&repository, target.path());
+        write(
+            &source
+                .path()
+                .join("DCIM/100MEDIA/VID_20261001_153408_333.mp4"),
+            &vec![1_u8; 10],
+        );
+        write(
+            &source
+                .path()
+                .join("DCIM/100MEDIA/VID_20261001_153408_334.mp4"),
+            &vec![2_u8; 20],
+        );
+        write(
+            &source
+                .path()
+                .join("DCIM/100MEDIA/VID_20260816_150035_122.mp4"),
+            &vec![3_u8; 5],
+        );
+
+        let preview = preview_paths(
+            &repository,
+            source_candidate(source.path()),
+            target.path().to_string_lossy().into_owned(),
+            "library-test".to_owned(),
+            ConflictPolicy::SkipSame,
+            None,
+            Some(u64::MAX),
+            Some(true),
+        )
+        .unwrap();
+
+        assert_eq!(preview.merge_segments, true);
+        assert_eq!(preview.merge_group_count, 1);
+        assert_eq!(preview.merge_segment_count, 2);
+        assert_eq!(preview.ready_files, 2);
+        assert_eq!(preview.total_bytes, 35);
+
+        let items = repository.list_backup_items(&preview.backup_run_id).unwrap();
+        let merge_item = items
+            .iter()
+            .find(|item| item.source_relative.contains("VID_20261001_153408_333"))
+            .unwrap();
+        let sources: Vec<String> =
+            serde_json::from_str(merge_item.merge_sources_json.as_deref().unwrap()).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources[0].contains("333"));
+        assert!(sources[1].contains("334"));
+    }
+
+    #[test]
     fn preview_rejects_target_inside_camera_source() {
         let source = TempDir::new().unwrap();
         let repository = Repository::open_in_memory().unwrap();
@@ -1709,6 +2683,7 @@ mod tests {
             ConflictPolicy::SkipSame,
             None,
             Some(0),
+            Some(true),
         )
         .unwrap_err();
         assert!(error.to_string().contains("不能位于相机源盘内"));

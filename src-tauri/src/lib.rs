@@ -3,6 +3,7 @@ pub mod db;
 mod deletion;
 mod errors;
 mod infrastructure;
+mod library_merge;
 mod media;
 mod scanner;
 mod system;
@@ -129,6 +130,17 @@ fn set_backup_ignore_extensions(
 ) -> Result<AppSettings, AppError> {
     state.with_infrastructure(|infrastructure| {
         infrastructure.set_backup_ignore_extensions(extensions)
+    })
+}
+
+/// Toggle camera-split video segment merging during backup.
+#[tauri::command]
+fn set_backup_merge_segments(
+    enabled: bool,
+    state: State<'_, InfrastructureState>,
+) -> Result<AppSettings, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure.set_backup_merge_segments(enabled)
     })
 }
 
@@ -1107,6 +1119,65 @@ fn backup_run_items(
     })
 }
 
+/// Preview library camera-split video segments that can be merged.
+#[tauri::command]
+fn library_merge_preview(
+    library_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<library_merge::LibraryMergePreviewDto, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        library_merge::preview(infrastructure.repository(), &library_id).map_err(|error| {
+            infrastructure::InfrastructureError::InvalidPath(error.to_string())
+        })
+    })
+    .map_err(AppError::from)
+}
+
+/// Start merging library segments. Sources stay untouched unless recycle is on.
+#[tauri::command]
+fn library_merge_start(
+    library_id: String,
+    recycle_sources: Option<bool>,
+    destinations: Option<Vec<String>>,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    merges: State<'_, library_merge::LibraryMergeManagerState>,
+    scans: State<'_, ScanManagerState>,
+) -> Result<library_merge::LibraryMergeStartDto, AppError> {
+    let database_path = infrastructure.with_infrastructure(|value| {
+        value
+            .repository()
+            .get_library(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        Ok(value.database_path())
+    })?;
+    let (job_id, cancel) = merges.start()?;
+    library_merge::spawn(
+        app,
+        Arc::new(merges.inner().clone()),
+        Arc::new(scans.inner().clone()),
+        database_path,
+        library_id,
+        job_id.clone(),
+        cancel,
+        recycle_sources.unwrap_or(false),
+        destinations,
+    );
+    Ok(library_merge::LibraryMergeStartDto { job_id })
+}
+
+/// Cancel the running library segment merge job.
+#[tauri::command]
+fn library_merge_cancel(
+    job_id: String,
+    merges: State<'_, library_merge::LibraryMergeManagerState>,
+) -> Result<(), AppError> {
+    merges.cancel(&job_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let streams = MediaStreamRegistry::default();
@@ -1145,6 +1216,7 @@ pub fn run() {
             app.manage(InfrastructureState::new(infrastructure));
             app.manage(ScanManagerState::new());
             app.manage(BackupManagerState::new());
+            app.manage(library_merge::LibraryMergeManagerState::new());
             app.manage(PreviewJobManagerState::new());
             app.manage(streams.clone());
 
@@ -1165,6 +1237,7 @@ pub fn run() {
             set_thumbnail_cache_dir,
             set_backup_conflict_policy,
             set_backup_ignore_extensions,
+            set_backup_merge_segments,
             set_ui_prefs,
             set_auto_scan_on_startup,
             set_notifications_enabled,
@@ -1208,7 +1281,10 @@ pub fn run() {
             backup_retry_failed,
             backup_cancel,
             backup_history,
-            backup_run_items
+            backup_run_items,
+            library_merge_preview,
+            library_merge_start,
+            library_merge_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

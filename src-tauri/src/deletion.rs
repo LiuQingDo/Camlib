@@ -396,7 +396,7 @@ fn safe_component(value: &str) -> String {
 }
 
 #[cfg(windows)]
-fn send_to_recycle_bin(path: &Path) -> Result<(), crate::errors::AppError> {
+pub(crate) fn send_to_recycle_bin(path: &Path) -> Result<(), crate::errors::AppError> {
     use windows_sys::Win32::UI::Shell::{
         SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
         SHFILEOPSTRUCTW,
@@ -436,7 +436,7 @@ fn send_to_recycle_bin(path: &Path) -> Result<(), crate::errors::AppError> {
 }
 
 #[cfg(not(windows))]
-fn send_to_recycle_bin(_path: &Path) -> Result<(), crate::errors::AppError> {
+pub(crate) fn send_to_recycle_bin(_path: &Path) -> Result<(), crate::errors::AppError> {
     Err(crate::errors::AppError::io("当前平台不支持 Windows 回收站"))
 }
 
