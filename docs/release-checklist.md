@@ -4,12 +4,12 @@
 
 ## 1. 版本号
 
-- `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的 `version` 保持一致（当前 `0.2.0`）。
+- `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的 `version` 保持一致（当前 `0.3.0`）。
 - 策略：`MAJOR.MINOR.PATCH`
   - **PATCH**：修 bug、文案、安全加固，无数据迁移
   - **MINOR**：新功能、索引/设置向后兼容扩展
   - **MAJOR**：破坏性变更（需迁移或重新扫描）
-- SQLite 迁移版本见 `CURRENT_SCHEMA_VERSION`（`src-tauri/src/db/mod.rs`，当前为 5）；升级后首次启动自动迁移。表结构说明见 `data-model.md`。
+- SQLite 迁移版本见 `CURRENT_SCHEMA_VERSION`（`src-tauri/src/db/mod.rs`，当前为 6）；升级后首次启动自动迁移。表结构说明见 `data-model.md`。
 
 ## 2. 安全与权限
 

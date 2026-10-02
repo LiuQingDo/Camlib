@@ -15,8 +15,13 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-03
+
+Assets: [GitHub Release v0.3.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.0) — `Camlib_0.3.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.3.0_x64_en-US.msi` (WiX)
+
 ### Added
 
+- Merge camera-split video segments during backup: same-timestamp consecutive clips concatenate with progress and cancel; selective merge for already backed-up segments; scans ignore leftover merge scratch and drop those rows from the library
 - Sort media by file size (`文件大→小` / `文件小→大`); the choice persists as part of UI preferences
 
 ### Fixed
@@ -71,7 +76,8 @@ Initial line: local media library (scan, browse, filter), favorites / tags / rat
 
 <!-- Link refs -->
 
-[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.2.0
 [0.1.2]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.1.2
 [0.1.1]: https://github.com/LiuQingDo/Camlib/compare/v0.1.0...v0.1.1
