@@ -19,7 +19,7 @@
 | `media.rs` | 缩略图、ffmpeg 适配器、`camlib` 流协议与 Range |
 | `deletion.rs` | 路径解析、回收站删除预检与执行 |
 | `backup.rs` | DCIM 发现、预览、复制校验、分段视频合并、重试 |
-| `library_merge.rs` | 媒体库内已备份分段视频的预览与合并 |
+| `library_merge.rs` | 媒体库内已备份分段视频的预览与合并；回收源分段后同步清理其索引行 |
 | `system.rs` | 托盘、关闭行为、通知、卷监视 |
 
 **前端边界**（`src/`）：

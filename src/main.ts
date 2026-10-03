@@ -33,6 +33,7 @@ import {
   openMediaFolder,
   previewDelete,
   deleteMediaItems,
+  purgeMissingItems,
   discoverBackupSources,
   previewBackup,
   startBackup,
@@ -187,6 +188,7 @@ interface AppState {
   thumbnailJobId: string | null;
   thumbnailProgress: PreviewProgressDto | null;
   fullRebuildConfirm: boolean;
+  purgeMissingConfirm: boolean;
   settingsBusy: boolean;
   libraryStatusReason: string | null;
   thumbnailCacheDir: string;
@@ -289,6 +291,7 @@ const state: AppState = {
   thumbnailJobId: null,
   thumbnailProgress: null,
   fullRebuildConfirm: false,
+  purgeMissingConfirm: false,
   settingsBusy: false,
   libraryStatusReason: null,
   thumbnailCacheDir: "",
@@ -1873,12 +1876,20 @@ function renderSettingsIndexSection(): string {
       <div class="settings-actions">
         <button class="outline-button" type="button" id="settings-incremental-scan" ${state.scanning || !state.library || state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "增量扫描"}</button>
         <button class="danger-button" type="button" id="settings-full-rebuild" ${state.scanning || !state.library || state.availability !== "available" ? "disabled" : ""}>全量重建索引</button>
+        <button class="danger-button" type="button" id="settings-purge-missing" ${state.scanning || !state.library || state.availability !== "available" || !summary || summary.missing <= 0 ? "disabled" : ""}>清理离线条目</button>
       </div>
       ${state.fullRebuildConfirm ? `<div class="settings-confirm">
         <p>全量重建会重新读取库内全部文件的元数据，比增量扫描更耗时。收藏、标签与评分会保留。是否继续？</p>
         <div class="settings-actions">
           <button class="outline-button" type="button" id="settings-full-rebuild-cancel">取消</button>
           <button class="danger-button confirm-danger" type="button" id="settings-full-rebuild-confirm">确认全量重建</button>
+        </div>
+      </div>` : ""}
+      ${state.purgeMissingConfirm ? `<div class="settings-confirm">
+        <p>将从索引中移除全部 ${formatCount(summary?.missing ?? 0)} 个离线条目（文件已不在媒体库里的卡片，例如合并后回收的分段）。只影响索引记录，不会删除任何文件。是否继续？</p>
+        <div class="settings-actions">
+          <button class="outline-button" type="button" id="settings-purge-missing-cancel">取消</button>
+          <button class="danger-button confirm-danger" type="button" id="settings-purge-missing-confirm">确认清理</button>
         </div>
       </div>` : ""}
       ${state.scanning && state.scanProgress ? `<div class="settings-note">当前：${escapeHtml(scanStatusLabel(state.scanProgress))} · ${escapeHtml(scanPercentLabel(state.scanProgress))}<button class="text-button" type="button" id="settings-scan-cancel">取消扫描</button></div>` : ""}
@@ -2505,6 +2516,7 @@ function bindSettingsEvents(): void {
       state.settingsError = null;
       state.settingsNotice = null;
       state.fullRebuildConfirm = false;
+      state.purgeMissingConfirm = false;
       state.settingsLoading = true;
       updateSettingsPanel();
       void loadSettingsSectionData().finally(() => {
@@ -2552,6 +2564,16 @@ function bindSettingsBodyEvents(): void {
   });
   app.querySelector<HTMLButtonElement>("#settings-full-rebuild-confirm")?.addEventListener("click", () => void runSettingsScan(true));
   app.querySelector<HTMLButtonElement>("#settings-scan-cancel")?.addEventListener("click", () => void cancelCurrentScan());
+  app.querySelector<HTMLButtonElement>("#settings-purge-missing")?.addEventListener("click", () => {
+    state.purgeMissingConfirm = true;
+    state.settingsError = null;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#settings-purge-missing-cancel")?.addEventListener("click", () => {
+    state.purgeMissingConfirm = false;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#settings-purge-missing-confirm")?.addEventListener("click", () => void purgeMissingEntries());
   app.querySelector<HTMLButtonElement>("#library-merge-preview")?.addEventListener("click", () => void loadLibraryMergePreview());
   app.querySelector<HTMLButtonElement>("#library-merge-start")?.addEventListener("click", () => {
     if (!state.libraryMergePreview || state.libraryMergeSelected.size === 0) return;
@@ -2632,6 +2654,7 @@ async function openSettings(section?: SettingsSection): Promise<void> {
   state.settingsError = null;
   state.settingsNotice = null;
   state.fullRebuildConfirm = false;
+  state.purgeMissingConfirm = false;
   render();
   try {
     await loadSettingsSectionData();
@@ -2644,6 +2667,7 @@ async function openSettings(section?: SettingsSection): Promise<void> {
 function closeSettings(rerender = true): void {
   state.settingsOpen = false;
   state.fullRebuildConfirm = false;
+  state.purgeMissingConfirm = false;
   state.settingsError = null;
   state.settingsNotice = null;
   if (rerender) render();
@@ -2743,6 +2767,24 @@ async function runSettingsScan(full: boolean): Promise<void> {
   } catch (error) {
     state.settingsError = toUserMessage(error, "无法开始扫描");
     state.settingsNotice = null;
+    updateSettingsPanel();
+  }
+}
+
+async function purgeMissingEntries(): Promise<void> {
+  if (!state.library) return;
+  state.purgeMissingConfirm = false;
+  state.settingsError = null;
+  updateSettingsPanel();
+  try {
+    const removed = await purgeMissingItems(state.library.id);
+    state.settingsNotice =
+      removed > 0 ? `已清理 ${formatCount(removed)} 个离线条目` : "没有可清理的离线条目";
+    await loadSettingsSectionData();
+    updateSettingsPanel();
+    void refreshMedia();
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "清理离线条目失败");
     updateSettingsPanel();
   }
 }
@@ -4074,6 +4116,9 @@ window.addEventListener("keydown", (event) => {
       event.preventDefault();
       if (state.fullRebuildConfirm) {
         state.fullRebuildConfirm = false;
+        updateSettingsPanel();
+      } else if (state.purgeMissingConfirm) {
+        state.purgeMissingConfirm = false;
         updateSettingsPanel();
       } else {
         closeSettings();

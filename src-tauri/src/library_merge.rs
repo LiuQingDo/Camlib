@@ -367,10 +367,18 @@ fn run(
                 groups_merged += 1;
                 bytes_processed += group.size_bytes;
                 if recycle_sources {
+                    // The source cards must leave the media list instead of
+                    // turning into permanent offline rows: the merged file now
+                    // carries their content, so drop the index rows for every
+                    // segment that made it into the recycle bin.
+                    let mut recycled_paths = Vec::with_capacity(group.sources.len());
                     for relative in &group.sources {
                         match resolve_inside(&root, relative) {
                             Ok(path) => match send_to_recycle_bin(&path) {
-                                Ok(()) => segments_recycled += 1,
+                                Ok(()) => {
+                                    segments_recycled += 1;
+                                    recycled_paths.push(relative.replace('\\', "/"));
+                                }
                                 Err(error) => {
                                     segments_kept += 1;
                                     errors.push(format!("{relative}: 移入回收站失败: {error}"));
@@ -380,6 +388,13 @@ fn run(
                                 segments_kept += 1;
                                 errors.push(format!("{relative}: {error}"));
                             }
+                        }
+                    }
+                    if !recycled_paths.is_empty() {
+                        if let Err(error) =
+                            repository.purge_files_and_empty_items(library_id, &recycled_paths)
+                        {
+                            errors.push(format!("{display}: 清理旧分段索引失败: {error}"));
                         }
                     }
                 } else {

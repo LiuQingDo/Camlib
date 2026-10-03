@@ -555,6 +555,14 @@ export function onDeleteProgress(
   return listen<DeleteProgressDto>("delete-progress", (event) => callback(event.payload));
 }
 
+/**
+ * Drop offline (`missing`) index rows for a library. The backend refuses to run
+ * while the library is unavailable so an unplugged drive cannot wipe the index.
+ */
+export function purgeMissingItems(libraryId: string): Promise<number> {
+  return invoke<number>("media_purge_missing_items", { libraryId });
+}
+
 export function getMediaThumbnail(mediaItemId: string, width = 320): Promise<ThumbnailDto> {
   return invoke<ThumbnailDto>("media_thumbnail", { mediaItemId, width });
 }

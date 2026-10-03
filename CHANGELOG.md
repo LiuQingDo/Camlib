@@ -15,6 +15,11 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Fixed
+
+- Merged-away video segments no longer linger in the media list: recycling merge sources now also drops their index rows (the follow-up scan previously only flipped them to permanent 离线 cards)
+- New 清理离线条目 action in the index settings clears existing offline index rows whose files are gone; it is blocked while the library is unavailable so an unplugged drive cannot wipe the index
+
 ## [0.3.0] - 2026-10-03
 
 Assets: [GitHub Release v0.3.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.0) — `Camlib_0.3.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.3.0_x64_en-US.msi` (WiX)

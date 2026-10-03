@@ -750,6 +750,24 @@ async fn media_delete_items(
     .map_err(|error| AppError::internal(format!("删除任务异常结束: {error}")))?
 }
 
+/// Drop offline (`missing`) index rows for a library, e.g. segments whose
+/// content now lives in a merged file. Only rows whose files are all gone
+/// qualify, and the library must currently be available so an unplugged drive
+/// cannot wipe a healthy index.
+#[tauri::command]
+fn media_purge_missing_items(
+    library_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<usize, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        ensure_library_ready(infrastructure, &library_id)?;
+        infrastructure
+            .repository()
+            .purge_missing_items(&library_id)
+            .map_err(InfrastructureError::database)
+    })
+}
+
 #[tauri::command]
 async fn media_thumbnail(
     media_item_id: String,
@@ -1270,6 +1288,7 @@ pub fn run() {
             rating_set_batch,
             media_delete_preview,
             media_delete_items,
+            media_purge_missing_items,
             media_thumbnail,
             media_preview,
             thumbnail_rebuild_start,
