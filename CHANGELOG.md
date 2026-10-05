@@ -15,6 +15,10 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-05
+
+Assets: [GitHub Release v0.3.1](https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.1) — `Camlib_0.3.1_x64-setup.exe` (NSIS, recommended), `Camlib_0.3.1_x64_en-US.msi` (WiX)
+
 ### Fixed
 
 - Merged-away video segments no longer linger in the media list: recycling merge sources now also drops their index rows (the follow-up scan previously only flipped them to permanent 离线 cards)
@@ -81,7 +85,8 @@ Initial line: local media library (scan, browse, filter), favorites / tags / rat
 
 <!-- Link refs -->
 
-[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LiuQingDo/Camlib/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.1
 [0.3.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.2.0
 [0.1.2]: https://github.com/LiuQingDo/Camlib/releases/tag/v0.1.2
