@@ -15,6 +15,11 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Added
+
+- All dialogs (媒体预览 / 媒体编辑 / 设置 / 标签管理 / 删除确认) are now manually resizable: drag any edge or corner to resize, and the size is saved automatically so the next launch opens the dialog at the adjusted size
+- Settings → 系统 gains a 弹窗大小 card with numeric width/height fine-tuning per dialog (leave a field empty to fall back to the stylesheet default) plus per-dialog and global 恢复默认 buttons
+
 ## [0.3.1] - 2026-10-05
 
 Assets: [GitHub Release v0.3.1](https://github.com/LiuQingDo/Camlib/releases/tag/v0.3.1) — `Camlib_0.3.1_x64-setup.exe` (NSIS, recommended), `Camlib_0.3.1_x64_en-US.msi` (WiX)

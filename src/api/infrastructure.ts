@@ -23,6 +23,15 @@ export type UiTheme = "light" | "dark";
 
 export type CloseBehavior = "quit" | "minimize_to_tray";
 
+/**
+ * Manually adjusted dialog geometry. An omitted dimension means "use the
+ * stylesheet default" (auto height for content-sized dialogs).
+ */
+export interface DialogSize {
+  width?: number;
+  height?: number;
+}
+
 export interface AppSettings {
   library_root: string | null;
   thumbnail_cache_dir: string;
@@ -32,6 +41,7 @@ export interface AppSettings {
   ui_sort: UiSortMode;
   ui_preview_mode: UiPreviewMode;
   ui_theme: UiTheme;
+  ui_dialog_sizes: Record<string, DialogSize>;
   auto_scan_on_startup: boolean;
   backup_ignore_extensions: string[];
   backup_merge_segments: boolean;
@@ -138,12 +148,14 @@ export function setUiPrefs(input: {
   uiSort?: UiSortMode;
   uiPreviewMode?: UiPreviewMode;
   uiTheme?: UiTheme;
+  uiDialogSizes?: Record<string, DialogSize>;
 }): Promise<AppSettings> {
   return invoke<AppSettings>("set_ui_prefs", {
     uiDensity: input.uiDensity,
     uiSort: input.uiSort,
     uiPreviewMode: input.uiPreviewMode,
     uiTheme: input.uiTheme,
+    uiDialogSizes: input.uiDialogSizes,
   });
 }
 

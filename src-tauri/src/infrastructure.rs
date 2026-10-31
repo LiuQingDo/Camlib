@@ -6,6 +6,7 @@
 
 use crate::db::{ConflictPolicy, DbError, LibraryState, NewLibrary, Repository};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -91,6 +92,23 @@ impl<'de> Deserialize<'de> for UiSort {
     }
 }
 
+/// Manually adjusted dialog geometry, keyed by dialog id (`preview`, `editor`,
+/// `settings`, `tagManager`, `confirm`). A `None` dimension falls back to the
+/// stylesheet default (auto height for content-sized dialogs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DialogSize {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+/// Sane bounds for a manually resized dialog; the frontend clamps to the live
+/// viewport on open, so persistence only rejects nonsense values.
+fn is_valid_dialog_dimension(value: u32) -> bool {
+    (120..=16384).contains(&value)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub library_root: Option<String>,
@@ -108,6 +126,9 @@ pub struct AppSettings {
     /// Light (default) or dark chrome theme; media stage stays as confirmed.
     #[serde(default)]
     pub ui_theme: UiTheme,
+    /// Per-dialog sizes the user dragged or typed; empty map = all defaults.
+    #[serde(default)]
+    pub ui_dialog_sizes: BTreeMap<String, DialogSize>,
     /// Automatically start an incremental scan when the library is available.
     #[serde(default = "default_true")]
     pub auto_scan_on_startup: bool,
@@ -419,6 +440,7 @@ impl Infrastructure {
         ui_sort: Option<UiSort>,
         ui_preview_mode: Option<UiPreviewMode>,
         ui_theme: Option<UiTheme>,
+        ui_dialog_sizes: Option<BTreeMap<String, DialogSize>>,
     ) -> Result<AppSettings, InfrastructureError> {
         if let Some(density) = ui_density {
             if !(1..=5).contains(&density) {
@@ -436,6 +458,21 @@ impl Infrastructure {
         }
         if let Some(theme) = ui_theme {
             self.store.settings.ui_theme = theme;
+        }
+        if let Some(sizes) = ui_dialog_sizes {
+            for (id, size) in &sizes {
+                let width_ok = size.width.map_or(true, is_valid_dialog_dimension);
+                let height_ok = size.height.map_or(true, is_valid_dialog_dimension);
+                if !width_ok || !height_ok {
+                    return Err(InfrastructureError::InvalidSettings(format!(
+                        "弹窗 {id} 的尺寸必须在 120 到 16384 像素之间"
+                    )));
+                }
+            }
+            // The map is the source of truth; the frontend always sends the
+            // full set it holds, so a wholesale replace keeps both sides in
+            // sync (including removals from "恢复默认").
+            self.store.settings.ui_dialog_sizes = sizes;
         }
         self.store.save()?;
         self.settings()
@@ -620,6 +657,7 @@ impl SettingsStore {
                 ui_sort: UiSort::default(),
                 ui_preview_mode: UiPreviewMode::default(),
                 ui_theme: UiTheme::default(),
+                ui_dialog_sizes: BTreeMap::new(),
                 auto_scan_on_startup: true,
                 backup_ignore_extensions: default_backup_ignore_extensions(),
                 backup_merge_segments: true,
@@ -673,6 +711,8 @@ struct DiskSettings {
     ui_preview_mode: UiPreviewMode,
     #[serde(default)]
     ui_theme: UiTheme,
+    #[serde(default)]
+    ui_dialog_sizes: BTreeMap<String, DialogSize>,
     #[serde(default = "default_true")]
     auto_scan_on_startup: bool,
     #[serde(default = "default_backup_ignore_extensions")]
@@ -718,6 +758,7 @@ impl DiskSettings {
             ui_sort: self.ui_sort.unwrap_or_default(),
             ui_preview_mode: self.ui_preview_mode,
             ui_theme: self.ui_theme,
+            ui_dialog_sizes: self.ui_dialog_sizes,
             auto_scan_on_startup: self.auto_scan_on_startup,
             backup_ignore_extensions: if self.backup_ignore_extensions.is_empty() {
                 default_backup_ignore_extensions()
@@ -743,6 +784,7 @@ impl From<&AppSettings> for DiskSettings {
             ui_sort: Some(settings.ui_sort.clone()),
             ui_preview_mode: settings.ui_preview_mode,
             ui_theme: settings.ui_theme,
+            ui_dialog_sizes: settings.ui_dialog_sizes.clone(),
             auto_scan_on_startup: settings.auto_scan_on_startup,
             backup_ignore_extensions: settings.backup_ignore_extensions.clone(),
             backup_merge_segments: settings.backup_merge_segments,

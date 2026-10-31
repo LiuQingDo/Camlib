@@ -16,8 +16,8 @@ use backup::{
 use db::{MediaKind, MediaQuery, MediaSort};
 use errors::AppError;
 use infrastructure::{
-    AppSettings, CloseBehavior, Infrastructure, InfrastructureError, InfrastructureState,
-    LibraryAvailability, LibraryStatus, UiTheme,
+    AppSettings, CloseBehavior, DialogSize, Infrastructure, InfrastructureError,
+    InfrastructureState, LibraryAvailability, LibraryStatus, UiTheme,
 };
 use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
@@ -75,6 +75,7 @@ fn set_ui_prefs(
     ui_sort: Option<String>,
     ui_preview_mode: Option<String>,
     ui_theme: Option<String>,
+    ui_dialog_sizes: Option<std::collections::BTreeMap<String, DialogSize>>,
     state: State<'_, InfrastructureState>,
 ) -> Result<AppSettings, AppError> {
     let sort = match ui_sort.as_deref() {
@@ -90,7 +91,7 @@ fn set_ui_prefs(
         None => None,
     };
     state.with_infrastructure(|infrastructure| {
-        infrastructure.set_ui_prefs(ui_density, sort, preview_mode, theme)
+        infrastructure.set_ui_prefs(ui_density, sort, preview_mode, theme, ui_dialog_sizes)
     })
 }
 

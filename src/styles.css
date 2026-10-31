@@ -2603,3 +2603,52 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 [data-theme="dark"] .editor-footer { border-top-color: rgba(255,255,255,.08); }
 [data-theme="dark"] .editor-error { color: #ff9a9a; }
 [data-theme="dark"] .editor-notice { color: #9fe0b0; }
+
+/* --- 弹窗手动调整大小：8 向拖拽手柄 + 持久化尺寸 --- */
+/* 手柄需要以弹窗为定位基准；编辑器关闭按钮也随之回到弹窗角上而非背景上。 */
+.settings-panel,
+.tag-manager,
+.confirm-dialog,
+.editor-modal { position: relative; }
+
+.dialog-resize-handle { position: absolute; z-index: 30; touch-action: none; user-select: none; color: rgba(0,0,0,.26); }
+.dialog-resize-handle:hover { color: rgba(0,0,0,.55); }
+.dialog-resize-handle.is-n { top: 0; right: 18px; left: 18px; height: 7px; cursor: ns-resize; }
+.dialog-resize-handle.is-s { right: 18px; left: 18px; bottom: 0; height: 7px; cursor: ns-resize; }
+.dialog-resize-handle.is-e { top: 18px; right: 0; bottom: 18px; width: 7px; cursor: ew-resize; }
+.dialog-resize-handle.is-w { top: 18px; left: 0; bottom: 18px; width: 7px; cursor: ew-resize; }
+.dialog-resize-handle.is-ne, .dialog-resize-handle.is-nw,
+.dialog-resize-handle.is-se, .dialog-resize-handle.is-sw { width: 16px; height: 16px; }
+.dialog-resize-handle.is-ne { top: 2px; right: 2px; cursor: nesw-resize; }
+.dialog-resize-handle.is-nw { top: 2px; left: 2px; cursor: nwse-resize; }
+.dialog-resize-handle.is-se { right: 2px; bottom: 2px; cursor: nwse-resize; }
+.dialog-resize-handle.is-sw { left: 2px; bottom: 2px; cursor: nesw-resize; }
+/* 右下角画出斜纹握把，提示可拖拽；其余方向为不可见的贴边热区。 */
+.dialog-resize-handle.is-se::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 9px;
+  height: 9px;
+  background: linear-gradient(135deg, transparent 0 30%, currentColor 30% 42%, transparent 42% 54%, currentColor 54% 66%, transparent 66% 78%, currentColor 78% 90%, transparent 90%);
+}
+.preview-modal .dialog-resize-handle { color: rgba(255,255,255,.32); }
+.preview-modal .dialog-resize-handle:hover { color: rgba(255,255,255,.65); }
+.preview-modal.is-immersive .dialog-resize-handle { display: none; }
+body.is-dialog-resizing { user-select: none; -webkit-user-select: none; }
+
+/* 设置页：弹窗大小数值微调 */
+.dialog-size-form { gap: 8px; }
+.dialog-size-row { display: flex; align-items: center; gap: 10px; }
+.dialog-size-name { flex: 0 0 76px; color: #444444; font-size: 12px; font-weight: 700; }
+.dialog-size-form .dialog-size-field { display: inline-flex; flex: 1; flex-direction: row; align-items: center; gap: 6px; color: #777777; font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.dialog-size-field input { width: 86px; height: 32px; padding: 0 8px; border: 1px solid rgba(0,0,0,.14); border-radius: 9px; color: #222222; background: rgba(255,255,255,.7); font-size: 12px; outline: 0; }
+.dialog-size-field input:focus { border-color: rgba(0,0,0,.26); box-shadow: 0 0 0 3px rgba(0,0,0,.05); }
+.dialog-size-row .text-button { flex: 0 0 auto; }
+[data-theme="dark"] .dialog-size-name { color: var(--ink, #f0f0f0); }
+[data-theme="dark"] .dialog-size-form .dialog-size-field { color: var(--muted, #999999); }
+[data-theme="dark"] .dialog-size-field input { color: var(--ink, #f0f0f0); border-color: rgba(255,255,255,.16); background: rgba(0,0,0,.3); }
+[data-theme="dark"] .dialog-size-field input:focus { border-color: rgba(255,255,255,.34); box-shadow: 0 0 0 3px rgba(255,255,255,.07); }
+[data-theme="dark"] .dialog-resize-handle { color: rgba(255,255,255,.3); }
+[data-theme="dark"] .dialog-resize-handle:hover { color: rgba(255,255,255,.6); }

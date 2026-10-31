@@ -82,6 +82,7 @@ import {
   openAppDirectory,
   type AppAboutDto,
   type CloseBehavior,
+  type DialogSize,
   type LibraryAvailability,
   type LibraryIndexSummaryDto,
   type LibraryStatus,
@@ -146,6 +147,8 @@ interface AppState {
   previewMode: UiPreviewMode;
   /** Light / dark chrome; persisted via set_ui_prefs (not localStorage). */
   theme: UiTheme;
+  /** Manually adjusted dialog sizes keyed by DIALOG_SPECS id. */
+  dialogSizes: Record<string, DialogSize>;
   loading: boolean;
   scanning: boolean;
   scanProgress: ScanProgressDto | null;
@@ -274,6 +277,7 @@ const state: AppState = {
   density: 3,
   previewMode: "standard",
   theme: "light",
+  dialogSizes: {},
   loading: true,
   scanning: false,
   scanProgress: null,
@@ -373,6 +377,209 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "system", label: "系统" },
   { id: "about", label: "关于" },
 ];
+
+/** Resizable-dialog registry: selectors, stylesheet defaults, drag minimums. */
+interface DialogSpec {
+  /** Dialog element inside its backdrop, resolved against the app root. */
+  selector: string;
+  label: string;
+  /** Stylesheet default in px; null = content-driven (auto). */
+  width: number | null;
+  height: number | null;
+  minWidth: number;
+  minHeight: number;
+}
+
+const DIALOG_SPECS: Record<string, DialogSpec> = {
+  preview: { selector: "#preview-modal .preview-modal", label: "媒体预览", width: 1050, height: 780, minWidth: 560, minHeight: 380 },
+  editor: { selector: "#editor-modal .editor-modal", label: "媒体编辑", width: 1180, height: 820, minWidth: 640, minHeight: 440 },
+  settings: { selector: "#settings-backdrop .settings-panel", label: "设置", width: 920, height: 760, minWidth: 560, minHeight: 400 },
+  tagManager: { selector: "#tag-manager-backdrop .tag-manager", label: "标签管理", width: 440, height: null, minWidth: 320, minHeight: 240 },
+  confirm: { selector: "#delete-confirm-modal .confirm-dialog", label: "删除确认", width: 520, height: null, minWidth: 300, minHeight: 200 },
+};
+
+const dialogResizeDirections = ["n", "s", "e", "w", "ne", "nw", "se", "sw"] as const;
+type DialogResizeDirection = (typeof dialogResizeDirections)[number];
+
+/** The titlebar overlays fixed drags; resized dialogs must stay below it. */
+function dialogDragTopBound(): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--titlebar-h");
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Actual horizontal/vertical backdrop insets — `.settings-backdrop` overrides the generic 25px padding. */
+function backdropInsets(dialog: HTMLElement): { x: number; y: number } {
+  const style = getComputedStyle(dialog.parentElement ?? dialog);
+  const parse = (value: string) => Number.parseFloat(value) || 0;
+  return {
+    x: parse(style.paddingLeft) + parse(style.paddingRight),
+    y: parse(style.paddingTop) + parse(style.paddingBottom),
+  };
+}
+
+/**
+ * Clamp a stored dialog size to the live viewport. The backdrop insets its
+ * content and starts below the titlebar. `clampDialogSize` runs at open time,
+ * so a size saved on a large screen shrinks gracefully on a smaller one
+ * without ever being rewritten on disk.
+ */
+function clampDialogSize(id: string, size: DialogSize | undefined, insets: { x: number; y: number }): DialogSize {
+  const spec = DIALOG_SPECS[id];
+  if (!spec || !size) return {};
+  const maxWidth = Math.max(spec.minWidth, window.innerWidth - insets.x);
+  const maxHeight = Math.max(spec.minHeight, window.innerHeight - dialogDragTopBound() - insets.y);
+  const clamp = (value: number | undefined, min: number, max: number) =>
+    value == null ? undefined : Math.min(max, Math.max(min, Math.round(value)));
+  return {
+    width: clamp(size.width, spec.minWidth, maxWidth),
+    height: clamp(size.height, spec.minHeight, maxHeight),
+  };
+}
+
+/** Drop unknown dialog ids and non-numeric values from a hand-edited file. */
+function sanitizeDialogSizes(input: unknown): Record<string, DialogSize> {
+  const sizes: Record<string, DialogSize> = {};
+  if (!input || typeof input !== "object") return sizes;
+  for (const [id, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!DIALOG_SPECS[id] || !value || typeof value !== "object") continue;
+    const raw = value as Record<string, unknown>;
+    const size: DialogSize = {};
+    if (typeof raw.width === "number" && Number.isFinite(raw.width) && raw.width >= 1) size.width = raw.width;
+    if (typeof raw.height === "number" && Number.isFinite(raw.height) && raw.height >= 1) size.height = raw.height;
+    if (size.width != null || size.height != null) sizes[id] = size;
+  }
+  return sizes;
+}
+
+/**
+ * Re-apply saved dialog geometry after every render. Inline width/height beat
+ * the stylesheet `min(...)` defaults; a missing dimension is cleared so the
+ * stylesheet rule (auto height for content-sized dialogs) applies again.
+ */
+function applyDialogSizes(): void {
+  for (const [id, spec] of Object.entries(DIALOG_SPECS)) {
+    const dialog = app.querySelector<HTMLElement>(spec.selector);
+    if (!dialog) continue;
+    if (id === "preview" && previewImmersiveOpen) {
+      // Immersive CSS owns the geometry (100vw/100vh); inline sizes would win.
+      dialog.style.removeProperty("width");
+      dialog.style.removeProperty("height");
+      dialog.style.removeProperty("max-width");
+      dialog.style.removeProperty("max-height");
+      continue;
+    }
+    const saved = clampDialogSize(id, state.dialogSizes[id], backdropInsets(dialog));
+    if (saved.width != null) {
+      dialog.style.width = `${saved.width}px`;
+      dialog.style.maxWidth = `${saved.width}px`;
+    } else {
+      dialog.style.removeProperty("width");
+      dialog.style.removeProperty("max-width");
+    }
+    if (saved.height != null) {
+      dialog.style.height = `${saved.height}px`;
+      dialog.style.maxHeight = `${saved.height}px`;
+    } else {
+      dialog.style.removeProperty("height");
+      dialog.style.removeProperty("max-height");
+    }
+  }
+}
+
+/**
+ * Give every mounted dialog 8-direction resize handles. Handles are appended
+ * after each render() together with the dialog DOM; `data-resize-bound` keeps
+ * the immersive-exit re-run from duplicating them on a surviving dialog.
+ */
+function setupDialogResizing(): void {
+  for (const [id, spec] of Object.entries(DIALOG_SPECS)) {
+    const dialog = app.querySelector<HTMLElement>(spec.selector);
+    if (!dialog || dialog.dataset.resizeBound === "1") continue;
+    // The immersive stage fills the backdrop; resizing is meaningless there.
+    if (id === "preview" && previewImmersiveOpen) continue;
+    dialog.dataset.resizeBound = "1";
+    for (const direction of dialogResizeDirections) {
+      const handle = document.createElement("div");
+      handle.className = `dialog-resize-handle is-${direction}`;
+      handle.setAttribute("aria-hidden", "true");
+      handle.addEventListener("pointerdown", (event) => beginDialogResize(event, dialog, id, direction));
+      dialog.append(handle);
+    }
+  }
+}
+
+/**
+ * Center-anchored resize: the dialog never leaves the centered grid flow, so
+ * there is no re-center flash on release. Each pointer delta feeds both edges
+ * symmetrically, which keeps the grabbed edge/corner tracking the cursor 1:1.
+ */
+function beginDialogResize(event: PointerEvent, dialog: HTMLElement, id: string, direction: DialogResizeDirection): void {
+  const spec = DIALOG_SPECS[id];
+  const handle = event.currentTarget;
+  if (!spec || !(handle instanceof HTMLElement)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const startRect = dialog.getBoundingClientRect();
+  // Stay inside the backdrop's content box; the dialog is centered, so the
+  // largest symmetric size is the backdrop minus its actual padding. Offsets
+  // beyond that would trip the grid's overflow alignment and nudge the dialog.
+  const backdropRect = dialog.parentElement?.getBoundingClientRect();
+  const insets = backdropRect ? backdropInsets(dialog) : { x: 50, y: 50 };
+  const maxWidth = Math.max(spec.minWidth, (backdropRect?.width ?? window.innerWidth) - insets.x);
+  const maxHeight = Math.max(spec.minHeight, (backdropRect?.height ?? window.innerHeight) - insets.y);
+  let width = startRect.width;
+  let height = startRect.height;
+
+  document.body.classList.add("is-dialog-resizing");
+  handle.setPointerCapture(event.pointerId);
+  // Esc can destroy the dialog mid-drag, taking finish() with it; these
+  // window-level one-shots guarantee the drag state never stays behind.
+  const clearDragState = () => document.body.classList.remove("is-dialog-resizing");
+  window.addEventListener("pointerup", clearDragState, { once: true });
+  window.addEventListener("pointercancel", clearDragState, { once: true });
+
+  const apply = () => {
+    dialog.style.width = `${width}px`;
+    dialog.style.maxWidth = `${width}px`;
+    dialog.style.height = `${height}px`;
+    dialog.style.maxHeight = `${height}px`;
+  };
+
+  const onMove = (moveEvent: PointerEvent) => {
+    const dx = moveEvent.clientX - startX;
+    const dy = moveEvent.clientY - startY;
+    width = startRect.width;
+    height = startRect.height;
+    if (direction.includes("e")) width = startRect.width + dx * 2;
+    if (direction.includes("w")) width = startRect.width - dx * 2;
+    if (direction.includes("s")) height = startRect.height + dy * 2;
+    if (direction.includes("n")) height = startRect.height - dy * 2;
+    width = Math.min(Math.max(width, spec.minWidth), maxWidth);
+    height = Math.min(Math.max(height, spec.minHeight), maxHeight);
+    apply();
+  };
+
+  const finish = () => {
+    handle.removeEventListener("pointermove", onMove);
+    document.body.classList.remove("is-dialog-resizing");
+    // A click without a drag must not lock content-driven (auto) sizes.
+    const moved = Math.round(width) !== Math.round(startRect.width) || Math.round(height) !== Math.round(startRect.height);
+    if (moved) state.dialogSizes[id] = { width: Math.round(width), height: Math.round(height) };
+    // Re-clamp from state: restores no-move jitter and clamps saved sizes.
+    applyDialogSizes();
+    if (moved) {
+      void persistUiPrefs({ uiDialogSizes: state.dialogSizes });
+      if (state.settingsOpen && state.settingsSection === "system") updateSettingsPanel();
+    }
+  };
+
+  handle.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointerup", finish, { once: true });
+  handle.addEventListener("pointercancel", finish, { once: true });
+}
 
 const appRoot = document.querySelector<HTMLElement>("#app");
 if (!appRoot) throw new Error("找不到应用容器");
@@ -2134,6 +2341,14 @@ function renderSettingsSystemSection(): string {
       <div class="settings-note">沉浸式：无多余边框，支持任意位置拖动平移，Ctrl+滚轮缩放，Esc 退出。主题与侧栏按钮同步。</div>
     </div>
     <div class="settings-status-card">
+      <h3>弹窗大小</h3>
+      <div class="settings-note">拖动弹窗边缘或角落即可调整大小，松开后自动保存，下次打开保持该尺寸。也可以按数值微调（像素），留空表示使用默认。</div>
+      <div class="settings-form dialog-size-form">${renderDialogSizeRows()}</div>
+      <div class="settings-actions">
+        <button class="outline-button" type="button" id="settings-reset-dialog-sizes" ${Object.keys(state.dialogSizes).length ? "" : "disabled"}>全部恢复默认</button>
+      </div>
+    </div>
+    <div class="settings-status-card">
       <h3>系统集成</h3>
       <div class="settings-note">托盘与通知初始化失败不会影响主窗口。单实例启动：再次打开应用会聚焦已有窗口。</div>
       <div class="settings-form">
@@ -2154,6 +2369,50 @@ function renderSettingsSystemSection(): string {
       <div class="settings-note">应用重启后不会恢复未完成任务，只展示 runs 表中的历史结果；中断的任务会标记为失败。</div>
     </div>
   </div>`;
+}
+
+/** One numeric width/height row per resizable dialog for the settings page. */
+function renderDialogSizeRows(): string {
+  return Object.entries(DIALOG_SPECS)
+    .map(([id, spec]) => {
+      const saved = state.dialogSizes[id];
+      const width = saved?.width ?? spec.width;
+      const height = saved?.height ?? spec.height;
+      return `<div class="dialog-size-row" data-dialog-size-row="${id}">
+        <span class="dialog-size-name">${spec.label}</span>
+        <label class="dialog-size-field">宽 <input type="number" data-dialog-size-width="${id}" min="${spec.minWidth}" max="16384" step="10" value="${width ?? ""}" placeholder="${spec.width ?? "自动"}" aria-label="${spec.label}宽度" /></label>
+        <label class="dialog-size-field">高 <input type="number" data-dialog-size-height="${id}" min="${spec.minHeight}" max="16384" step="10" value="${height ?? ""}" placeholder="${spec.height ?? "自动"}" aria-label="${spec.label}高度" /></label>
+        <button class="text-button" type="button" data-dialog-size-reset="${id}" ${saved ? "" : "disabled"}>恢复默认</button>
+      </div>`;
+    })
+    .join("");
+}
+
+/**
+ * Commit one dialog row's numeric inputs. An empty input falls back to the
+ * stylesheet default (auto height for content-sized dialogs); a row equal to
+ * its defaults removes the stored override entirely.
+ */
+function commitDialogSizeInputs(id: string): void {
+  const spec = DIALOG_SPECS[id];
+  if (!spec) return;
+  const row = app.querySelector<HTMLElement>(`[data-dialog-size-row="${id}"]`);
+  const parse = (input: HTMLInputElement | null | undefined, min: number): number | null => {
+    const raw = input?.value.trim() ?? "";
+    if (!raw) return null;
+    const value = Math.round(Number(raw));
+    if (!Number.isFinite(value)) return null;
+    return Math.max(min, Math.min(16384, value));
+  };
+  const width = parse(row?.querySelector<HTMLInputElement>("[data-dialog-size-width]"), spec.minWidth);
+  const height = parse(row?.querySelector<HTMLInputElement>("[data-dialog-size-height]"), spec.minHeight);
+  const isDefault =
+    (width == null || width === spec.width) && (height == null || height === spec.height);
+  if (isDefault) delete state.dialogSizes[id];
+  else state.dialogSizes[id] = { ...(width != null ? { width } : {}), ...(height != null ? { height } : {}) };
+  applyDialogSizes();
+  void persistUiPrefs({ uiDialogSizes: state.dialogSizes });
+  updateSettingsPanel();
 }
 
 function renderRecentTasksSummary(): string {
@@ -2256,6 +2515,9 @@ function render(): void {
     <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
+  // Restore saved dialog geometry and mount resize handles for fresh dialogs.
+  applyDialogSizes();
+  setupDialogResizing();
   // A full render rebuilds the preview modal as a bare spinner placeholder, and
   // an in-flight loadModalAsset() writes into the discarded DOM. While the
   // viewer is still open (e.g. it sat behind the editor), re-fill it — every
@@ -2741,6 +3003,29 @@ function bindSettingsBodyEvents(): void {
   });
   app.querySelector<HTMLButtonElement>("#settings-open-app-data")?.addEventListener("click", () => void openDirectory("app_data"));
   app.querySelector<HTMLButtonElement>("#settings-open-thumbnail-cache")?.addEventListener("click", () => void openDirectory("thumbnail_cache"));
+  // 弹窗大小：数值微调 + 恢复默认（单个 / 全部）。
+  app.querySelectorAll<HTMLInputElement>("[data-dialog-size-width], [data-dialog-size-height]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = input.dataset.dialogSizeWidth ?? input.dataset.dialogSizeHeight;
+      if (id) commitDialogSizeInputs(id);
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-dialog-size-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.dialogSizeReset;
+      if (!id) return;
+      delete state.dialogSizes[id];
+      applyDialogSizes();
+      void persistUiPrefs({ uiDialogSizes: state.dialogSizes });
+      updateSettingsPanel();
+    });
+  });
+  app.querySelector<HTMLButtonElement>("#settings-reset-dialog-sizes")?.addEventListener("click", () => {
+    state.dialogSizes = {};
+    applyDialogSizes();
+    void persistUiPrefs({ uiDialogSizes: state.dialogSizes });
+    updateSettingsPanel();
+  });
 }
 
 async function openSettings(section?: SettingsSection): Promise<void> {
@@ -2811,6 +3096,7 @@ async function loadSettingsSectionData(): Promise<void> {
       state.closeBehavior = infra.settings.close_behavior;
       state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
       state.theme = clampTheme(infra.settings.ui_theme);
+      state.dialogSizes = sanitizeDialogSizes(infra.settings.ui_dialog_sizes);
       applyTheme(state.theme);
       state.backupHistory = backups;
       if (state.library) {
@@ -3497,6 +3783,10 @@ function togglePreviewImmersive(force?: boolean): void {
       : "滚轮缩放 · 拖动平移 · 双击放大 · F 全屏";
   }
   if (!next) resetPhotoZoom();
+  // Inline width/height would beat the immersive 100vw/100vh rules, so hand
+  // geometry over when entering and take it back when leaving.
+  applyDialogSizes();
+  if (!next) setupDialogResizing();
   syncLiquidGlass();
 }
 
@@ -4525,6 +4815,7 @@ async function persistUiPrefs(input: {
   uiSort?: SortMode;
   uiPreviewMode?: UiPreviewMode;
   uiTheme?: UiTheme;
+  uiDialogSizes?: Record<string, DialogSize>;
 }): Promise<void> {
   try {
     const settings = await setUiPrefs(input);
@@ -4532,8 +4823,11 @@ async function persistUiPrefs(input: {
     state.sort = clampSort(settings.ui_sort);
     state.previewMode = clampPreviewMode(settings.ui_preview_mode);
     state.theme = clampTheme(settings.ui_theme);
+    state.dialogSizes = sanitizeDialogSizes(settings.ui_dialog_sizes);
   } catch (error) {
     state.error = toUserMessage(error, "保存界面偏好失败");
+    // A failed size write keeps the dragged geometry live for this session;
+    // the next successful save or settings load reconciles both sides.
   }
 }
 
@@ -4855,6 +5149,7 @@ async function bootstrap(): Promise<void> {
     state.sort = clampSort(infra.settings.ui_sort);
     state.previewMode = clampPreviewMode(infra.settings.ui_preview_mode);
     state.theme = clampTheme(infra.settings.ui_theme);
+    state.dialogSizes = sanitizeDialogSizes(infra.settings.ui_dialog_sizes);
     applyTheme(state.theme);
     syncThemeToggle();
     state.autoScanOnStartup = infra.settings.auto_scan_on_startup;
@@ -5214,4 +5509,15 @@ void listen<LibraryStatus>("library-status", (event) => {
   }
   state.scanning = false;
   render();
+});
+
+// Keep open dialogs inside the viewport when the window shrinks; stored sizes
+// are never rewritten, so maximizing the window restores them again.
+let dialogSizeResizeFrame = 0;
+window.addEventListener("resize", () => {
+  if (dialogSizeResizeFrame) cancelAnimationFrame(dialogSizeResizeFrame);
+  dialogSizeResizeFrame = requestAnimationFrame(() => {
+    dialogSizeResizeFrame = 0;
+    applyDialogSizes();
+  });
 });
