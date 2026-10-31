@@ -581,6 +581,64 @@ function beginDialogResize(event: PointerEvent, dialog: HTMLElement, id: string,
   handle.addEventListener("pointercancel", finish, { once: true });
 }
 
+/** Intrinsic pixel size of a photo/video, or null until metadata is decoded. */
+function mediaNaturalSize(media: HTMLImageElement | HTMLVideoElement | null): { w: number; h: number } | null {
+  if (!media) return null;
+  const w = media instanceof HTMLVideoElement ? media.videoWidth : media.naturalWidth;
+  const h = media instanceof HTMLVideoElement ? media.videoHeight : media.naturalHeight;
+  return w > 0 && h > 0 ? { w, h } : null;
+}
+
+/**
+ * 「按媒体自适应」：以媒体原始宽高比，把弹窗调成媒体在视口内的最大等比
+ * 适配尺寸。标题栏/工具栏/信息栏等装饰开销从当前弹窗实测反推，对预览与
+ * 编辑两种布局都成立。弹窗已是该尺寸时再次点击则恢复默认尺寸。
+ */
+function adaptDialogToMedia(dialogId: "preview" | "editor", media: HTMLImageElement | HTMLVideoElement | null): void {
+  const spec = DIALOG_SPECS[dialogId];
+  const dialog = app.querySelector<HTMLElement>(spec?.selector ?? "");
+  if (!spec || !dialog) return;
+  const natural = mediaNaturalSize(media);
+  if (!natural) {
+    // 视频元数据或图片解码未就绪：就绪后自动补一次适配。
+    if (media) {
+      const event = media instanceof HTMLVideoElement ? "loadedmetadata" : "load";
+      media.addEventListener(event, () => adaptDialogToMedia(dialogId, media), { once: true });
+    }
+    return;
+  }
+  // 媒体区内容盒：预览为 .modal-media（含左右导航留白），编辑为舞台区。
+  const area = dialog.querySelector<HTMLElement>(
+    dialogId === "preview" ? ".modal-media" : ".editor-stage-wrap",
+  );
+  if (!area) return;
+  const modalRect = dialog.getBoundingClientRect();
+  const areaRect = area.getBoundingClientRect();
+  const areaStyle = getComputedStyle(area);
+  const padX = Number.parseFloat(areaStyle.paddingLeft) + Number.parseFloat(areaStyle.paddingRight);
+  const padY = Number.parseFloat(areaStyle.paddingTop) + Number.parseFloat(areaStyle.paddingBottom);
+  const areaW = areaRect.width - padX;
+  const areaH = areaRect.height - padY;
+  if (areaW <= 0 || areaH <= 0) return;
+  const chromeW = Math.max(0, modalRect.width - areaW);
+  const chromeH = Math.max(0, modalRect.height - areaH);
+  const insets = backdropInsets(dialog);
+  const availW = Math.max(spec.minWidth, window.innerWidth - insets.x);
+  const availH = Math.max(spec.minHeight, window.innerHeight - dialogDragTopBound() - insets.y);
+  const scale = Math.max(
+    0.01,
+    Math.min((availW - chromeW) / natural.w, (availH - chromeH) / natural.h),
+  );
+  const targetW = Math.min(availW, Math.max(spec.minWidth, Math.round(natural.w * scale) + Math.round(chromeW)));
+  const targetH = Math.min(availH, Math.max(spec.minHeight, Math.round(natural.h * scale) + Math.round(chromeH)));
+  const same = Math.abs(modalRect.width - targetW) <= 2 && Math.abs(modalRect.height - targetH) <= 2;
+  if (same) delete state.dialogSizes[dialogId];
+  else state.dialogSizes[dialogId] = { width: targetW, height: targetH };
+  applyDialogSizes();
+  void persistUiPrefs({ uiDialogSizes: state.dialogSizes });
+  if (state.settingsOpen && state.settingsSection === "system") updateSettingsPanel();
+}
+
 const appRoot = document.querySelector<HTMLElement>("#app");
 if (!appRoot) throw new Error("找不到应用容器");
 const app: HTMLElement = appRoot;
@@ -2541,7 +2599,7 @@ function renderPreview(): string {
   const position = (state.previewIndex ?? 0) + 1;
   const immersiveClass = previewImmersiveOpen ? " is-immersive" : "";
   return `<div class="modal-backdrop${immersiveClass}" id="preview-modal"><div class="preview-modal${immersiveClass}" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.displayName)}" ${previewImmersiveOpen ? 'data-liquid-glass="off"' : ""}>
-    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></header>
+    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${kindLabel(item.kind)}</span><span class="modal-position">${position} / ${state.page.items.length}</span></div><div class="modal-header-actions"><button class="modal-close modal-fit-button" id="preview-fit" type="button" aria-label="按媒体尺寸自适应弹窗" title="按媒体尺寸自适应弹窗">⤢</button><button class="modal-close" id="close-preview" type="button" aria-label="关闭">×</button></div></header>
     <div class="modal-body">
       <div class="modal-stage"><button class="modal-nav prev" id="preview-prev" type="button" aria-label="上一个">‹</button><div class="modal-media" id="modal-media"><span class="spinner large"></span></div><button class="modal-nav next" id="preview-next" type="button" aria-label="下一个">›</button></div>
       <aside class="modal-meta ${previewInfoOpen ? "" : "is-hidden"}" id="modal-meta" aria-label="媒体信息" aria-hidden="${previewInfoOpen ? "false" : "true"}"><div class="meta-placeholder">加载中…</div></aside>
@@ -2833,6 +2891,12 @@ function bindEvents(): void {
     void openFolderForItem(button.dataset.openFolder!);
   }));
   app.querySelector<HTMLButtonElement>("#close-preview")?.addEventListener("click", closePreview);
+  // 实况默认展示静帧：优先取视频帧尺寸（未就绪时内部等待元数据），否则取静帧图片。
+  app.querySelector<HTMLButtonElement>("#preview-fit")?.addEventListener("click", () => {
+    const media = app.querySelector<HTMLElement>("#modal-media");
+    const video = media?.querySelector<HTMLVideoElement>("video:not([hidden])");
+    adaptDialogToMedia("preview", video ?? media?.querySelector<HTMLImageElement>("img") ?? null);
+  });
   app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
@@ -3916,7 +3980,7 @@ function renderEditor(): string {
   const body =
     state.editorKind === "image" ? renderEditorImageBody() : renderEditorVideoBody();
   return `<div class="modal-backdrop editor-backdrop" id="editor-modal"><div class="editor-modal" role="dialog" aria-modal="true" aria-label="媒体编辑">
-    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${state.editorKind === "image" ? "图片编辑" : "视频剪辑"}</span><span class="modal-position">${escapeHtml(state.editorItem.displayName)}</span></div><button class="modal-close editor-close-button" type="button" aria-label="关闭">×</button></header>
+    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${state.editorKind === "image" ? "图片编辑" : "视频剪辑"}</span><span class="modal-position">${escapeHtml(state.editorItem.displayName)}</span></div><div class="modal-header-actions"><button class="modal-close modal-fit-button" id="editor-fit" type="button" aria-label="按媒体尺寸自适应弹窗" title="按媒体尺寸自适应弹窗">⤢</button><button class="modal-close editor-close-button" type="button" aria-label="关闭">×</button></div></header>
     <div class="editor-body">${body}</div>
     ${renderEditorFooter()}
   </div></div>`;
@@ -4026,6 +4090,11 @@ function bindEditorEvents(): void {
   if (state.editorKind === "image") bindEditorImageEvents(modal);
   else bindEditorVideoEvents(modal);
   bindEditorFooterEvents(modal);
+  modal.querySelector<HTMLButtonElement>("#editor-fit")?.addEventListener("click", () => {
+    adaptDialogToMedia("editor", state.editorKind === "image"
+      ? editorImageEl
+      : modal.querySelector<HTMLVideoElement>("#editor-video"));
+  });
 }
 
 function bindEditorFooterEvents(modal: HTMLElement): void {
