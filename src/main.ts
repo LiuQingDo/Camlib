@@ -2256,6 +2256,11 @@ function render(): void {
     <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
+  // A full render rebuilds the preview modal as a bare spinner placeholder, and
+  // an in-flight loadModalAsset() writes into the discarded DOM. While the
+  // viewer is still open (e.g. it sat behind the editor), re-fill it — every
+  // asset request is promise-cached, so this replays from cache.
+  if (state.previewIndex !== null) void loadModalAsset();
   if (hasItems) observePreviews();
   bindLoadMoreEvents();
   observeLoadMore();
