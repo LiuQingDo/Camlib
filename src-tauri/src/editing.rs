@@ -7,7 +7,7 @@
 //! a cancellable background job that reports `edit-progress` events, following
 //! the library-merge job pattern.
 
-use crate::backup::{ffmpeg_path_string, TempGuard};
+use crate::backup::{ffmpeg_path_string, merge_and_verify, CopyError, TempGuard};
 use crate::db::{LibraryState, MediaFile, MediaFileRole, Repository};
 use crate::media::{hide_console_window, resolve_ffmpeg, resolve_media_path};
 use image::imageops::crop_imm;
@@ -127,6 +127,28 @@ pub struct TrimParams {
     pub precise: bool,
 }
 
+/// Upper bound on segments per cut job so a bad call can never spawn
+/// hundreds of ffmpeg runs.
+pub const MAX_CUT_SEGMENTS: usize = 100;
+
+/// One requested cut range of a multi-segment cut job; `merge` flags the
+/// segment for the extra merged copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CutSegmentSpec {
+    pub in_ms: i64,
+    pub out_ms: i64,
+    pub merge: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CutSegmentsParams {
+    pub media_item_id: String,
+    pub segments: Vec<CutSegmentSpec>,
+    /// false = stream copy (lossless, seconds); true = re-encode (exact cut).
+    pub precise: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditResultDto {
@@ -147,14 +169,25 @@ pub struct EditJobStartDto {
 #[serde(rename_all = "camelCase")]
 pub struct EditProgress {
     pub job_id: String,
-    /// Currently always "trim".
+    /// "trim" for single trims and multi-segment cuts alike.
     pub kind: &'static str,
     pub phase: &'static str,
     pub state: &'static str,
-    /// 0..100, only meaningful while re-encoding.
+    /// 0..100, mapped over the whole job when a cut has several segments.
     pub percent: Option<f64>,
     pub error: Option<String>,
     pub result: Option<EditResultDto>,
+    /// Multi-segment cuts only; omitted for plain trims.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_count: Option<usize>,
+    /// Completed multi-segment cuts: every produced segment copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<EditResultDto>>,
+    /// Completed multi-segment cuts: the merged copy, when segments were flagged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_result: Option<EditResultDto>,
 }
 
 fn emit(app: &AppHandle, progress: EditProgress) {
@@ -431,6 +464,47 @@ fn edited_destination(source: &Path, output_extension: &str) -> Result<PathBuf, 
     Err(AppError::io("同名编辑副本过多，无法生成新文件名"))
 }
 
+/// Destination names for a multi-segment cut: `{stem}_edited_1..N`, plus
+/// `{stem}_edited_merged` when flagged segments will be joined into one copy.
+/// Names are chosen as a family — if any candidate is taken, the whole family
+/// bumps to `…_2`, `…_3` … so segment numbers stay consistent and nothing is
+/// ever overwritten. Re-cutting a copy chains on its base stem, matching
+/// `edited_destination`.
+fn cut_destinations(
+    source: &Path,
+    output_extension: &str,
+    count: usize,
+    want_merged: bool,
+) -> Result<(Vec<PathBuf>, Option<PathBuf>), AppError> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| AppError::io("源文件路径无效"))?;
+    let stem = source
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let base_stem = stem.strip_suffix("_edited").unwrap_or(&stem).to_owned();
+    let extension = format!(".{output_extension}");
+    for version in 1..MAX_EDIT_COPIES {
+        let suffix = if version == 1 {
+            String::new()
+        } else {
+            format!("_{version}")
+        };
+        let segments: Vec<PathBuf> = (1..=count)
+            .map(|index| parent.join(format!("{base_stem}_edited_{index}{suffix}{extension}")))
+            .collect();
+        let merged = want_merged.then(|| {
+            parent.join(format!("{base_stem}_edited_merged{suffix}{extension}"))
+        });
+        if segments.iter().chain(merged.iter()).all(|path| !path.exists()) {
+            return Ok((segments, merged));
+        }
+    }
+    Err(AppError::io("同名剪辑片段过多，无法生成新文件名"))
+}
+
 fn write_edited_image(
     image: &RgbaImage,
     destination: &Path,
@@ -503,6 +577,27 @@ fn library_root(repository: &Repository, library_id: &str) -> Result<PathBuf, St
     Ok(PathBuf::from(library.root_path))
 }
 
+/// Kick off the incremental scan that brings freshly committed copies into
+/// the index; a busy scan never fails the edit that produced them.
+fn start_edit_scan(
+    app: &AppHandle,
+    scan_manager: &Arc<crate::scanner::ScanManagerState>,
+    database_path: &Path,
+    library_id: &str,
+) {
+    if let Ok((scan_job, scan_cancel)) = scan_manager.start(library_id) {
+        crate::scanner::spawn_scan(
+            app.clone(),
+            scan_manager.clone(),
+            database_path.to_path_buf(),
+            library_id.to_owned(),
+            scan_job,
+            scan_cancel,
+            false,
+        );
+    }
+}
+
 /// Launch a trim job on a background thread. Emits `edit-progress` and
 /// triggers an incremental scan once the trimmed copy is committed.
 pub fn spawn(
@@ -529,21 +624,15 @@ pub fn spawn(
                         percent: Some(100.0),
                         error: None,
                         result: Some(done.clone()),
+                        segment_index: None,
+                        segment_count: None,
+                        results: None,
+                        merged_result: None,
                     },
                 );
                 // Bring the new copy into the index; a busy scan never fails
                 // an otherwise successful trim.
-                if let Ok((scan_job, scan_cancel)) = scan_manager.start(&library_id) {
-                    crate::scanner::spawn_scan(
-                        app.clone(),
-                        scan_manager.clone(),
-                        database_path.clone(),
-                        library_id.clone(),
-                        scan_job,
-                        scan_cancel,
-                        false,
-                    );
-                }
+                start_edit_scan(&app, &scan_manager, &database_path, &library_id);
             }
             Err(error) => {
                 let cancelled = cancel.load(Ordering::Relaxed);
@@ -557,6 +646,10 @@ pub fn spawn(
                         percent: None,
                         error: Some(error.clone()),
                         result: None,
+                        segment_index: None,
+                        segment_count: None,
+                        results: None,
+                        merged_result: None,
                     },
                 );
             }
@@ -597,6 +690,10 @@ fn run_trim(
             percent: None,
             error: None,
             result: None,
+            segment_index: None,
+            segment_count: None,
+            results: None,
+            merged_result: None,
         },
     );
 
@@ -625,11 +722,15 @@ fn run_trim(
             percent: if params.precise { Some(0.0) } else { None },
             error: None,
             result: None,
+            segment_index: None,
+            segment_count: None,
+            results: None,
+            merged_result: None,
         },
     );
 
     let trim_result = run_ffmpeg_trim(
-        &ffmpeg, &source, &temp, &log_path, params, cancel, job_id, app,
+        &ffmpeg, &source, &temp, &log_path, params, cancel, job_id, app, None,
     );
     if trim_result.is_err() {
         // Guards drop here and remove the scratch files.
@@ -658,6 +759,19 @@ fn run_trim(
     })
 }
 
+/// Progress mapping for one segment of a multi-segment cut job: the segment's
+/// ffmpeg percent maps onto a whole-job percent and events carry the segment
+/// position. Plain trims pass `None` and keep their per-segment percent.
+#[derive(Debug, Clone, Copy)]
+struct CutUnitProgress {
+    /// 0-based unit index; the optional merged copy is the last unit.
+    unit_index: usize,
+    /// Segment count plus one when a merged copy follows.
+    total_units: usize,
+    /// Segment count, reported verbatim in progress events.
+    segment_count: usize,
+}
+
 fn run_ffmpeg_trim(
     ffmpeg: &Path,
     source: &Path,
@@ -667,6 +781,7 @@ fn run_ffmpeg_trim(
     cancel: &AtomicBool,
     job_id: &str,
     app: &AppHandle,
+    unit: Option<CutUnitProgress>,
 ) -> Result<(), String> {
     let in_seconds = format!("{:.3}", params.in_ms as f64 / 1000.0);
     let duration_seconds = format!("{:.3}", (params.out_ms - params.in_ms) as f64 / 1000.0);
@@ -756,6 +871,15 @@ fn run_ffmpeg_trim(
                     } else {
                         (done_ms as f64 / total_ms as f64 * 100.0).clamp(0.0, 100.0)
                     };
+                    let (value, segment_index, segment_count) = match unit {
+                        Some(u) => (
+                            ((u.unit_index as f64 + value / 100.0) / u.total_units as f64 * 100.0)
+                                .clamp(0.0, 100.0),
+                            Some(u.unit_index),
+                            Some(u.segment_count),
+                        ),
+                        None => (value, None, None),
+                    };
                     emit(
                         app,
                         EditProgress {
@@ -766,6 +890,10 @@ fn run_ffmpeg_trim(
                             percent: Some(value),
                             error: None,
                             result: None,
+                            segment_index,
+                            segment_count,
+                            results: None,
+                            merged_result: None,
                         },
                     );
                 }
@@ -782,6 +910,14 @@ fn run_ffmpeg_trim(
         let _ = handle.join();
     }
     if outcome.is_ok() && params.precise {
+        let value = match unit {
+            Some(u) => ((u.unit_index + 1) as f64 / u.total_units as f64 * 100.0).clamp(0.0, 100.0),
+            None => 100.0,
+        };
+        let (segment_index, segment_count) = match unit {
+            Some(u) => (Some(u.unit_index), Some(u.segment_count)),
+            None => (None, None),
+        };
         emit(
             app,
             EditProgress {
@@ -789,13 +925,335 @@ fn run_ffmpeg_trim(
                 kind: "trim",
                 phase: "trimming",
                 state: "running",
-                percent: Some(100.0),
+                percent: Some(value),
                 error: None,
                 result: None,
+                segment_index,
+                segment_count,
+                results: None,
+                merged_result: None,
             },
         );
     }
     outcome
+}
+
+/// Launch a multi-segment cut job on a background thread. Emits
+/// `edit-progress` and triggers an incremental scan once all copies are
+/// committed — also after a failure, so segments committed before the error
+/// still join the library instead of lingering as unindexed files.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_cut_segments(
+    app: AppHandle,
+    manager: Arc<EditJobManagerState>,
+    scan_manager: Arc<crate::scanner::ScanManagerState>,
+    database_path: PathBuf,
+    library_id: String,
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+    params: CutSegmentsParams,
+) {
+    std::thread::spawn(move || {
+        let result = run_cut_segments(&app, &database_path, &library_id, &job_id, &cancel, &params);
+        match &result {
+            Ok((results, merged)) => {
+                emit(
+                    &app,
+                    EditProgress {
+                        job_id: job_id.clone(),
+                        kind: "trim",
+                        phase: "finalizing",
+                        state: "completed",
+                        percent: Some(100.0),
+                        error: None,
+                        result: None,
+                        segment_index: None,
+                        segment_count: None,
+                        results: Some(results.clone()),
+                        merged_result: merged.clone(),
+                    },
+                );
+            }
+            Err(error) => {
+                let cancelled = cancel.load(Ordering::Relaxed);
+                emit(
+                    &app,
+                    EditProgress {
+                        job_id: job_id.clone(),
+                        kind: "trim",
+                        phase: "trimming",
+                        state: if cancelled { "cancelled" } else { "failed" },
+                        percent: None,
+                        error: Some(error.clone()),
+                        result: None,
+                        segment_index: None,
+                        segment_count: None,
+                        results: None,
+                        merged_result: None,
+                    },
+                );
+            }
+        }
+        start_edit_scan(&app, &scan_manager, &database_path, &library_id);
+        manager.finish();
+    });
+}
+
+fn run_cut_segments(
+    app: &AppHandle,
+    database_path: &Path,
+    library_id: &str,
+    job_id: &str,
+    cancel: &AtomicBool,
+    params: &CutSegmentsParams,
+) -> Result<(Vec<EditResultDto>, Option<EditResultDto>), String> {
+    let repository = Repository::open(database_path).map_err(|error| error.to_string())?;
+    let root = library_root(&repository, library_id)?;
+    let details = repository
+        .get_media_item_details(&params.media_item_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "媒体不存在".to_owned())?;
+    let file = video_source_file(&details).ok_or_else(|| "没有可剪辑的视频文件".to_owned())?;
+    if params.segments.is_empty() {
+        return Err("至少需要一个剪辑片段".to_owned());
+    }
+    for segment in &params.segments {
+        if segment.in_ms < 0 || segment.out_ms <= segment.in_ms {
+            return Err("剪辑区间无效".to_owned());
+        }
+    }
+    let merge_indices: Vec<usize> = params
+        .segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| segment.merge)
+        .map(|(index, _)| index)
+        .collect();
+    // A merged copy only makes sense from two or more flagged segments.
+    let want_merged = merge_indices.len() >= 2;
+    let source =
+        resolve_media_path(&root, &file.relative_path).map_err(|error| error.to_string())?;
+    let ffmpeg = resolve_ffmpeg(app).map_err(|error| error.to_string())?;
+
+    emit(
+        app,
+        EditProgress {
+            job_id: job_id.to_owned(),
+            kind: "trim",
+            phase: "preparing",
+            state: "running",
+            percent: None,
+            error: None,
+            result: None,
+            segment_index: None,
+            segment_count: None,
+            results: None,
+            merged_result: None,
+        },
+    );
+
+    let (destinations, merged_destination) = cut_destinations(
+        &source,
+        &file.extension,
+        params.segments.len(),
+        want_merged,
+    )
+    .map_err(|error| error.to_string())?;
+    let extension = format!(".{}", file.extension);
+    // The optional merged copy counts as one extra progress unit.
+    let total_units = params.segments.len() + usize::from(want_merged);
+    let mut results: Vec<EditResultDto> = Vec::new();
+
+    for (index, segment) in params.segments.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("剪辑已取消".to_owned());
+        }
+        let destination = destinations[index].clone();
+        let file_name = destination
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let temp = destination.with_file_name(format!(".{file_name}.camlib-edit{extension}"));
+        let log_path = destination.with_file_name(format!(".{file_name}.camlib-edit.log"));
+        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_file(&log_path);
+        let mut temp_guard = TempGuard::new(temp.clone());
+        let mut log_guard = TempGuard::new(log_path.clone());
+
+        emit(
+            app,
+            EditProgress {
+                job_id: job_id.to_owned(),
+                kind: "trim",
+                phase: "trimming",
+                state: "running",
+                percent: if params.precise { Some(0.0) } else { None },
+                error: None,
+                result: None,
+                segment_index: Some(index),
+                segment_count: Some(params.segments.len()),
+                results: None,
+                merged_result: None,
+            },
+        );
+
+        let trim_params = TrimParams {
+            media_item_id: params.media_item_id.clone(),
+            in_ms: segment.in_ms,
+            out_ms: segment.out_ms,
+            precise: params.precise,
+        };
+        let unit = CutUnitProgress {
+            unit_index: index,
+            total_units,
+            segment_count: params.segments.len(),
+        };
+        let trim_result = run_ffmpeg_trim(
+            &ffmpeg, &source, &temp, &log_path, &trim_params, cancel, job_id, app, Some(unit),
+        );
+        if let Err(error) = trim_result {
+            // Guards drop here and remove the scratch files.
+            let _ = (&temp_guard, &log_guard);
+            if cancel.load(Ordering::Relaxed) {
+                return Err("剪辑已取消".to_owned());
+            }
+            return Err(format!("片段 {} 剪辑失败: {error}", index + 1));
+        }
+        if let Err(error) = fs::rename(&temp, &destination) {
+            let _ = (&temp_guard, &log_guard);
+            return Err(format!("提交剪辑输出失败: {error}"));
+        }
+        temp_guard.disarm();
+        log_guard.disarm();
+
+        let metadata =
+            fs::metadata(&destination).map_err(|error| format!("读取输出信息失败: {error}"))?;
+        let relative_path = destination
+            .strip_prefix(&root)
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .map_err(|_| "输出文件越出媒体库根目录".to_owned())?;
+        results.push(EditResultDto {
+            file_name,
+            relative_path,
+            size_bytes: metadata.len(),
+            width: 0,
+            height: 0,
+        });
+    }
+
+    let merged_result = if want_merged {
+        cut_merged_copy(
+            app,
+            job_id,
+            cancel,
+            &ffmpeg,
+            &root,
+            &destinations,
+            &merge_indices,
+            merged_destination.expect("want_merged guarantees a destination"),
+            total_units,
+        )?
+    } else {
+        None
+    };
+    Ok((results, merged_result))
+}
+
+/// Join the flagged segment copies (in segment order) into one extra
+/// `{stem}_edited_merged` copy via the concat demuxer. Every segment is cut
+/// from the same source with the same method, so stream copy applies.
+#[allow(clippy::too_many_arguments)]
+fn cut_merged_copy(
+    app: &AppHandle,
+    job_id: &str,
+    cancel: &AtomicBool,
+    ffmpeg: &Path,
+    root: &Path,
+    destinations: &[PathBuf],
+    merge_indices: &[usize],
+    destination: PathBuf,
+    total_units: usize,
+) -> Result<Option<EditResultDto>, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("剪辑已取消".to_owned());
+    }
+    let paths: Vec<PathBuf> = merge_indices
+        .iter()
+        .map(|index| destinations[*index].clone())
+        .collect();
+    let expected_size: u64 = paths
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum();
+    let file_name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let emit_merge = |percent: Option<f64>| {
+        emit(
+            app,
+            EditProgress {
+                job_id: job_id.to_owned(),
+                kind: "trim",
+                phase: "finalizing",
+                state: "running",
+                percent,
+                error: None,
+                result: None,
+                segment_index: None,
+                segment_count: None,
+                results: None,
+                merged_result: None,
+            },
+        );
+    };
+    emit_merge(None);
+    let segments_done = destinations.len();
+    let mut last_emit = Instant::now();
+    let result = merge_and_verify(
+        ffmpeg,
+        &paths,
+        &destination,
+        expected_size,
+        cancel,
+        &mut |bytes| {
+            if last_emit.elapsed() >= Duration::from_millis(200) {
+                last_emit = Instant::now();
+                let percent = if expected_size == 0 {
+                    None
+                } else {
+                    Some(
+                        ((segments_done as f64 + bytes as f64 / expected_size as f64)
+                            / total_units as f64
+                            * 100.0)
+                            .clamp(0.0, 100.0),
+                    )
+                };
+                emit_merge(percent);
+            }
+        },
+    );
+    match result {
+        Ok(_) => {}
+        Err(CopyError::Cancelled) => return Err("剪辑已取消".to_owned()),
+        Err(CopyError::Message(message)) => return Err(format!("片段合并失败: {message}")),
+    }
+    let metadata =
+        fs::metadata(&destination).map_err(|error| format!("读取输出信息失败: {error}"))?;
+    let relative_path = destination
+        .strip_prefix(root)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| "输出文件越出媒体库根目录".to_owned())?;
+    Ok(Some(EditResultDto {
+        file_name,
+        relative_path,
+        size_bytes: metadata.len(),
+        width: 0,
+        height: 0,
+    }))
 }
 
 /// Drain ffmpeg's `-progress` stream, keeping the latest `out_time_ms` in a
@@ -886,6 +1344,54 @@ mod tests {
         // Editing a copy keeps the base name tidy.
         let chained = edited_destination(&first, "jpg").unwrap();
         assert_eq!(chained.file_name().unwrap(), "IMG_0001_edited_3.jpg");
+    }
+
+    #[test]
+    fn cut_destinations_numbers_family_and_bumps_on_conflicts() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("IMG_0001.mp4");
+        fs::write(&source, b"x").unwrap();
+
+        let (segments, merged) = cut_destinations(&source, "mp4", 3, false).unwrap();
+        let names: Vec<String> = segments
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "IMG_0001_edited_1.mp4",
+                "IMG_0001_edited_2.mp4",
+                "IMG_0001_edited_3.mp4"
+            ]
+        );
+        assert!(merged.is_none());
+
+        // One taken name bumps the whole family so segment numbers stay
+        // consistent and the merged copy gets the same version suffix.
+        fs::write(root.path().join("IMG_0001_edited_2.mp4"), b"x").unwrap();
+        let (segments, merged) = cut_destinations(&source, "mp4", 2, true).unwrap();
+        let names: Vec<String> = segments
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["IMG_0001_edited_1_2.mp4", "IMG_0001_edited_2_2.mp4"]
+        );
+        assert_eq!(
+            merged.unwrap().file_name().unwrap().to_string_lossy(),
+            "IMG_0001_edited_merged_2.mp4"
+        );
+
+        // Re-cutting an existing edited copy chains on its base stem.
+        let copy = root.path().join("IMG_0001_edited.mp4");
+        fs::write(&copy, b"x").unwrap();
+        let (segments, _) = cut_destinations(&copy, "mp4", 1, false).unwrap();
+        assert_eq!(
+            segments[0].file_name().unwrap().to_string_lossy(),
+            "IMG_0001_edited_1.mp4"
+        );
     }
 
     #[test]

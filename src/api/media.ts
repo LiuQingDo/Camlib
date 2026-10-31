@@ -461,6 +461,14 @@ export interface EditProgressDto {
   percent: number | null;
   error: string | null;
   result: EditResultDto | null;
+  /** Multi-segment cuts only: 0-based segment being produced. */
+  segmentIndex?: number;
+  /** Multi-segment cuts only: total number of segments. */
+  segmentCount?: number;
+  /** Completed multi-segment cuts: every produced segment copy. */
+  results?: EditResultDto[];
+  /** Completed multi-segment cuts: the merged copy, when segments were flagged. */
+  mergedResult?: EditResultDto | null;
 }
 
 export interface EditJobStartDto {
@@ -505,6 +513,30 @@ export function startVideoTrim(
     inMs: input.inMs,
     outMs: input.outMs,
     precise: input.precise ?? false,
+  });
+}
+
+/** One requested cut range; `merge` flags it for the extra merged copy. */
+export interface VideoCutSegmentInput {
+  inMs: number;
+  outMs: number;
+  merge: boolean;
+}
+
+/**
+ * Cut a video into several segment copies at once (`{stem}_edited_1..N`),
+ * optionally joining the flagged segments (in segment order) into one extra
+ * `{stem}_edited_merged{ext}` copy, via a cancellable job.
+ */
+export function startVideoCutSegments(
+  mediaItemId: string,
+  segments: VideoCutSegmentInput[],
+  precise?: boolean,
+): Promise<EditJobStartDto> {
+  return invoke<EditJobStartDto>("media_cut_video_segments", {
+    mediaItemId,
+    segments,
+    precise: precise ?? false,
   });
 }
 

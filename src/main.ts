@@ -50,6 +50,7 @@ import {
   onLibraryMergeProgress,
   editImage,
   startVideoTrim,
+  startVideoCutSegments,
   cancelEditJob,
   onEditProgress,
   startVideoMerge,
@@ -113,6 +114,9 @@ import {
 
 type SortMode = UiSortMode;
 type Density = 1 | 2 | 3 | 4 | 5;
+
+/** One requested cut range of the video editor; the active one drives the handles. */
+type EditorSegment = { inMs: number; outMs: number; merge: boolean };
 
 interface AppState {
   availability: LibraryAvailability;
@@ -245,9 +249,10 @@ interface AppState {
   editorBrightness: number;
   editorContrast: number;
   editorSaturation: number;
-  /** Video trim selection in milliseconds. */
-  editorInMs: number;
-  editorOutMs: number;
+  /** Video cut segments in milliseconds; at least one always exists. */
+  editorSegments: EditorSegment[];
+  /** Index into `editorSegments`; handles and stats follow this segment. */
+  editorActiveSegment: number;
   editorDurationMs: number;
   editorPrecise: boolean;
   editorJobId: string | null;
@@ -377,8 +382,8 @@ const state: AppState = {
   editorBrightness: 1,
   editorContrast: 1,
   editorSaturation: 1,
-  editorInMs: 0,
-  editorOutMs: 0,
+  editorSegments: [],
+  editorActiveSegment: 0,
   editorDurationMs: 0,
   editorPrecise: false,
   editorJobId: null,
@@ -4283,6 +4288,8 @@ const EDITOR_MIN_CROP = 0.02;
 const EDITOR_MIN_TRIM_MS = 100;
 /** Step of the in/out nudge buttons under the trim track. */
 const EDITOR_NUDGE_MS = 100;
+/** Length of a freshly added cut segment, clamped to the video duration. */
+const EDITOR_DEFAULT_SEGMENT_MS = 2000;
 const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
 
 function formatEditorMs(ms: number): string {
@@ -4290,6 +4297,11 @@ function formatEditorMs(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total - minutes * 60;
   return `${minutes}:${seconds.toFixed(1).padStart(4, "0")}`;
+}
+
+/** The segment the handles, stats and loop playback currently follow. */
+function editorActiveSegment(): EditorSegment | null {
+  return state.editorSegments[state.editorActiveSegment] ?? null;
 }
 
 function editorFilterCss(): string {
@@ -4321,8 +4333,8 @@ async function openEditor(item: MediaItemDto): Promise<void> {
   state.editorPrecise = false;
   state.editorSourceUrl = "";
   resetEditorImageOps();
-  state.editorInMs = 0;
-  state.editorOutMs = 0;
+  state.editorSegments = [{ inMs: 0, outMs: 0, merge: false }];
+  state.editorActiveSegment = 0;
   state.editorDurationMs = 0;
   editorImageEl = null;
   editorSourceBitmap = null;
@@ -4431,7 +4443,15 @@ function renderEditorSlider(label: string, id: string, min: number, max: number,
 }
 
 function renderEditorVideoBody(): string {
-  const keep = Math.max(0, state.editorOutMs - state.editorInMs);
+  const active = editorActiveSegment();
+  const keep = active ? Math.max(0, active.outMs - active.inMs) : 0;
+  const segmentCount = state.editorSegments.length;
+  const ranges = state.editorSegments
+    .map(
+      (_, index) =>
+        `<span class="trim-range${index === state.editorActiveSegment ? " is-active" : ""}" data-segment="${index}"></span>`,
+    )
+    .join("");
   return `<div class="editor-workbench is-video">
     <div class="editor-stage-wrap"><div class="editor-stage is-video" id="editor-stage">${
       state.editorLoading
@@ -4441,8 +4461,9 @@ function renderEditorVideoBody(): string {
     <div class="editor-console">
       <div class="editor-console-row">
         <div class="trim-stats">
-          <span class="trim-stat"><span class="trim-stat-label">入点</span><strong class="trim-stat-value" id="trim-in-label">${formatEditorMs(state.editorInMs)}</strong></span>
-          <span class="trim-stat"><span class="trim-stat-label">出点</span><strong class="trim-stat-value" id="trim-out-label">${formatEditorMs(state.editorOutMs)}</strong></span>
+          <span class="trim-stat" id="trim-seg-stat"${segmentCount > 1 ? "" : " hidden"}><span class="trim-stat-label">片段</span><strong class="trim-stat-value" id="trim-seg-label">–</strong></span>
+          <span class="trim-stat"><span class="trim-stat-label">入点</span><strong class="trim-stat-value" id="trim-in-label">${active ? formatEditorMs(active.inMs) : "–:––"}</strong></span>
+          <span class="trim-stat"><span class="trim-stat-label">出点</span><strong class="trim-stat-value" id="trim-out-label">${active ? formatEditorMs(active.outMs) : "–:––"}</strong></span>
           <span class="trim-stat is-keep"><span class="trim-stat-label">保留</span><strong class="trim-stat-value" id="trim-len-label">${formatEditorMs(keep)}</strong></span>
           <span class="trim-stat"><span class="trim-stat-label">总时长</span><strong class="trim-stat-value" id="trim-dur-label">${state.editorDurationMs > 0 ? formatEditorMs(state.editorDurationMs) : "–:––"}</strong></span>
         </div>
@@ -4453,7 +4474,7 @@ function renderEditorVideoBody(): string {
       </div>
       <div class="trim-ruler" aria-hidden="true"></div>
       <div class="trim-track" id="trim-track">
-        <span class="trim-range" id="trim-range"></span>
+        ${ranges}
         <span class="trim-playhead" id="trim-playhead"></span>
         <span class="trim-handle handle-start" id="trim-handle-in" data-trim="in" title="入点"></span>
         <span class="trim-handle handle-end" id="trim-handle-out" data-trim="out" title="出点"></span>
@@ -4467,8 +4488,35 @@ function renderEditorVideoBody(): string {
         </div>
         <label class="editor-check"><input type="checkbox" id="trim-loop" checked />循环播放选段</label>
       </div>
+      <div class="editor-console-row">
+        <div class="editor-tool-row">
+          <button class="outline-button" id="trim-add-segment" type="button" ${state.editorJobId ? "disabled" : ""}>＋ 添加片段</button>
+          <span class="editor-hint">${segmentCount > 1 ? `已添加 ${segmentCount} 个片段，导出时每段各生成一个视频` : "可添加多个片段，一次性导出多个视频"}</span>
+        </div>
+      </div>
+      <div class="segment-list" id="segment-list" hidden></div>
     </div>
   </div>`;
+}
+
+/** Save button label: a single segment keeps the classic trim wording. */
+function editorSaveLabel(): string {
+  if (state.editorKind === "image") return "保存为新副本";
+  const count = state.editorSegments.length;
+  if (count <= 1) return "开始剪辑";
+  const mergeCount = state.editorSegments.filter((segment) => segment.merge).length;
+  if (mergeCount >= 2) return `导出 ${count} 个片段并合并 ${mergeCount} 段`;
+  return `导出 ${count} 个片段`;
+}
+
+/** Progress copy: segment position while cutting, merge once joining. */
+function editorRunningCopy(): string {
+  const progress = state.editorProgress;
+  if (progress?.phase === "finalizing") return "正在合并所选片段";
+  if (progress?.segmentIndex != null && progress.segmentCount != null) {
+    return `正在剪辑片段 ${progress.segmentIndex + 1}/${progress.segmentCount}`;
+  }
+  return "正在剪辑";
 }
 
 function renderEditorFooter(): string {
@@ -4479,7 +4527,7 @@ function renderEditorFooter(): string {
     : state.editorNotice
       ? `<span class="editor-notice">${escapeHtml(state.editorNotice)}</span>`
       : state.editorJobId
-        ? `<span class="editor-progress-copy">正在剪辑${percent !== null ? ` ${Math.round(percent)}%` : "…"}（原视频不受影响）</span>`
+        ? `<span class="editor-progress-copy">${editorRunningCopy()}${percent !== null ? ` ${Math.round(percent)}%` : "…"}（原视频不受影响）</span>`
         : `<span class="editor-hint">保存后生成新副本并自动入库，原文件保持不变。</span>`;
   return `<footer class="editor-footer" id="editor-footer">
     <div class="editor-feedback">${feedback}</div>
@@ -4490,7 +4538,7 @@ function renderEditorFooter(): string {
           ? `<button class="outline-button" id="editor-cancel-job" type="button">取消任务</button>`
           : `<button class="outline-button editor-close-button" type="button">关闭</button>`
       }
-      <button class="primary-button" id="editor-save" type="button" ${busy || state.editorLoading ? "disabled" : ""}>${state.editorKind === "image" ? "保存为新副本" : "开始剪辑"}</button>
+      <button class="primary-button" id="editor-save" type="button" ${busy || state.editorLoading ? "disabled" : ""}>${editorSaveLabel()}</button>
     </div>
   </footer>`;
 }
@@ -4520,7 +4568,7 @@ function bindEditorFooterEvents(modal: HTMLElement): void {
   });
   modal.querySelector<HTMLButtonElement>("#editor-save")?.addEventListener("click", () => {
     if (state.editorKind === "image") void saveImageEdit();
-    else void saveVideoTrim();
+    else void saveVideoCut();
   });
 }
 
@@ -4858,9 +4906,11 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
   const track = modal.querySelector<HTMLElement>("#trim-track");
   video?.addEventListener("loadedmetadata", () => {
     state.editorDurationMs = Math.round((Number.isFinite(video.duration) ? video.duration : 0) * 1000);
-    state.editorInMs = 0;
-    state.editorOutMs = state.editorDurationMs;
+    state.editorSegments = [{ inMs: 0, outMs: state.editorDurationMs, merge: false }];
+    state.editorActiveSegment = 0;
+    editorRebuildTrack();
     editorSyncTrimBar();
+    editorSyncSegmentList();
     editorSyncPlayhead(video);
   });
   video?.addEventListener("timeupdate", () => {
@@ -4869,44 +4919,86 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
     editorSyncPlayhead(video);
     if (video.paused) return;
     const loop = modal.querySelector<HTMLInputElement>("#trim-loop")?.checked ?? true;
-    if (!loop) return;
+    const segment = editorActiveSegment();
+    if (!loop || !segment) return;
     const time = video.currentTime * 1000;
-    if (time < state.editorInMs - 60 || time >= state.editorOutMs) {
-      video.currentTime = state.editorInMs / 1000 + 0.01;
+    if (time < segment.inMs - 60 || time >= segment.outMs) {
+      video.currentTime = segment.inMs / 1000 + 0.01;
     }
   });
   video?.addEventListener("seeked", () => editorSyncPlayhead(video));
   const setPoint = (which: "in" | "out"): void => {
-    if (!video || !Number.isFinite(video.currentTime)) return;
+    const segment = editorActiveSegment();
+    if (!video || !segment || !Number.isFinite(video.currentTime)) return;
     const ms = Math.round(video.currentTime * 1000);
-    if (which === "in") state.editorInMs = Math.min(ms, state.editorOutMs - EDITOR_MIN_TRIM_MS);
-    else state.editorOutMs = Math.max(ms, state.editorInMs + EDITOR_MIN_TRIM_MS);
-    state.editorInMs = Math.max(0, state.editorInMs);
-    state.editorOutMs = Math.min(state.editorDurationMs, state.editorOutMs);
+    if (which === "in") segment.inMs = Math.min(ms, segment.outMs - EDITOR_MIN_TRIM_MS);
+    else segment.outMs = Math.max(ms, segment.inMs + EDITOR_MIN_TRIM_MS);
+    segment.inMs = Math.max(0, segment.inMs);
+    segment.outMs = Math.min(state.editorDurationMs, segment.outMs);
     editorSyncTrimBar();
   };
   modal.querySelector<HTMLButtonElement>("#trim-set-in")?.addEventListener("click", () => setPoint("in"));
   modal.querySelector<HTMLButtonElement>("#trim-set-out")?.addEventListener("click", () => setPoint("out"));
   const nudgePoint = (which: "in" | "out", deltaMs: number): void => {
+    const segment = editorActiveSegment();
+    if (!segment) return;
     if (which === "in") {
-      state.editorInMs = Math.min(
-        Math.max(0, state.editorInMs + deltaMs),
-        state.editorOutMs - EDITOR_MIN_TRIM_MS,
+      segment.inMs = Math.min(
+        Math.max(0, segment.inMs + deltaMs),
+        segment.outMs - EDITOR_MIN_TRIM_MS,
       );
     } else {
-      state.editorOutMs = Math.max(
-        Math.min(state.editorDurationMs, state.editorOutMs + deltaMs),
-        state.editorInMs + EDITOR_MIN_TRIM_MS,
+      segment.outMs = Math.max(
+        Math.min(state.editorDurationMs, segment.outMs + deltaMs),
+        segment.inMs + EDITOR_MIN_TRIM_MS,
       );
     }
     editorSyncTrimBar();
     // Jump the player to the adjusted point so the new cut is visible.
-    if (video) video.currentTime = (which === "in" ? state.editorInMs : state.editorOutMs) / 1000;
+    if (video) video.currentTime = (which === "in" ? segment.inMs : segment.outMs) / 1000;
   };
   modal.querySelector<HTMLButtonElement>("#trim-nudge-in-back")?.addEventListener("click", () => nudgePoint("in", -EDITOR_NUDGE_MS));
   modal.querySelector<HTMLButtonElement>("#trim-nudge-in-fwd")?.addEventListener("click", () => nudgePoint("in", EDITOR_NUDGE_MS));
   modal.querySelector<HTMLButtonElement>("#trim-nudge-out-back")?.addEventListener("click", () => nudgePoint("out", -EDITOR_NUDGE_MS));
   modal.querySelector<HTMLButtonElement>("#trim-nudge-out-fwd")?.addEventListener("click", () => nudgePoint("out", EDITOR_NUDGE_MS));
+  modal.querySelector<HTMLButtonElement>("#trim-add-segment")?.addEventListener("click", () => {
+    const duration = state.editorDurationMs;
+    if (duration <= 0) return;
+    const playMs =
+      video && Number.isFinite(video.currentTime) ? Math.round(video.currentTime * 1000) : 0;
+    let inMs = Math.min(Math.max(0, playMs), Math.max(0, duration - EDITOR_MIN_TRIM_MS));
+    let outMs = Math.min(duration, inMs + EDITOR_DEFAULT_SEGMENT_MS);
+    if (outMs - inMs < EDITOR_MIN_TRIM_MS) inMs = Math.max(0, outMs - EDITOR_MIN_TRIM_MS);
+    state.editorSegments.push({ inMs, outMs, merge: false });
+    state.editorActiveSegment = state.editorSegments.length - 1;
+    editorRebuildTrack();
+    editorSyncTrimBar();
+    editorSyncSegmentList();
+    editorUpdateFooter();
+    if (video) video.currentTime = inMs / 1000;
+  });
+  // Delegated list events survive row re-renders; the checkbox and delete
+  // button opt out of row activation.
+  const segmentList = modal.querySelector<HTMLElement>("#segment-list");
+  segmentList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const remove = target.closest<HTMLElement>("[data-segment-remove]");
+    if (remove) {
+      editorRemoveSegment(Number(remove.dataset.segmentRemove));
+      return;
+    }
+    if (target.closest("input[data-segment-merge]")) return;
+    const row = target.closest<HTMLElement>("[data-segment-row]");
+    if (row) editorActivateSegment(Number(row.dataset.segmentRow));
+  });
+  segmentList?.addEventListener("change", (event) => {
+    const input = event.target as HTMLInputElement;
+    const segment = state.editorSegments[Number(input.dataset.segmentMerge)];
+    if (!segment) return;
+    segment.merge = input.checked;
+    // The save button label reflects the merge selection.
+    editorUpdateFooter();
+  });
   for (const input of modal.querySelectorAll<HTMLInputElement>('input[name="editor-trim-mode"]')) {
     input.addEventListener("change", () => {
       if (input.checked) state.editorPrecise = input.value === "precise";
@@ -4920,14 +5012,15 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
     return Math.min(Math.max(0, (event.clientX - bounds.left) / bounds.width), 1);
   };
   const moveTrim = (event: PointerEvent): void => {
-    if (!trimDrag) return;
+    const segment = editorActiveSegment();
+    if (!trimDrag || !segment) return;
     const ms = Math.round(fractionFromEvent(event) * state.editorDurationMs);
     if (trimDrag === "in") {
-      state.editorInMs = Math.min(Math.max(0, ms), state.editorOutMs - EDITOR_MIN_TRIM_MS);
+      segment.inMs = Math.min(Math.max(0, ms), segment.outMs - EDITOR_MIN_TRIM_MS);
     } else {
-      state.editorOutMs = Math.max(
+      segment.outMs = Math.max(
         Math.min(state.editorDurationMs, ms),
-        state.editorInMs + EDITOR_MIN_TRIM_MS,
+        segment.inMs + EDITOR_MIN_TRIM_MS,
       );
     }
     editorSyncTrimBar();
@@ -4936,13 +5029,19 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
     trimDrag = null;
   };
   track.addEventListener("pointerdown", (event) => {
-    const handle = (event.target as HTMLElement).dataset?.trim;
+    const target = event.target as HTMLElement;
+    const handle = target.dataset?.trim;
     if (handle === "in" || handle === "out") {
       event.preventDefault();
       trimDrag = handle;
       return;
     }
-    // Clicking the track seeks the player.
+    // Clicking a range strip activates that segment; every click also seeks.
+    const range = target.closest<HTMLElement>(".trim-range");
+    if (range) {
+      const index = Number(range.dataset.segment);
+      if (state.editorSegments[index]) editorActivateSegment(index);
+    }
     video.currentTime = fractionFromEvent(event) * (state.editorDurationMs / 1000);
   });
   track.addEventListener("pointermove", moveTrim);
@@ -4951,23 +5050,113 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
   track.addEventListener("pointerleave", stopTrim);
 }
 
-/** Selection handles and shades are percentage-positioned over the track. */
+/** Recreate the per-segment range strips after segments were added, removed
+ * or reset; styling and positions follow via editorSyncTrimBar. */
+function editorRebuildTrack(): void {
+  const track = app.querySelector<HTMLElement>("#trim-track");
+  if (!track) return;
+  track.querySelectorAll(".trim-range").forEach((node) => node.remove());
+  const playhead = track.querySelector("#trim-playhead");
+  const fragment = document.createDocumentFragment();
+  state.editorSegments.forEach((_, index) => {
+    const range = document.createElement("span");
+    range.className = "trim-range";
+    range.dataset.segment = String(index);
+    fragment.appendChild(range);
+  });
+  track.insertBefore(fragment, playhead);
+}
+
+function editorActivateSegment(index: number): void {
+  if (!state.editorSegments[index] || index === state.editorActiveSegment) return;
+  state.editorActiveSegment = index;
+  editorSyncTrimBar();
+}
+
+function editorRemoveSegment(index: number): void {
+  if (!state.editorSegments[index] || state.editorSegments.length <= 1) return;
+  state.editorSegments.splice(index, 1);
+  if (state.editorActiveSegment >= state.editorSegments.length) {
+    state.editorActiveSegment = state.editorSegments.length - 1;
+  }
+  if (state.editorSegments.length < 2) {
+    // Merge needs at least two segments; drop stale flags.
+    for (const segment of state.editorSegments) segment.merge = false;
+  }
+  editorRebuildTrack();
+  editorSyncTrimBar();
+  editorSyncSegmentList();
+  editorUpdateFooter();
+}
+
+/** Full rebuild of the segment list (open/add/remove/reset). Drag-time and
+ * activation updates go through editorSyncTrimBar so rows never re-mount. */
+function editorSyncSegmentList(): void {
+  const list = app.querySelector<HTMLElement>("#segment-list");
+  if (!list) return;
+  const count = state.editorSegments.length;
+  list.hidden = count < 2;
+  if (count < 2) {
+    list.innerHTML = "";
+    return;
+  }
+  list.innerHTML = state.editorSegments
+    .map(
+      (segment, index) => `<div class="segment-row${index === state.editorActiveSegment ? " is-active" : ""}" data-segment-row="${index}">
+        <button class="segment-pick" type="button" title="选中该片段"><strong>片段 ${index + 1}</strong><span class="segment-range" data-segment-range="${index}">${formatEditorMs(segment.inMs)} – ${formatEditorMs(segment.outMs)}（${formatEditorMs(segment.outMs - segment.inMs)}）</span></button>
+        <label class="segment-merge" title="勾选后与其他勾选片段在导出时合并为一个视频"><input type="checkbox" data-segment-merge="${index}" ${segment.merge ? "checked" : ""} />并入合并</label>
+        <button class="segment-delete" type="button" data-segment-remove="${index}" title="删除该片段" aria-label="删除片段 ${index + 1}">×</button>
+      </div>`,
+    )
+    .join("");
+}
+
+/** Range strips and the handles are percentage-positioned over the track; the
+ * handles follow the active segment while every strip shows its own bounds. */
 function editorSyncTrimBar(): void {
   const track = app.querySelector<HTMLElement>("#trim-track");
   if (!track) return;
   const duration = state.editorDurationMs;
-  const inFrac = duration > 0 ? state.editorInMs / duration : 0;
-  const outFrac = duration > 0 ? state.editorOutMs / duration : 1;
-  track.style.setProperty("--trim-in", `${inFrac * 100}%`);
-  track.style.setProperty("--trim-out", `${outFrac * 100}%`);
+  const active = editorActiveSegment();
+  const frac = (ms: number): number => (duration > 0 ? (ms / duration) * 100 : 0);
+  // Track-level vars keep the handles glued to the active segment.
+  track.style.setProperty("--trim-in", `${active ? frac(active.inMs) : 0}%`);
+  track.style.setProperty("--trim-out", `${active ? frac(active.outMs) : 0}%`);
+  track.classList.toggle("is-multi", state.editorSegments.length > 1);
+  track.querySelectorAll<HTMLElement>(".trim-range").forEach((node) => {
+    const segment = state.editorSegments[Number(node.dataset.segment)];
+    if (!segment) return;
+    node.style.setProperty("--trim-in", `${frac(segment.inMs)}%`);
+    node.style.setProperty("--trim-out", `${frac(segment.outMs)}%`);
+    node.classList.toggle(
+      "is-active",
+      Number(node.dataset.segment) === state.editorActiveSegment,
+    );
+  });
   const inLabel = app.querySelector<HTMLElement>("#trim-in-label");
   const outLabel = app.querySelector<HTMLElement>("#trim-out-label");
   const lenLabel = app.querySelector<HTMLElement>("#trim-len-label");
-  if (inLabel) inLabel.textContent = formatEditorMs(state.editorInMs);
-  if (outLabel) outLabel.textContent = formatEditorMs(state.editorOutMs);
-  if (lenLabel) lenLabel.textContent = formatEditorMs(state.editorOutMs - state.editorInMs);
+  if (inLabel) inLabel.textContent = active ? formatEditorMs(active.inMs) : "–:––";
+  if (outLabel) outLabel.textContent = active ? formatEditorMs(active.outMs) : "–:––";
+  if (lenLabel) lenLabel.textContent = active ? formatEditorMs(active.outMs - active.inMs) : "0:00.0";
   const durLabel = app.querySelector<HTMLElement>("#trim-dur-label");
   if (durLabel && duration > 0) durLabel.textContent = formatEditorMs(duration);
+  const segStat = app.querySelector<HTMLElement>("#trim-seg-stat");
+  const segLabel = app.querySelector<HTMLElement>("#trim-seg-label");
+  if (segStat) segStat.hidden = state.editorSegments.length <= 1;
+  if (segLabel) {
+    segLabel.textContent = `${state.editorActiveSegment + 1}/${state.editorSegments.length}`;
+  }
+  // Row summaries mirror the state in place; rows never re-mount mid gesture.
+  app.querySelectorAll<HTMLElement>("#segment-list [data-segment-row]").forEach((row) => {
+    const index = Number(row.dataset.segmentRow);
+    const segment = state.editorSegments[index];
+    row.classList.toggle("is-active", index === state.editorActiveSegment);
+    const range = row.querySelector<HTMLElement>("[data-segment-range]");
+    if (segment && range) {
+      range.textContent = `${formatEditorMs(segment.inMs)} – ${formatEditorMs(segment.outMs)}（${formatEditorMs(segment.outMs - segment.inMs)}）`;
+    }
+  });
 }
 
 /** Playhead mirrors the player position; a style write, safe per timeupdate. */
@@ -4982,22 +5171,37 @@ function editorSyncPlayhead(video?: HTMLVideoElement | null): void {
   track.style.setProperty("--trim-play", `${frac * 100}%`);
 }
 
-async function saveVideoTrim(): Promise<void> {
+async function saveVideoCut(): Promise<void> {
   const item = state.editorItem;
   if (!item || state.editorBusy || state.editorJobId) return;
-  if (state.editorOutMs - state.editorInMs < EDITOR_MIN_TRIM_MS) {
-    state.editorError = "选段太短，请调整入点/出点";
+  if (state.editorSegments.some((segment) => segment.outMs - segment.inMs < EDITOR_MIN_TRIM_MS)) {
+    state.editorError = "存在太短的片段，请调整入点/出点";
+    editorUpdateFooter();
+    return;
+  }
+  const mergeCount = state.editorSegments.filter((segment) => segment.merge).length;
+  if (state.editorSegments.length > 1 && mergeCount === 1) {
+    state.editorError = "合并至少需要勾选两个片段";
     editorUpdateFooter();
     return;
   }
   state.editorBusy = true;
   state.editorError = null;
   try {
-    const start = await startVideoTrim(item.id, {
-      inMs: state.editorInMs,
-      outMs: state.editorOutMs,
-      precise: state.editorPrecise,
-    });
+    // A single segment keeps the classic trim path (and `{stem}_edited` name);
+    // one segment alone can never merge.
+    const single = state.editorSegments.length === 1;
+    const start = single
+      ? await startVideoTrim(item.id, {
+          inMs: state.editorSegments[0].inMs,
+          outMs: state.editorSegments[0].outMs,
+          precise: state.editorPrecise,
+        })
+      : await startVideoCutSegments(
+          item.id,
+          state.editorSegments.map((segment) => ({ ...segment })),
+          state.editorPrecise,
+        );
     state.editorJobId = start.jobId;
     state.editorProgress = {
       jobId: start.jobId,
@@ -5023,6 +5227,18 @@ function handleEditSaved(result: EditResultDto): void {
   void refreshMedia();
   // The incremental scan takes a moment; refresh again once it has landed so
   // the new copy shows up without manual interaction.
+  window.setTimeout(() => void refreshMedia(), 2500);
+}
+
+function handleCutCompleted(results: EditResultDto[], merged: EditResultDto | null): void {
+  const message = merged
+    ? `已导出 ${results.length} 个片段并合并为 ${merged.fileName}，正在自动入库`
+    : `已导出 ${results.length} 个片段（${results.map((result) => result.fileName).join("、")}），正在自动入库`;
+  showTransientNotice(message, "success");
+  closeEditor();
+  void refreshMedia();
+  // The incremental scan takes a moment; refresh again once it has landed so
+  // the new copies show up without manual interaction.
   window.setTimeout(() => void refreshMedia(), 2500);
 }
 
@@ -6031,6 +6247,8 @@ void onEditProgress((progress) => {
   state.editorJobId = null;
   if (progress.state === "completed" && progress.result) {
     handleEditSaved(progress.result);
+  } else if (progress.state === "completed" && progress.results) {
+    handleCutCompleted(progress.results, progress.mergedResult ?? null);
   } else if (progress.state === "cancelled") {
     state.editorNotice = "剪辑已取消";
     state.editorProgress = null;

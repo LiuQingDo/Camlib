@@ -2616,18 +2616,34 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 .trim-track { position: relative; height: 40px; border-radius: 9px; background: rgba(0,0,0,.07); cursor: crosshair; touch-action: none; overflow: hidden; }
 .trim-track::before { content: ""; position: absolute; left: 0; width: var(--trim-in, 0%); top: 0; bottom: 0; background: rgba(0,0,0,.16); }
 .trim-track::after { content: ""; position: absolute; left: var(--trim-out, 100%); right: 0; top: 0; bottom: 0; background: rgba(0,0,0,.16); }
-.trim-range { position: absolute; left: var(--trim-in, 0%); width: calc(var(--trim-out, 100%) - var(--trim-in, 0%)); top: 0; bottom: 0; border-left: 2px solid #111111; border-right: 2px solid #111111; background: rgba(17,17,17,.1); pointer-events: none; }
-.trim-handle { position: absolute; top: 0; bottom: 0; width: 16px; margin-left: -8px; border-radius: 8px; background: #111111; box-shadow: 0 2px 6px rgba(0,0,0,.35); cursor: ew-resize; }
+/* With several segments every strip marks its own range, so the active
+ * segment's outside shades would only bury the other segments. */
+.trim-track.is-multi::before, .trim-track.is-multi::after { content: none; }
+.trim-range { position: absolute; left: var(--trim-in, 0%); width: calc(var(--trim-out, 100%) - var(--trim-in, 0%)); top: 0; bottom: 0; border-left: 2px solid #111111; border-right: 2px solid #111111; background: rgba(17,17,17,.1); cursor: pointer; z-index: 1; }
+.trim-range:not(.is-active) { opacity: .5; }
+.trim-range.is-active { z-index: 2; cursor: crosshair; }
+.trim-handle { position: absolute; top: 0; bottom: 0; width: 16px; margin-left: -8px; border-radius: 8px; background: #111111; box-shadow: 0 2px 6px rgba(0,0,0,.35); cursor: ew-resize; z-index: 4; }
 .trim-handle::after { content: ""; position: absolute; top: 50%; left: 50%; width: 2px; height: 14px; transform: translate(-50%, -50%); border-radius: 1px; background: rgba(255,255,255,.8); }
 .handle-start { left: var(--trim-in, 0%); }
 .handle-end { left: var(--trim-out, 100%); }
-.trim-playhead { position: absolute; top: 0; bottom: 0; left: var(--trim-play, 0%); width: 2px; margin-left: -1px; background: #ff5c38; box-shadow: 0 0 0 1px rgba(255,255,255,.55); pointer-events: none; }
+.trim-playhead { position: absolute; top: 0; bottom: 0; left: var(--trim-play, 0%); width: 2px; margin-left: -1px; background: #ff5c38; box-shadow: 0 0 0 1px rgba(255,255,255,.55); pointer-events: none; z-index: 3; }
 .trim-playhead::after { content: ""; position: absolute; top: 3px; left: 50%; width: 8px; height: 8px; transform: translateX(-50%); border-radius: 50%; background: #ff5c38; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
 .trim-nudges { display: inline-flex; gap: 4px; align-items: center; }
 .trim-nudges-label { color: #888888; font-size: 10.5px; }
 .editor-tool-row .trim-nudge { width: 28px; padding: 0; text-align: center; }
 .editor-check { display: flex; gap: 7px; align-items: center; color: #555555; font-size: 11px; }
 .editor-check input { accent-color: #111111; }
+.segment-list { display: flex; flex-direction: column; gap: 6px; max-height: 156px; overflow-y: auto; padding-right: 2px; }
+.segment-list[hidden] { display: none; }
+.segment-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid rgba(0,0,0,.1); border-radius: 10px; background: rgba(255,255,255,.55); }
+.segment-row.is-active { border-color: #111111; background: #ffffff; box-shadow: 0 3px 10px rgba(0,0,0,.08); }
+.segment-pick { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.segment-pick strong { color: #111111; font-size: 11.5px; white-space: nowrap; }
+.segment-range { color: #777777; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.segment-merge { display: inline-flex; align-items: center; gap: 5px; color: #555555; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.segment-merge input { accent-color: #111111; }
+.segment-delete { flex-shrink: 0; width: 22px; height: 22px; padding: 0; border: 1px solid rgba(0,0,0,.12); border-radius: 7px; background: rgba(255,255,255,.6); color: #777777; font-size: 13px; line-height: 1; cursor: pointer; }
+.segment-delete:hover { color: #8a1f1f; border-color: rgba(138,31,31,.45); }
 .editor-footer { display: flex; flex-direction: column; gap: 8px; padding: 12px 18px 14px; border-top: 1px solid rgba(0,0,0,.06); }
 .editor-feedback { display: flex; align-items: center; min-height: 18px; font-size: 11.5px; }
 .editor-error { color: #8a1f1f; font-weight: 650; }
@@ -2656,6 +2672,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 [data-theme="dark"] .trim-track::before, [data-theme="dark"] .trim-track::after { background: rgba(255,255,255,.14); }
 [data-theme="dark"] .trim-handle { background: #f2f2f2; border-color: #f2f2f2; }
 [data-theme="dark"] .trim-range { border-color: #f2f2f2; background: rgba(255,255,255,.14); }
+[data-theme="dark"] .segment-row { border-color: rgba(255,255,255,.1); background: rgba(255,255,255,.05); }
+[data-theme="dark"] .segment-row.is-active { border-color: rgba(255,255,255,.85); background: rgba(255,255,255,.12); }
+[data-theme="dark"] .segment-pick strong { color: #f2f2f2; }
+[data-theme="dark"] .segment-range { color: var(--faint, #999999); }
+[data-theme="dark"] .segment-merge { color: #cccccc; }
+[data-theme="dark"] .segment-delete { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.06); color: #cccccc; }
+[data-theme="dark"] .segment-delete:hover { color: #ff9a9a; border-color: rgba(255,154,154,.45); }
 [data-theme="dark"] .editor-footer { border-top-color: rgba(255,255,255,.08); }
 [data-theme="dark"] .editor-error { color: #ff9a9a; }
 [data-theme="dark"] .editor-notice { color: #9fe0b0; }

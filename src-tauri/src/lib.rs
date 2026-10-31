@@ -896,6 +896,63 @@ fn media_trim_video(
     Ok(editing::EditJobStartDto { job_id })
 }
 
+/// Start cutting a video into several segment copies in one job, optionally
+/// joining flagged segments (in segment order) into one extra merged copy.
+/// Runs as a cancellable background job reporting `edit-progress` events.
+#[tauri::command]
+fn media_cut_video_segments(
+    media_item_id: String,
+    segments: Vec<editing::CutSegmentSpec>,
+    precise: Option<bool>,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    edits: State<'_, editing::EditJobManagerState>,
+    scans: State<'_, ScanManagerState>,
+) -> Result<editing::EditJobStartDto, AppError> {
+    if segments.is_empty() || segments.len() > editing::MAX_CUT_SEGMENTS {
+        return Err(AppError::invalid_argument("剪辑片段数量无效"));
+    }
+    for segment in &segments {
+        if segment.in_ms < 0 || segment.out_ms <= segment.in_ms {
+            return Err(AppError::invalid_argument("剪辑区间无效"));
+        }
+    }
+    let (database_path, library_id) = infrastructure.with_infrastructure(|value| {
+        let details = value
+            .repository()
+            .get_media_item_details(&media_item_id)
+            .map_err(InfrastructureError::database)?
+            .ok_or_else(|| InfrastructureError::MediaMissing("媒体不存在".to_owned()))?;
+        let library = value
+            .repository()
+            .get_library(&details.item.library_id)
+            .map_err(InfrastructureError::database)?
+            .ok_or_else(|| InfrastructureError::InvalidPath("媒体库不存在".to_owned()))?;
+        if library.state != db::LibraryState::Available {
+            return Err(InfrastructureError::LibraryOffline(
+                "媒体库当前不可用".to_owned(),
+            ));
+        }
+        Ok((value.database_path(), library.id))
+    })?;
+    let (job_id, cancel) = edits.start()?;
+    editing::spawn_cut_segments(
+        app,
+        Arc::new(edits.inner().clone()),
+        Arc::new(scans.inner().clone()),
+        database_path,
+        library_id,
+        job_id.clone(),
+        cancel,
+        editing::CutSegmentsParams {
+            media_item_id,
+            segments,
+            precise: precise.unwrap_or(false),
+        },
+    );
+    Ok(editing::EditJobStartDto { job_id })
+}
+
 /// Cancel the running video trim job.
 #[tauri::command]
 fn media_edit_cancel(
@@ -1507,6 +1564,7 @@ pub fn run() {
             library_merge_cancel,
             media_edit_image,
             media_trim_video,
+            media_cut_video_segments,
             media_edit_cancel,
             media_merge_videos,
             media_merge_cancel
