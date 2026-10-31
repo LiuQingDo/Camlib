@@ -3730,7 +3730,9 @@ async function loadModalAsset(): Promise<void> {
       const el = media.querySelector<HTMLVideoElement>("video");
       if (el) {
         bindVideoElement(el);
-        void el.play().catch(() => undefined);
+        // 编辑器叠在预览之上时保持暂停：全量渲染会重建该元素，
+        // 此时自动播放会让背后的预览重新出画出声。
+        if (!state.editorOpen) void el.play().catch(() => undefined);
       }
       bindPreviewMediaInteraction(media);
     } else if (photo) {
@@ -3813,6 +3815,18 @@ function togglePreviewMute(): void {
   video.muted = !video.muted;
 }
 
+/**
+ * Pause all preview media playback. Overlays that take over playback (the
+ * editor) call this so the preview behind them never keeps playing. The live
+ * path goes through setLivePlaying to also restore the still-frame UI.
+ */
+function pausePreviewPlayback(): void {
+  if (livePlaying) setLivePlaying(false);
+  for (const video of app.querySelectorAll<HTMLVideoElement>("#modal-media video")) {
+    video.pause();
+  }
+}
+
 function togglePreviewFullscreen(): void {
   const photoStage = app.querySelector<HTMLElement>("#modal-media .photo-stage");
   const video = activePreviewVideo() ?? app.querySelector<HTMLVideoElement>("#modal-media video");
@@ -3878,6 +3892,8 @@ const EDITOR_PREVIEW_BACKING = 440;
 const EDITOR_PREVIEW_SOURCE_MAX = 1400;
 const EDITOR_MIN_CROP = 0.02;
 const EDITOR_MIN_TRIM_MS = 100;
+/** Step of the in/out nudge buttons under the trim track. */
+const EDITOR_NUDGE_MS = 100;
 const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
 
 function formatEditorMs(ms: number): string {
@@ -3902,6 +3918,8 @@ function resetEditorImageOps(): void {
 }
 
 async function openEditor(item: MediaItemDto): Promise<void> {
+  // The editor stacks on top of the preview viewer; stop the media behind it.
+  pausePreviewPlayback();
   state.editorOpen = true;
   state.editorItem = item;
   state.editorKind = item.kind === "video" ? "video" : "image";
@@ -3995,24 +4013,24 @@ function renderEditorImageBody(): string {
     }</div></div>
     <aside class="editor-tools">
       <div class="editor-tool-group"><span class="editor-tool-label">旋转 / 翻转</span>
-        <div class="editor-tool-row">
-          <button class="outline-button" id="editor-rotate-left" type="button">↺ 左旋</button>
-          <button class="outline-button" id="editor-rotate-right" type="button">↻ 右旋</button>
-          <button class="outline-button" id="editor-flip-h" type="button">⇋ 水平</button>
-          <button class="outline-button" id="editor-flip-v" type="button">⇅ 垂直</button>
+        <div class="editor-tool-grid">
+          <button class="editor-tool-tile" id="editor-rotate-left" type="button"><span class="editor-tool-icon">↺</span><span>左旋</span></button>
+          <button class="editor-tool-tile" id="editor-rotate-right" type="button"><span class="editor-tool-icon">↻</span><span>右旋</span></button>
+          <button class="editor-tool-tile" id="editor-flip-h" type="button"><span class="editor-tool-icon">⇋</span><span>水平</span></button>
+          <button class="editor-tool-tile" id="editor-flip-v" type="button"><span class="editor-tool-icon">⇅</span><span>垂直</span></button>
         </div>
       </div>
       <div class="editor-tool-group"><span class="editor-tool-label">裁剪</span>
-        <div class="editor-tool-row"><button class="outline-button" id="editor-crop-reset" type="button">重置裁剪</button><span class="editor-hint" id="editor-crop-info"></span></div>
+        <div class="editor-tool-row"><button class="outline-button" id="editor-crop-reset" type="button">重置裁剪</button><span class="editor-hint editor-crop-info" id="editor-crop-info"></span></div>
         <span class="editor-hint">拖动裁剪框边缘调整范围，框内拖动移动位置。</span>
       </div>
       <div class="editor-tool-group"><span class="editor-tool-label">调整</span>
         ${renderEditorSlider("亮度", "editor-brightness", 0.3, 2, state.editorBrightness)}
         ${renderEditorSlider("对比度", "editor-contrast", 0.5, 1.5, state.editorContrast)}
         ${renderEditorSlider("饱和度", "editor-saturation", 0, 2, state.editorSaturation)}
-        <button class="text-button" id="editor-adjust-reset" type="button">还原调整</button>
+        <button class="text-button" id="editor-adjust-reset" type="button">还原全部调整</button>
       </div>
-      <div class="editor-tool-group"><span class="editor-tool-label">输出预览</span>
+      <div class="editor-tool-group is-output"><span class="editor-tool-label">输出预览</span>
         <div class="editor-output-wrap"><canvas id="editor-output" width="${EDITOR_PREVIEW_BACKING}" height="${EDITOR_PREVIEW_BACKING}"></canvas></div>
       </div>
     </aside>
@@ -4020,7 +4038,7 @@ function renderEditorImageBody(): string {
 }
 
 function renderEditorSlider(label: string, id: string, min: number, max: number, value: number): string {
-  return `<label class="editor-slider"><span>${label}</span><input type="range" id="${id}" min="${min}" max="${max}" step="0.01" value="${value}" /><strong class="editor-slider-value" id="${id}-value">${value.toFixed(2)}</strong></label>`;
+  return `<label class="editor-slider" title="双击还原默认值"><span class="editor-slider-head"><span>${label}</span><strong class="editor-slider-value" id="${id}-value">${value.toFixed(2)}</strong></span><input type="range" id="${id}" min="${min}" max="${max}" step="0.01" value="${value}" /></label>`;
 }
 
 function renderEditorVideoBody(): string {
@@ -4031,26 +4049,36 @@ function renderEditorVideoBody(): string {
         ? `<span class="spinner large"></span>`
         : `<video id="editor-video" src="${state.editorSourceUrl}" controls playsinline preload="metadata"></video>`
     }</div></div>
-    <aside class="editor-tools">
-      <div class="editor-tool-group"><span class="editor-tool-label">剪辑区间</span>
-        <div class="trim-times"><span>入点 <strong id="trim-in-label">${formatEditorMs(state.editorInMs)}</strong></span><span>出点 <strong id="trim-out-label">${formatEditorMs(state.editorOutMs)}</strong></span><span>保留 <strong id="trim-len-label">${formatEditorMs(keep)}</strong></span></div>
-        <div class="trim-track" id="trim-track">
-          <span class="trim-range" id="trim-range"></span>
-          <span class="trim-handle handle-start" id="trim-handle-in" data-trim="in" title="入点"></span>
-          <span class="trim-handle handle-end" id="trim-handle-out" data-trim="out" title="出点"></span>
+    <div class="editor-console">
+      <div class="editor-console-row">
+        <div class="trim-stats">
+          <span class="trim-stat"><span class="trim-stat-label">入点</span><strong class="trim-stat-value" id="trim-in-label">${formatEditorMs(state.editorInMs)}</strong></span>
+          <span class="trim-stat"><span class="trim-stat-label">出点</span><strong class="trim-stat-value" id="trim-out-label">${formatEditorMs(state.editorOutMs)}</strong></span>
+          <span class="trim-stat is-keep"><span class="trim-stat-label">保留</span><strong class="trim-stat-value" id="trim-len-label">${formatEditorMs(keep)}</strong></span>
+          <span class="trim-stat"><span class="trim-stat-label">总时长</span><strong class="trim-stat-value" id="trim-dur-label">${state.editorDurationMs > 0 ? formatEditorMs(state.editorDurationMs) : "–:––"}</strong></span>
         </div>
+        <div class="trim-modes" role="radiogroup" aria-label="剪辑方式">
+          <label class="trim-mode-card"><input type="radio" name="editor-trim-mode" value="fast" ${state.editorPrecise ? "" : "checked"} /><strong>快速</strong><span>无损流复制 · 秒级完成，切点对齐关键帧</span></label>
+          <label class="trim-mode-card"><input type="radio" name="editor-trim-mode" value="precise" ${state.editorPrecise ? "checked" : ""} /><strong>精确</strong><span>重新编码 · 任意时刻切点，耗时较长</span></label>
+        </div>
+      </div>
+      <div class="trim-ruler" aria-hidden="true"></div>
+      <div class="trim-track" id="trim-track">
+        <span class="trim-range" id="trim-range"></span>
+        <span class="trim-playhead" id="trim-playhead"></span>
+        <span class="trim-handle handle-start" id="trim-handle-in" data-trim="in" title="入点"></span>
+        <span class="trim-handle handle-end" id="trim-handle-out" data-trim="out" title="出点"></span>
+      </div>
+      <div class="editor-console-row">
         <div class="editor-tool-row">
           <button class="outline-button" id="trim-set-in" type="button">设为入点</button>
           <button class="outline-button" id="trim-set-out" type="button">设为出点</button>
-          <label class="editor-check"><input type="checkbox" id="trim-loop" checked />循环播放选段</label>
+          <span class="trim-nudges" role="group" aria-label="入点微调"><span class="trim-nudges-label">入点</span><button class="outline-button trim-nudge" id="trim-nudge-in-back" type="button" title="入点前移 0.1 秒">◂</button><button class="outline-button trim-nudge" id="trim-nudge-in-fwd" type="button" title="入点后移 0.1 秒">▸</button></span>
+          <span class="trim-nudges" role="group" aria-label="出点微调"><span class="trim-nudges-label">出点</span><button class="outline-button trim-nudge" id="trim-nudge-out-back" type="button" title="出点前移 0.1 秒">◂</button><button class="outline-button trim-nudge" id="trim-nudge-out-fwd" type="button" title="出点后移 0.1 秒">▸</button></span>
         </div>
+        <label class="editor-check"><input type="checkbox" id="trim-loop" checked />循环播放选段</label>
       </div>
-      <div class="editor-tool-group"><span class="editor-tool-label">剪辑方式</span>
-        <label class="editor-check"><input type="radio" name="editor-trim-mode" value="fast" ${state.editorPrecise ? "" : "checked"} />快速 · 无损流复制，秒级完成，切点对齐关键帧</label>
-        <label class="editor-check"><input type="radio" name="editor-trim-mode" value="precise" ${state.editorPrecise ? "checked" : ""} />精确 · 重新编码，任意时刻切点，耗时较长</label>
-      </div>
-      <p class="editor-hint">原视频不会被修改，剪辑结果保存为独立副本并自动入库。</p>
-    </aside>
+    </div>
   </div>`;
 }
 
@@ -4218,27 +4246,30 @@ function bindEditorImageEvents(modal: HTMLElement): void {
     redrawEditorPreview();
     editorUpdateCropInfo();
   });
+  const setSlider = (id: string, value: number): void => {
+    if (id === "editor-brightness") state.editorBrightness = value;
+    else if (id === "editor-contrast") state.editorContrast = value;
+    else state.editorSaturation = value;
+    const input = modal.querySelector<HTMLInputElement>(`#${id}`);
+    if (input) input.value = String(value);
+    const label = modal.querySelector<HTMLElement>(`#${id}-value`);
+    if (label) label.textContent = value.toFixed(2);
+  };
   modal.querySelector<HTMLButtonElement>("#editor-adjust-reset")?.addEventListener("click", () => {
-    state.editorBrightness = 1;
-    state.editorContrast = 1;
-    state.editorSaturation = 1;
-    for (const id of ["editor-brightness", "editor-contrast", "editor-saturation"]) {
-      const input = modal.querySelector<HTMLInputElement>(`#${id}`);
-      if (input) input.value = "1";
-      const label = modal.querySelector<HTMLElement>(`#${id}-value`);
-      if (label) label.textContent = "1.00";
-    }
+    for (const id of ["editor-brightness", "editor-contrast", "editor-saturation"]) setSlider(id, 1);
     editorSyncFilter();
     redrawEditorPreview();
   });
   for (const id of ["editor-brightness", "editor-contrast", "editor-saturation"]) {
-    modal.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", (event) => {
-      const value = Number((event.target as HTMLInputElement).value);
-      if (id === "editor-brightness") state.editorBrightness = value;
-      else if (id === "editor-contrast") state.editorContrast = value;
-      else state.editorSaturation = value;
-      const label = modal.querySelector<HTMLElement>(`#${id}-value`);
-      if (label) label.textContent = value.toFixed(2);
+    const input = modal.querySelector<HTMLInputElement>(`#${id}`);
+    input?.addEventListener("input", (event) => {
+      setSlider(id, Number((event.target as HTMLInputElement).value));
+      editorSyncFilter();
+      redrawEditorPreview();
+    });
+    // Double-click anywhere on the slider row restores the neutral value.
+    input?.closest(".editor-slider")?.addEventListener("dblclick", () => {
+      setSlider(id, 1);
       editorSyncFilter();
       redrawEditorPreview();
     });
@@ -4441,9 +4472,13 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
     state.editorInMs = 0;
     state.editorOutMs = state.editorDurationMs;
     editorSyncTrimBar();
+    editorSyncPlayhead(video);
   });
   video?.addEventListener("timeupdate", () => {
-    if (!video || video.paused) return;
+    if (!video) return;
+    // Playhead mirrors the player even while paused, before any early return.
+    editorSyncPlayhead(video);
+    if (video.paused) return;
     const loop = modal.querySelector<HTMLInputElement>("#trim-loop")?.checked ?? true;
     if (!loop) return;
     const time = video.currentTime * 1000;
@@ -4451,6 +4486,7 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
       video.currentTime = state.editorInMs / 1000 + 0.01;
     }
   });
+  video?.addEventListener("seeked", () => editorSyncPlayhead(video));
   const setPoint = (which: "in" | "out"): void => {
     if (!video || !Number.isFinite(video.currentTime)) return;
     const ms = Math.round(video.currentTime * 1000);
@@ -4462,6 +4498,26 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
   };
   modal.querySelector<HTMLButtonElement>("#trim-set-in")?.addEventListener("click", () => setPoint("in"));
   modal.querySelector<HTMLButtonElement>("#trim-set-out")?.addEventListener("click", () => setPoint("out"));
+  const nudgePoint = (which: "in" | "out", deltaMs: number): void => {
+    if (which === "in") {
+      state.editorInMs = Math.min(
+        Math.max(0, state.editorInMs + deltaMs),
+        state.editorOutMs - EDITOR_MIN_TRIM_MS,
+      );
+    } else {
+      state.editorOutMs = Math.max(
+        Math.min(state.editorDurationMs, state.editorOutMs + deltaMs),
+        state.editorInMs + EDITOR_MIN_TRIM_MS,
+      );
+    }
+    editorSyncTrimBar();
+    // Jump the player to the adjusted point so the new cut is visible.
+    if (video) video.currentTime = (which === "in" ? state.editorInMs : state.editorOutMs) / 1000;
+  };
+  modal.querySelector<HTMLButtonElement>("#trim-nudge-in-back")?.addEventListener("click", () => nudgePoint("in", -EDITOR_NUDGE_MS));
+  modal.querySelector<HTMLButtonElement>("#trim-nudge-in-fwd")?.addEventListener("click", () => nudgePoint("in", EDITOR_NUDGE_MS));
+  modal.querySelector<HTMLButtonElement>("#trim-nudge-out-back")?.addEventListener("click", () => nudgePoint("out", -EDITOR_NUDGE_MS));
+  modal.querySelector<HTMLButtonElement>("#trim-nudge-out-fwd")?.addEventListener("click", () => nudgePoint("out", EDITOR_NUDGE_MS));
   for (const input of modal.querySelectorAll<HTMLInputElement>('input[name="editor-trim-mode"]')) {
     input.addEventListener("change", () => {
       if (input.checked) state.editorPrecise = input.value === "precise";
@@ -4521,6 +4577,20 @@ function editorSyncTrimBar(): void {
   if (inLabel) inLabel.textContent = formatEditorMs(state.editorInMs);
   if (outLabel) outLabel.textContent = formatEditorMs(state.editorOutMs);
   if (lenLabel) lenLabel.textContent = formatEditorMs(state.editorOutMs - state.editorInMs);
+  const durLabel = app.querySelector<HTMLElement>("#trim-dur-label");
+  if (durLabel && duration > 0) durLabel.textContent = formatEditorMs(duration);
+}
+
+/** Playhead mirrors the player position; a style write, safe per timeupdate. */
+function editorSyncPlayhead(video?: HTMLVideoElement | null): void {
+  const player = video ?? app.querySelector<HTMLVideoElement>("#editor-video");
+  const track = app.querySelector<HTMLElement>("#trim-track");
+  if (!player || !track || !Number.isFinite(player.currentTime)) return;
+  const frac =
+    state.editorDurationMs > 0
+      ? Math.min(1, Math.max(0, (player.currentTime * 1000) / state.editorDurationMs))
+      : 0;
+  track.style.setProperty("--trim-play", `${frac * 100}%`);
 }
 
 async function saveVideoTrim(): Promise<void> {
