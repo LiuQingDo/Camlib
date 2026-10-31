@@ -15,10 +15,26 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-01
+
+Assets: [GitHub Release v0.4.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.4.0) — `Camlib_0.4.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.4.0_x64_en-US.msi` (WiX)
+
 ### Added
 
+- Media editor with image editing and video clipping: edited products are saved as new copies into the library instead of overwriting the originals
+- Video multi-segment clipping: cut a video into several segments on a bottom full-width console (timeline scale, playhead, fine-tune buttons) and choose which segments to merge-export
+- Multi-select video merge: select multiple videos in the library and merge them into one file
 - All dialogs (媒体预览 / 媒体编辑 / 设置 / 标签管理 / 删除确认) are now manually resizable: drag any edge or corner to resize, and the size is saved automatically so the next launch opens the dialog at the adjusted size
 - Settings → 系统 gains a 弹窗大小 card with numeric width/height fine-tuning per dialog (leave a field empty to fall back to the stylesheet default) plus per-dialog and global 恢复默认 buttons
+- Media preview / edit dialogs auto-size to the media being shown (弹窗按媒体自适应尺寸)
+
+### Changed
+
+- Reworked media edit dialog UI: image panel uses icon tiles, double-row sliders (double-click to reset) with an adaptive output preview; video clipping console spans the bottom of the dialog; background preview playback pauses while the editor is open
+
+### Fixed
+
+- Preview modal content reloads after full rendering, so an already-open viewer no longer stays stuck on the placeholder state
 
 ## [0.3.1] - 2026-10-05
 
