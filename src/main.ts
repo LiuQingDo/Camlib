@@ -52,6 +52,10 @@ import {
   startVideoTrim,
   cancelEditJob,
   onEditProgress,
+  startVideoMerge,
+  cancelVideoMerge,
+  onVideoMergeProgress,
+  getMediaItem,
   type BackupPreviewDto,
   type BackupVolumeDto,
   type BackupProgressDto,
@@ -63,6 +67,9 @@ import {
   type LibraryMergeGroupDto,
   type LibraryMergePreviewDto,
   type LibraryMergeProgressDto,
+  type VideoMergeMode,
+  type VideoMergeProgressDto,
+  type VideoMergeResultDto,
 } from "./api/media";
 import {
   getInfrastructureState,
@@ -245,6 +252,17 @@ interface AppState {
   editorPrecise: boolean;
   editorJobId: string | null;
   editorProgress: EditProgressDto | null;
+  /** Merge selected videos into one copy (order arranged in the dialog). */
+  mergeModalOpen: boolean;
+  /** Ordered snapshot of the selected videos; index 0 plays first. */
+  mergeItems: MediaItemDto[];
+  mergeMode: VideoMergeMode;
+  mergeRecycleSources: boolean;
+  mergeBusy: boolean;
+  mergeJobId: string | null;
+  mergeProgress: VideoMergeProgressDto | null;
+  mergeError: string | null;
+  mergeNotice: string | null;
 }
 
 const state: AppState = {
@@ -365,6 +383,15 @@ const state: AppState = {
   editorPrecise: false,
   editorJobId: null,
   editorProgress: null,
+  mergeModalOpen: false,
+  mergeItems: [],
+  mergeMode: "copy",
+  mergeRecycleSources: false,
+  mergeBusy: false,
+  mergeJobId: null,
+  mergeProgress: null,
+  mergeError: null,
+  mergeNotice: null,
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
@@ -396,6 +423,7 @@ const DIALOG_SPECS: Record<string, DialogSpec> = {
   settings: { selector: "#settings-backdrop .settings-panel", label: "设置", width: 920, height: 760, minWidth: 560, minHeight: 400 },
   tagManager: { selector: "#tag-manager-backdrop .tag-manager", label: "标签管理", width: 440, height: null, minWidth: 320, minHeight: 240 },
   confirm: { selector: "#delete-confirm-modal .confirm-dialog", label: "删除确认", width: 520, height: null, minWidth: 300, minHeight: 200 },
+  mergeVideos: { selector: "#merge-videos-modal .merge-modal", label: "合并视频", width: 640, height: null, minWidth: 460, minHeight: 320 },
 };
 
 const dialogResizeDirections = ["n", "s", "e", "w", "ne", "nw", "se", "sw"] as const;
@@ -1297,6 +1325,7 @@ function bindSelectionToolbarEvents(): void {
   app.querySelector<HTMLButtonElement>("#batch-tag-attach")?.addEventListener("click", () => void applyBatchTag(true));
   app.querySelector<HTMLButtonElement>("#batch-tag-detach")?.addEventListener("click", () => void applyBatchTag(false));
   app.querySelector<HTMLButtonElement>("#batch-rating-apply")?.addEventListener("click", () => void applyBatchRating());
+  app.querySelector<HTMLButtonElement>("#merge-selected")?.addEventListener("click", () => void openMergeModal());
 }
 
 /** Patch selection UI without rebuilding the grid (avoids thumbnail flicker). */
@@ -1919,7 +1948,27 @@ function renderSelectionToolbar(): string {
   if (!state.page.total) return "";
   const allSelected = state.selectedIds.size >= state.page.total;
   const tagOptions = state.tags.map((tag) => `<option value="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</option>`).join("");
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
+  const selectedCount = state.selectedIds.size;
+  // Items selected beyond the loaded pages (select-all) have no local kind;
+  // the video kind filter guarantees them, otherwise judge by loaded rows and
+  // let the merge dialog validate the rest.
+  const unloadedSelected = Math.max(0, selectedCount - state.page.items.filter((item) => state.selectedIds.has(item.id)).length);
+  const loadedSelectedVideos = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind === "video").length;
+  const mergeUnavailable =
+    selectedCount < 2
+      ? "选择两个及以上视频后可合并"
+      : state.kind === "video"
+        ? ""
+        : unloadedSelected > 0
+          ? ""
+          : loadedSelectedVideos < selectedCount
+            ? "所选项目中包含非视频媒体，无法合并"
+            : "";
+  const mergeDisabled = Boolean(
+    mergeUnavailable || state.mergeBusy || state.mergeJobId || state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available",
+  );
+  const mergeTitle = mergeUnavailable || "将所选视频按顺序合并为一个新文件";
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderDeleteFeedback(): string {
@@ -1963,6 +2012,345 @@ function renderDeleteConfirm(): string {
     </div>
     <footer class="confirm-actions"><button class="outline-button" id="cancel-delete-confirm-footer" type="button">取消</button><button class="danger-button confirm-danger" id="confirm-delete" type="button">移入回收站</button></footer>
   </div></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Video merge dialog (batch action from the selection toolbar)
+// ---------------------------------------------------------------------------
+
+/** Live drag of a merge row: the DOM moves during the drag, commit on drop. */
+let mergeDrag: { pointerId: number } | null = null;
+
+/**
+ * Snapshot the selected videos (grid order) and open the merge dialog. Items
+ * selected beyond the loaded pages — e.g. after 全选当前结果 — are fetched so
+ * they can be ordered too.
+ */
+async function openMergeModal(): Promise<void> {
+  if (!state.library || state.mergeModalOpen) return;
+  const selected = new Set(state.selectedIds);
+  if (selected.size < 2) return;
+  const ordered: MediaItemDto[] = [];
+  const excluded: string[] = [];
+  const exclude = (name: string) => {
+    excluded.push(name);
+  };
+  for (const item of state.page.items) {
+    if (!selected.has(item.id)) continue;
+    selected.delete(item.id);
+    if (item.kind !== "video") {
+      exclude(item.displayName);
+      continue;
+    }
+    ordered.push(item);
+  }
+  if (selected.size) {
+    try {
+      const details = await Promise.all([...selected].map((id) => getMediaItem(id)));
+      for (const detail of details) {
+        if (detail.item.kind !== "video") {
+          exclude(detail.item.displayName);
+          continue;
+        }
+        ordered.push(detail.item);
+      }
+    } catch (error) {
+      showTransientNotice(toUserMessage(error, "读取所选视频失败"), "error");
+      return;
+    }
+  }
+  if (ordered.length < 2) {
+    showTransientNotice(excluded.length ? `「${excluded[0]}」不是视频，无法合并` : "请先选择至少两个视频", "error");
+    return;
+  }
+  state.mergeModalOpen = true;
+  state.mergeItems = ordered;
+  state.mergeMode = "copy";
+  state.mergeRecycleSources = false;
+  state.mergeBusy = false;
+  state.mergeJobId = null;
+  state.mergeProgress = null;
+  state.mergeError = null;
+  state.mergeNotice = null;
+  render();
+  // Shown after render() — a full rebuild would wipe an earlier notice.
+  if (excluded.length) {
+    showTransientNotice(`已排除 ${formatCount(excluded.length)} 个非视频项（如「${excluded[0]}」）`, "error");
+  }
+}
+
+/**
+ * Close the merge dialog. A running merge is cancelled first, mirroring the
+ * editor dialog where closing stops the in-flight job.
+ */
+function closeMergeModal(): void {
+  if (state.mergeJobId) {
+    void cancelVideoMerge(state.mergeJobId).catch(() => undefined);
+  }
+  state.mergeModalOpen = false;
+  state.mergeItems = [];
+  state.mergeBusy = false;
+  state.mergeJobId = null;
+  state.mergeProgress = null;
+  state.mergeError = null;
+  state.mergeNotice = null;
+  render();
+}
+
+function renderMergeModal(): string {
+  return `<div class="modal-backdrop merge-backdrop" id="merge-videos-modal" role="presentation">${renderMergeDialog()}</div>`;
+}
+
+function renderMergeDialog(): string {
+  if (!state.mergeModalOpen) return "";
+  const busy = Boolean(state.mergeJobId || state.mergeBusy);
+  const rows = state.mergeItems.map((item, index) => {
+    const first = index === 0;
+    const last = index === state.mergeItems.length - 1;
+    return `<li class="merge-row" data-item-id="${escapeHtml(item.id)}">
+      <span class="merge-row-handle" data-merge-handle aria-hidden="true" title="拖动调整顺序">⠿</span>
+      <span class="merge-order">${index + 1}</span>
+      <span class="merge-thumb" data-merge-thumb="${escapeHtml(item.id)}"><span class="spinner"></span></span>
+      <span class="merge-row-info"><strong title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</strong><span>${formatSize(item.totalSizeBytes)}</span></span>
+      <span class="merge-row-tools">
+        <button class="icon-button" type="button" data-merge-up="${index}" aria-label="上移" title="上移" ${busy || first ? "disabled" : ""}>↑</button>
+        <button class="icon-button" type="button" data-merge-down="${index}" aria-label="下移" title="下移" ${busy || last ? "disabled" : ""}>↓</button>
+      </span>
+    </li>`;
+  }).join("");
+  return `<div class="merge-modal" role="dialog" aria-modal="true" aria-labelledby="merge-videos-title">
+    <header class="merge-header">
+      <div><h2 id="merge-videos-title">合并视频</h2><span>按列表顺序拼接为一个新文件，原视频不会被修改。</span></div>
+      <button class="icon-button" type="button" id="close-merge-modal" aria-label="关闭合并视频弹窗">×</button>
+    </header>
+    <div class="merge-body">
+      <div class="merge-mode-group" role="radiogroup" aria-label="合并方式">
+        <button type="button" class="merge-mode${state.mergeMode === "copy" ? " is-active" : ""}" data-merge-mode="copy" aria-pressed="${state.mergeMode === "copy"}" ${busy ? "disabled" : ""}><strong>快速无损</strong><span>直接拼接数据流，速度快；要求各视频编码格式一致</span></button>
+        <button type="button" class="merge-mode${state.mergeMode === "reencode" ? " is-active" : ""}" data-merge-mode="reencode" aria-pressed="${state.mergeMode === "reencode"}" ${busy ? "disabled" : ""}><strong>兼容重编码</strong><span>统一转码为 H.264/AAC，可混合不同格式，速度较慢</span></button>
+      </div>
+      <p class="merge-hint">拖动 ⠿ 或使用 ↑↓ 调整拼接顺序（自上而下播放）。</p>
+      <ul class="merge-list${busy ? " is-busy" : ""}">${rows}</ul>
+      <label class="merge-recycle"><input id="merge-recycle-sources" type="checkbox" ${state.mergeRecycleSources ? "checked" : ""} ${busy ? "disabled" : ""} /><span>合并后将原视频移入回收站</span></label>
+    </div>
+    <footer class="merge-footer" id="merge-modal-footer">${renderMergeFooterInner()}</footer>
+  </div>`;
+}
+
+function renderMergeFooterInner(): string {
+  const busy = Boolean(state.mergeJobId || state.mergeBusy);
+  if (busy) {
+    const progress = state.mergeProgress;
+    const percent = progress
+      ? progress.percent ?? (progress.bytesTotal > 0
+          ? (progress.bytesProcessed / progress.bytesTotal) * 100
+          : null)
+      : null;
+    const trackClass = percent == null ? " is-indeterminate" : "";
+    const trackWidth = percent == null ? "35%" : `${Math.round(percent)}%`;
+    const speed = progress?.speedBytesPerSec ? ` · ${formatSpeed(progress.speedBytesPerSec)}` : "";
+    const eta = progress?.etaSeconds ? ` · 剩余 ${formatEtaSeconds(progress.etaSeconds)}` : "";
+    const phaseLabel = state.mergeNotice
+      ?? (progress?.phase === "preparing"
+        ? "正在准备…"
+        : progress?.phase === "finalizing"
+          ? "正在提交…"
+          : state.mergeMode === "reencode"
+            ? "正在重编码合并…"
+            : "正在无损合并…");
+    return `<div class="merge-progress">
+      <div class="merge-progress-copy"><span class="spinner"></span><span>${phaseLabel}${speed}${eta}</span><strong>${percent == null ? "" : `${Math.round(percent)}%`}</strong></div>
+      <div class="progress-track${trackClass}"><span style="width:${trackWidth}"></span></div>
+    </div>
+    <span class="merge-actions"><button class="outline-button" type="button" id="merge-cancel-job">取消合并</button></span>`;
+  }
+  const totalBytes = state.mergeItems.reduce((sum, item) => sum + item.totalSizeBytes, 0);
+  const feedback = state.mergeError ?? state.mergeNotice;
+  return `<span class="merge-feedback${state.mergeError ? " is-error" : ""}">${escapeHtml(feedback ?? "")}</span>
+    <span class="merge-actions">
+      <button class="outline-button" type="button" id="close-merge-modal-footer">取消</button>
+      <button class="primary-button" type="button" id="merge-confirm" ${state.mergeItems.length < 2 ? "disabled" : ""}>开始合并（${formatCount(state.mergeItems.length)} 段 · 约 ${formatSize(totalBytes)}）</button>
+    </span>`;
+}
+
+function bindMergeModalEvents(): void {
+  if (!state.mergeModalOpen) return;
+  app.querySelector<HTMLButtonElement>("#close-merge-modal")?.addEventListener("click", closeMergeModal);
+  app.querySelector<HTMLDivElement>("#merge-videos-modal")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeMergeModal();
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-merge-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.mergeJobId || state.mergeBusy) return;
+      const mode = button.dataset.mergeMode;
+      if ((mode !== "copy" && mode !== "reencode") || state.mergeMode === mode) return;
+      state.mergeMode = mode;
+      updateMergeModal();
+    });
+  });
+  app.querySelector<HTMLInputElement>("#merge-recycle-sources")?.addEventListener("change", (event) => {
+    state.mergeRecycleSources = (event.target as HTMLInputElement).checked;
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-merge-up]").forEach((button) => {
+    button.addEventListener("click", () => mergeMoveItem(Number(button.dataset.mergeUp), -1));
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-merge-down]").forEach((button) => {
+    button.addEventListener("click", () => mergeMoveItem(Number(button.dataset.mergeDown), 1));
+  });
+  bindMergeDragEvents();
+  bindMergeFooterEvents();
+  fillMergeThumbnails();
+}
+
+/** Footer is patched separately so progress updates never rebuild the list. */
+function bindMergeFooterEvents(): void {
+  app.querySelector<HTMLButtonElement>("#merge-cancel-job")?.addEventListener("click", () => {
+    if (!state.mergeJobId) return;
+    state.mergeNotice = "正在取消…";
+    mergeUpdateFooter();
+    void cancelVideoMerge(state.mergeJobId).catch(() => undefined);
+  });
+  app.querySelector<HTMLButtonElement>("#close-merge-modal-footer")?.addEventListener("click", closeMergeModal);
+  app.querySelector<HTMLButtonElement>("#merge-confirm")?.addEventListener("click", () => void confirmMerge());
+}
+
+function updateMergeModal(): void {
+  const dialog = app.querySelector<HTMLElement>("#merge-videos-modal .merge-modal");
+  if (!dialog) return;
+  dialog.outerHTML = renderMergeDialog();
+  bindMergeModalEvents();
+  // The replaced dialog lost its inline geometry and resize handles.
+  applyDialogSizes();
+  setupDialogResizing();
+}
+
+function mergeUpdateFooter(): void {
+  const footer = app.querySelector<HTMLElement>("#merge-modal-footer");
+  if (!footer) return;
+  footer.innerHTML = renderMergeFooterInner();
+  bindMergeFooterEvents();
+}
+
+function mergeMoveItem(index: number, delta: number): void {
+  const target = index + delta;
+  if (target < 0 || target >= state.mergeItems.length) return;
+  const items = state.mergeItems;
+  [items[index], items[target]] = [items[target], items[index]];
+  updateMergeModal();
+}
+
+/**
+ * Pointer-based row reorder: the handle captures the pointer, every move
+ * re-seats the dragged row before/after its neighbor, and the drop commits
+ * the DOM order back into `state.mergeItems` (then re-renders to renumber).
+ */
+function bindMergeDragEvents(): void {
+  app.querySelectorAll<HTMLElement>(".merge-row-handle").forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => beginMergeDrag(event));
+  });
+}
+
+function beginMergeDrag(event: PointerEvent): void {
+  if (state.mergeJobId || state.mergeBusy || mergeDrag) return;
+  const handle = event.currentTarget;
+  if (!(handle instanceof HTMLElement)) return;
+  const row = handle.closest<HTMLElement>(".merge-row");
+  const list = row?.parentElement;
+  if (!row || !list) return;
+  event.preventDefault();
+  mergeDrag = { pointerId: event.pointerId };
+  handle.setPointerCapture(event.pointerId);
+  row.classList.add("is-dragging");
+  document.body.classList.add("is-merge-dragging");
+
+  const onMove = (moveEvent: PointerEvent) => {
+    if (!mergeDrag || moveEvent.pointerId !== mergeDrag.pointerId) return;
+    const dragged = list.querySelector<HTMLElement>(".merge-row.is-dragging");
+    if (!dragged) return;
+    const others = [...list.querySelectorAll<HTMLElement>(".merge-row:not(.is-dragging)")];
+    const next = others.find((other) => {
+      const rect = other.getBoundingClientRect();
+      return moveEvent.clientY < rect.top + rect.height / 2;
+    });
+    if (next) list.insertBefore(dragged, next);
+    else list.append(dragged);
+  };
+  const finish = (commit: boolean) => {
+    handle.removeEventListener("pointermove", onMove);
+    handle.removeEventListener("pointerup", onUp);
+    handle.removeEventListener("pointercancel", onCancel);
+    document.body.classList.remove("is-merge-dragging");
+    if (!mergeDrag) return;
+    mergeDrag = null;
+    list.querySelector<HTMLElement>(".merge-row.is-dragging")?.classList.remove("is-dragging");
+    if (commit) {
+      const orderedIds = [...list.querySelectorAll<HTMLElement>(".merge-row")]
+        .map((row) => row.dataset.itemId)
+        .filter((id): id is string => Boolean(id));
+      const byId = new Map(state.mergeItems.map((item) => [item.id, item] as const));
+      const ordered = orderedIds
+        .map((id) => byId.get(id))
+        .filter((item): item is MediaItemDto => Boolean(item));
+      if (ordered.length === state.mergeItems.length) state.mergeItems = ordered;
+    }
+    updateMergeModal();
+  };
+  const onUp = (upEvent: PointerEvent) => {
+    if (!mergeDrag || upEvent.pointerId !== mergeDrag.pointerId) return;
+    finish(true);
+  };
+  const onCancel = () => finish(false);
+  handle.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointerup", onUp);
+  handle.addEventListener("pointercancel", onCancel);
+}
+
+/** Fill row thumbnails from the modal cache; a failed one degrades to ∅. */
+function fillMergeThumbnails(): void {
+  app.querySelectorAll<HTMLElement>("[data-merge-thumb]").forEach((slot) => {
+    if (slot.dataset.thumbLoaded) return;
+    const id = slot.dataset.mergeThumb;
+    if (!id) return;
+    slot.dataset.thumbLoaded = "1";
+    void loadModalThumbnail(id)
+      .then((thumbnail) => {
+        const image = document.createElement("img");
+        image.src = thumbnail.url;
+        image.alt = "";
+        image.loading = "lazy";
+        image.draggable = false;
+        slot.replaceChildren(image);
+      })
+      .catch(() => {
+        slot.classList.add("is-missing");
+        slot.textContent = "∅";
+      });
+  });
+}
+
+async function confirmMerge(): Promise<void> {
+  if (state.mergeBusy || state.mergeJobId) return;
+  if (!state.library || state.mergeItems.length < 2) return;
+  state.mergeError = null;
+  state.mergeNotice = null;
+  state.mergeBusy = true;
+  // Disables the mode toggles and list while the start command round-trips.
+  updateMergeModal();
+  try {
+    const started = await startVideoMerge(
+      state.library.id,
+      state.mergeItems.map((item) => item.id),
+      { mode: state.mergeMode, recycleSources: state.mergeRecycleSources },
+    );
+    state.mergeJobId = started.jobId;
+    // Flip to the progress footer right away instead of waiting for the
+    // first running event.
+    mergeUpdateFooter();
+  } catch (error) {
+    state.mergeError = toUserMessage(error, "启动合并失败");
+  } finally {
+    state.mergeBusy = false;
+    mergeUpdateFooter();
+  }
 }
 
 function renderLibraryEmpty(): string {
@@ -2570,9 +2958,10 @@ function render(): void {
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${renderSettingsPanel()}`;
+    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
+  bindMergeModalEvents();
   // Restore saved dialog geometry and mount resize handles for fresh dialogs.
   applyDialogSizes();
   setupDialogResizing();
@@ -4637,6 +5026,21 @@ function handleEditSaved(result: EditResultDto): void {
   window.setTimeout(() => void refreshMedia(), 2500);
 }
 
+function handleMergeCompleted(result: VideoMergeResultDto): void {
+  const message = `已合并为 ${result.fileName}，正在自动入库`;
+  showTransientNotice(message, "success");
+  state.mergeModalOpen = false;
+  state.mergeItems = [];
+  state.mergeProgress = null;
+  state.mergeError = null;
+  state.mergeNotice = null;
+  render();
+  void refreshMedia();
+  // The incremental scan takes a moment; refresh again once it has landed so
+  // the merged copy shows up without manual interaction.
+  window.setTimeout(() => void refreshMedia(), 2500);
+}
+
 function closePreview(): void {
   state.previewIndex = null;
   livePlaying = false;
@@ -5362,6 +5766,13 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
+  if (state.mergeModalOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMergeModal();
+    }
+    return;
+  }
   if (state.deleteConfirm && !state.deleting) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -5628,6 +6039,27 @@ void onEditProgress((progress) => {
     state.editorError = progress.error ?? "剪辑失败";
     state.editorProgress = null;
     editorUpdateFooter();
+  }
+});
+void onVideoMergeProgress((progress) => {
+  if (!state.mergeJobId || progress.jobId !== state.mergeJobId) return;
+  state.mergeProgress = progress;
+  if (progress.state === "running") {
+    mergeUpdateFooter();
+    return;
+  }
+  state.mergeJobId = null;
+  if (progress.state === "completed" && progress.result) {
+    handleMergeCompleted(progress.result);
+  } else if (progress.state === "cancelled") {
+    state.mergeProgress = null;
+    state.mergeNotice = "合并已取消";
+    state.mergeError = null;
+    mergeUpdateFooter();
+  } else {
+    state.mergeProgress = null;
+    state.mergeError = progress.error ?? "合并失败";
+    mergeUpdateFooter();
   }
 });
 initLiquidGlass();

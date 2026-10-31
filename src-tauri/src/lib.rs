@@ -8,6 +8,7 @@ mod library_merge;
 mod media;
 mod scanner;
 mod system;
+mod video_merge;
 
 use backup::{
     BackupManagerState, BackupPreviewDto, BackupPreviewRequest, BackupStartResponse,
@@ -904,6 +905,67 @@ fn media_edit_cancel(
     edits.cancel(&job_id)
 }
 
+/// Start merging selected videos into one new `{stem}_merged{ext}` copy.
+/// `media_item_ids` order is the playback order. Runs as a cancellable
+/// background job reporting `media-merge-progress` events.
+#[tauri::command]
+fn media_merge_videos(
+    library_id: String,
+    media_item_ids: Vec<String>,
+    mode: Option<String>,
+    recycle_sources: Option<bool>,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    merges: State<'_, video_merge::VideoMergeManagerState>,
+    scans: State<'_, ScanManagerState>,
+) -> Result<video_merge::VideoMergeStartDto, AppError> {
+    if media_item_ids.len() < 2 {
+        return Err(AppError::invalid_argument("合并至少需要选择两个视频"));
+    }
+    let mode = match mode.as_deref() {
+        Some("reencode") => video_merge::VideoMergeMode::Reencode,
+        _ => video_merge::VideoMergeMode::Copy,
+    };
+    let database_path = infrastructure.with_infrastructure(|value| {
+        let library = value
+            .repository()
+            .get_library(&library_id)
+            .map_err(InfrastructureError::database)?
+            .ok_or_else(|| InfrastructureError::InvalidPath("媒体库不存在".to_owned()))?;
+        if library.state != db::LibraryState::Available {
+            return Err(InfrastructureError::LibraryOffline(
+                "媒体库当前不可用".to_owned(),
+            ));
+        }
+        Ok(value.database_path())
+    })?;
+    let (job_id, cancel) = merges.start()?;
+    video_merge::spawn(
+        app,
+        Arc::new(merges.inner().clone()),
+        Arc::new(scans.inner().clone()),
+        database_path,
+        library_id,
+        job_id.clone(),
+        cancel,
+        video_merge::VideoMergeParams {
+            media_item_ids,
+            mode,
+            recycle_sources: recycle_sources.unwrap_or(false),
+        },
+    );
+    Ok(video_merge::VideoMergeStartDto { job_id })
+}
+
+/// Cancel the running video merge job.
+#[tauri::command]
+fn media_merge_cancel(
+    job_id: String,
+    merges: State<'_, video_merge::VideoMergeManagerState>,
+) -> Result<(), AppError> {
+    merges.cancel(&job_id)
+}
+
 #[tauri::command]
 async fn media_thumbnail(
     media_item_id: String,
@@ -1373,6 +1435,7 @@ pub fn run() {
             app.manage(BackupManagerState::new());
             app.manage(library_merge::LibraryMergeManagerState::new());
             app.manage(editing::EditJobManagerState::new());
+            app.manage(video_merge::VideoMergeManagerState::new());
             app.manage(PreviewJobManagerState::new());
             app.manage(streams.clone());
 
@@ -1444,7 +1507,9 @@ pub fn run() {
             library_merge_cancel,
             media_edit_image,
             media_trim_video,
-            media_edit_cancel
+            media_edit_cancel,
+            media_merge_videos,
+            media_merge_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

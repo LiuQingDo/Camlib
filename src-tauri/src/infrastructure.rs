@@ -1294,6 +1294,7 @@ mod tests {
             ui_sort: None,
             ui_preview_mode: UiPreviewMode::default(),
             ui_theme: UiTheme::default(),
+            ui_dialog_sizes: BTreeMap::new(),
             auto_scan_on_startup: true,
             backup_ignore_extensions: default_backup_ignore_extensions(),
             backup_merge_segments: true,
@@ -1359,6 +1360,7 @@ mod tests {
                 Some(UiSort::Name),
                 Some(UiPreviewMode::Immersive),
                 Some(UiTheme::Dark),
+                None,
             )
             .expect("set ui prefs");
         assert_eq!(updated.ui_density, 5);
@@ -1463,13 +1465,13 @@ mod tests {
     fn rejects_invalid_ui_density() {
         let (_temp_dir, mut infrastructure) = test_infrastructure();
         assert!(infrastructure
-            .set_ui_prefs(Some(0), None, None, None)
+            .set_ui_prefs(Some(0), None, None, None, None)
             .is_err());
         assert!(infrastructure
-            .set_ui_prefs(Some(6), None, None, None)
+            .set_ui_prefs(Some(6), None, None, None, None)
             .is_err());
         assert!(infrastructure
-            .set_ui_prefs(None, None, None, Some(UiTheme::Dark))
+            .set_ui_prefs(None, None, None, Some(UiTheme::Dark), None)
             .is_ok());
     }
 

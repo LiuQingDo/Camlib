@@ -193,7 +193,7 @@ fn image_source_file(details: &MediaItemDetails) -> Option<&MediaFile> {
     })
 }
 
-fn video_source_file(details: &MediaItemDetails) -> Option<&MediaFile> {
+pub(crate) fn video_source_file(details: &MediaItemDetails) -> Option<&MediaFile> {
     details.files.iter().find(|file| {
         matches!(file.role, MediaFileRole::Single | MediaFileRole::LiveVideo)
             && is_editable_video(&file.extension)
@@ -800,7 +800,7 @@ fn run_ffmpeg_trim(
 
 /// Drain ffmpeg's `-progress` stream, keeping the latest `out_time_ms` in a
 /// shared atomic. Returns `None` when the child has no piped stdout.
-fn spawn_progress_reader(
+pub(crate) fn spawn_progress_reader(
     child: &mut Child,
     percent: Arc<AtomicU64>,
 ) -> Option<std::thread::JoinHandle<()>> {
@@ -816,7 +816,7 @@ fn spawn_progress_reader(
     }))
 }
 
-fn parse_out_time_micros(line: &str) -> Option<u64> {
+pub(crate) fn parse_out_time_micros(line: &str) -> Option<u64> {
     line.strip_prefix("out_time_ms=")?
         .trim()
         .parse::<u64>()

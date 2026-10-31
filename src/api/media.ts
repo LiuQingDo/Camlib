@@ -546,6 +546,64 @@ export function onLibraryMergeProgress(
   );
 }
 
+export type VideoMergeMode = "copy" | "reencode";
+
+export interface VideoMergeResultDto {
+  fileName: string;
+  relativePath: string;
+  sizeBytes: number;
+}
+
+export interface VideoMergeProgressDto {
+  jobId: string;
+  kind: "merge";
+  phase: "preparing" | "merging" | "finalizing";
+  state: "running" | "completed" | "cancelled" | "failed";
+  /** 0..100 when measurable; null keeps the UI's indeterminate bar. */
+  percent: number | null;
+  bytesProcessed: number;
+  /** 0 while re-encoding — the output size is unknown up front. */
+  bytesTotal: number;
+  speedBytesPerSec: number;
+  etaSeconds: number | null;
+  error: string | null;
+  result: VideoMergeResultDto | null;
+}
+
+export interface VideoMergeStartDto {
+  jobId: string;
+}
+
+/**
+ * Merge selected videos (array order = playback order) into a new
+ * `{stem}_merged{ext}` copy beside the first source; the backend triggers an
+ * incremental scan so the result joins the library as its own media item.
+ */
+export function startVideoMerge(
+  libraryId: string,
+  mediaItemIds: string[],
+  input: { mode: VideoMergeMode; recycleSources: boolean },
+): Promise<VideoMergeStartDto> {
+  return invoke<VideoMergeStartDto>("media_merge_videos", {
+    libraryId,
+    mediaItemIds,
+    mode: input.mode,
+    recycleSources: input.recycleSources,
+  });
+}
+
+export function cancelVideoMerge(jobId: string): Promise<void> {
+  return invoke<void>("media_merge_cancel", { jobId });
+}
+
+export function onVideoMergeProgress(
+  callback: (event: VideoMergeProgressDto) => void,
+): Promise<UnlistenFn> {
+  return listen<VideoMergeProgressDto>("media-merge-progress", (event) =>
+    callback(event.payload),
+  );
+}
+
 export function listLibraries(): Promise<LibraryDto[]> {
   return invoke<LibraryDto[]>("library_list");
 }
