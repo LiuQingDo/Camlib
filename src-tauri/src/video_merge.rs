@@ -304,7 +304,10 @@ fn run(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("媒体不存在: {media_item_id}"))?;
         if details.item.library_id != library_id {
-            return Err(format!("媒体不属于当前媒体库: {}", details.item.display_name));
+            return Err(format!(
+                "媒体不属于当前媒体库: {}",
+                details.item.display_name
+            ));
         }
         let file = video_source_file(&details)
             .ok_or_else(|| format!("没有可合并的视频文件: {}", details.item.display_name))?;
@@ -423,8 +426,8 @@ fn run(
         }
     }
 
-    let metadata = fs::metadata(&destination)
-        .map_err(|error| format!("读取合并结果失败: {error}"))?;
+    let metadata =
+        fs::metadata(&destination).map_err(|error| format!("读取合并结果失败: {error}"))?;
     let file_name = destination
         .file_name()
         .unwrap_or_default()
@@ -467,9 +470,7 @@ fn run(
 /// `{stem}_merged{ext}`, then `_merged_2`, `_merged_3` … never overwrites.
 /// Merging a previous merge chains onto the same stem instead of growing it.
 fn merged_destination(source: &Path, output_extension: &str) -> Result<PathBuf, String> {
-    let parent = source
-        .parent()
-        .ok_or_else(|| "源文件路径无效".to_owned())?;
+    let parent = source.parent().ok_or_else(|| "源文件路径无效".to_owned())?;
     let stem = source
         .file_stem()
         .unwrap_or_default()
@@ -518,8 +519,8 @@ fn probe_video(ffmpeg: &Path, source: &Path) -> Result<VideoProbe, String> {
     if text.is_empty() {
         return Err(format!("无法读取视频信息: {}", source.display()));
     }
-    let (video_codec, width, height) = parse_video_stream(&text)
-        .ok_or_else(|| format!("无法识别视频流: {}", source.display()))?;
+    let (video_codec, width, height) =
+        parse_video_stream(&text).ok_or_else(|| format!("无法识别视频流: {}", source.display()))?;
     Ok(VideoProbe {
         duration_ms: parse_duration_ms(&text),
         width,
@@ -570,9 +571,7 @@ fn parse_video_stream(text: &str) -> Option<(String, u32, u32)> {
         // hex tokens like `0x1` that look like dimensions.
         let rest = &line[position + ": Video:".len()..];
         let trimmed = rest.trim_start();
-        let codec_end = trimmed
-            .find([' ', '('])
-            .unwrap_or(trimmed.len());
+        let codec_end = trimmed.find([' ', '(']).unwrap_or(trimmed.len());
         let codec = trimmed[..codec_end].to_owned();
         if codec.is_empty() {
             continue;
@@ -694,7 +693,14 @@ fn merge_reencode(
             silent_for.push(Some(lavfi_index));
             lavfi_index += 1;
             let duration = format!("{:.3}", (source.duration_ms.max(1) as f64) / 1000.0);
-            command.args(["-f", "lavfi", "-t", &duration, "-i", "anullsrc=r=44100:cl=stereo"]);
+            command.args([
+                "-f",
+                "lavfi",
+                "-t",
+                &duration,
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+            ]);
         } else {
             silent_for.push(None);
         }
@@ -725,10 +731,7 @@ fn merge_reencode(
         let inputs: String = (0..sources.len())
             .map(|index| format!("[v{index}][a{index}]"))
             .collect();
-        filters.push_str(&format!(
-            "{inputs}concat=n={}:v=1:a=1[v][a]",
-            sources.len()
-        ));
+        filters.push_str(&format!("{inputs}concat=n={}:v=1:a=1[v][a]", sources.len()));
     } else {
         let inputs: String = (0..sources.len())
             .map(|index| format!("[v{index}]"))
@@ -796,9 +799,7 @@ fn merge_reencode(
                     let percent = if total_duration_ms == 0 {
                         None
                     } else {
-                        Some(
-                            (done_ms as f64 / total_duration_ms as f64 * 100.0).clamp(0.0, 100.0),
-                        )
+                        Some((done_ms as f64 / total_duration_ms as f64 * 100.0).clamp(0.0, 100.0))
                     };
                     let bytes = fs::metadata(&temp)
                         .map(|meta| meta.len())
@@ -807,15 +808,7 @@ fn merge_reencode(
                     emit(
                         app,
                         progress(
-                            job_id,
-                            "running",
-                            "merging",
-                            percent,
-                            bytes,
-                            0,
-                            started,
-                            None,
-                            None,
+                            job_id, "running", "merging", percent, bytes, 0, started, None, None,
                         ),
                     );
                 }
@@ -840,11 +833,9 @@ fn merge_reencode(
         return Err("合并结果为空".to_owned());
     }
     if destination.exists() {
-        fs::remove_file(destination)
-            .map_err(|error| format!("替换冲突文件失败: {error}"))?;
+        fs::remove_file(destination).map_err(|error| format!("替换冲突文件失败: {error}"))?;
     }
-    fs::rename(&temp, destination)
-        .map_err(|error| format!("提交合并文件失败: {error}"))?;
+    fs::rename(&temp, destination).map_err(|error| format!("提交合并文件失败: {error}"))?;
     temp_guard.disarm();
     log_guard.disarm();
     Ok(())

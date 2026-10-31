@@ -495,10 +495,13 @@ fn cut_destinations(
         let segments: Vec<PathBuf> = (1..=count)
             .map(|index| parent.join(format!("{base_stem}_edited_{index}{suffix}{extension}")))
             .collect();
-        let merged = want_merged.then(|| {
-            parent.join(format!("{base_stem}_edited_merged{suffix}{extension}"))
-        });
-        if segments.iter().chain(merged.iter()).all(|path| !path.exists()) {
+        let merged = want_merged
+            .then(|| parent.join(format!("{base_stem}_edited_merged{suffix}{extension}")));
+        if segments
+            .iter()
+            .chain(merged.iter())
+            .all(|path| !path.exists())
+        {
             return Ok((segments, merged));
         }
     }
@@ -1052,13 +1055,9 @@ fn run_cut_segments(
         },
     );
 
-    let (destinations, merged_destination) = cut_destinations(
-        &source,
-        &file.extension,
-        params.segments.len(),
-        want_merged,
-    )
-    .map_err(|error| error.to_string())?;
+    let (destinations, merged_destination) =
+        cut_destinations(&source, &file.extension, params.segments.len(), want_merged)
+            .map_err(|error| error.to_string())?;
     let extension = format!(".{}", file.extension);
     // The optional merged copy counts as one extra progress unit.
     let total_units = params.segments.len() + usize::from(want_merged);
@@ -1110,7 +1109,15 @@ fn run_cut_segments(
             segment_count: params.segments.len(),
         };
         let trim_result = run_ffmpeg_trim(
-            &ffmpeg, &source, &temp, &log_path, &trim_params, cancel, job_id, app, Some(unit),
+            &ffmpeg,
+            &source,
+            &temp,
+            &log_path,
+            &trim_params,
+            cancel,
+            job_id,
+            app,
+            Some(unit),
         );
         if let Err(error) = trim_result {
             // Guards drop here and remove the scratch files.
