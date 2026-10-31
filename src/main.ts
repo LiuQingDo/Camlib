@@ -48,12 +48,18 @@ import {
   startLibraryMerge,
   cancelLibraryMerge,
   onLibraryMergeProgress,
+  editImage,
+  startVideoTrim,
+  cancelEditJob,
+  onEditProgress,
   type BackupPreviewDto,
   type BackupVolumeDto,
   type BackupProgressDto,
   type BackupRunDto,
   type BackupItemDto,
   type ConflictPolicy,
+  type EditProgressDto,
+  type EditResultDto,
   type LibraryMergeGroupDto,
   type LibraryMergePreviewDto,
   type LibraryMergeProgressDto,
@@ -211,6 +217,31 @@ interface AppState {
   libraryMergeProgress: LibraryMergeProgressDto | null;
   libraryMergeJobId: string | null;
   libraryMergeNotice: string | null;
+  /** Media editor (photo crop/rotate/adjust + video trim). */
+  editorOpen: boolean;
+  editorItem: MediaItemDto | null;
+  editorKind: "image" | "video";
+  /** Stream URL of the editing surface (original; HEIC falls back to thumbnail). */
+  editorSourceUrl: string;
+  editorLoading: boolean;
+  editorBusy: boolean;
+  editorError: string | null;
+  editorNotice: string | null;
+  /** Image ops; crop is relative 0..1 on the EXIF-oriented image. */
+  editorCrop: { x: number; y: number; w: number; h: number };
+  editorRotate90: number;
+  editorFlipH: boolean;
+  editorFlipV: boolean;
+  editorBrightness: number;
+  editorContrast: number;
+  editorSaturation: number;
+  /** Video trim selection in milliseconds. */
+  editorInMs: number;
+  editorOutMs: number;
+  editorDurationMs: number;
+  editorPrecise: boolean;
+  editorJobId: string | null;
+  editorProgress: EditProgressDto | null;
 }
 
 const state: AppState = {
@@ -309,6 +340,27 @@ const state: AppState = {
   libraryMergeProgress: null,
   libraryMergeJobId: null,
   libraryMergeNotice: null,
+  editorOpen: false,
+  editorItem: null,
+  editorKind: "image",
+  editorSourceUrl: "",
+  editorLoading: false,
+  editorBusy: false,
+  editorError: null,
+  editorNotice: null,
+  editorCrop: { x: 0, y: 0, w: 1, h: 1 },
+  editorRotate90: 0,
+  editorFlipH: false,
+  editorFlipV: false,
+  editorBrightness: 1,
+  editorContrast: 1,
+  editorSaturation: 1,
+  editorInMs: 0,
+  editorOutMs: 0,
+  editorDurationMs: 0,
+  editorPrecise: false,
+  editorJobId: null,
+  editorProgress: null,
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
@@ -364,6 +416,40 @@ let previewRequest = 0;
 let previewInfoOpen = false;
 let previewImmersiveOpen = false;
 let livePlaying = false;
+// Editor interaction state lives outside AppState because drags update the DOM
+// directly; re-rendering mid-drag would destroy the pointer gesture.
+type EditorDragState = {
+  mode: "move" | "resize";
+  handle: string;
+  startX: number;
+  startY: number;
+  rect: { x: number; y: number; w: number; h: number };
+  /** Canvas bounds cached at drag start; reading them per move forces layout. */
+  bounds: { width: number; height: number };
+};
+let editorDrag: EditorDragState | null = null;
+/** Latest pointer position; drags apply at most once per animation frame. */
+let editorPointer = { x: 0, y: 0 };
+let editorDragFrame: number | null = null;
+let editorImageEl: HTMLImageElement | null = null;
+// Per-open editor DOM refs; refreshed by bindEditorImageEvents, dropped on
+// close so a stale modal tree is never touched.
+let editorCropBoxEl: HTMLElement | null = null;
+let editorPreviewCanvasEl: HTMLCanvasElement | null = null;
+let editorCropInfoEl: HTMLElement | null = null;
+let editorShadeEls: { top: HTMLElement | null; bottom: HTMLElement | null; left: HTMLElement | null; right: HTMLElement | null } = {
+  top: null,
+  bottom: null,
+  left: null,
+  right: null,
+};
+/**
+ * Downscaled copy of the opened photo used by the preview canvas. Drawing the
+ * crop preview from the full-resolution original forced the GPU to sample a
+ * potentially 20MP+ texture on every frame, which is what dropped frames on
+ * fast drags.
+ */
+let editorSourceBitmap: { el: CanvasImageSource; width: number; height: number } | null = null;
 // Last loaded preview meta so tag/rating edits can patch the panel in place.
 let previewMetaCache: PreviewMetaDto | null = null;
 // Photo viewer zoom/pan. Scale 1 means fit-contain; >1 is a transform zoom.
@@ -2167,7 +2253,7 @@ function render(): void {
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${renderSettingsPanel()}`;
+    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${renderSettingsPanel()}`;
   bindEvents();
   bindTagManagerEvents();
   if (hasItems) observePreviews();
@@ -2197,6 +2283,7 @@ function renderPreview(): string {
       <div class="modal-caption-copy"><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div>
       <div class="modal-caption-tools">
         <div class="modal-actions">
+          ${item.kind !== "live" ? `<button class="outline-button modal-tool-button" id="preview-edit" type="button">${item.kind === "video" ? "剪辑" : "编辑"}</button>` : ""}
           <button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button>
           <button class="outline-button modal-tool-button" id="preview-fullscreen" type="button">全屏</button>
           <button class="outline-button modal-tool-button" id="preview-immersive" type="button" aria-pressed="${previewImmersiveOpen}">沉浸</button>
@@ -2482,11 +2569,16 @@ function bindEvents(): void {
   app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
   app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
   app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
+  app.querySelector<HTMLButtonElement>("#preview-edit")?.addEventListener("click", () => {
+    const item = state.previewIndex === null ? undefined : state.page.items[state.previewIndex];
+    if (item) void openEditor(item);
+  });
   app.querySelector<HTMLButtonElement>("#preview-info-toggle")?.addEventListener("click", () => togglePreviewInfo());
   app.querySelector<HTMLButtonElement>("#preview-fullscreen")?.addEventListener("click", () => togglePreviewFullscreen());
   app.querySelector<HTMLButtonElement>("#preview-immersive")?.addEventListener("click", () => togglePreviewImmersive());
   // Immersive exit is a leave-viewer action: return to the grid, not the framed modal.
   app.querySelector<HTMLButtonElement>("#preview-immersive-exit")?.addEventListener("click", () => closePreview());
+  if (state.editorOpen) bindEditorEvents();
   bindSettingsEvents();
 }
 
@@ -3414,6 +3506,703 @@ function togglePreviewInfo(): void {
   button?.setAttribute("aria-pressed", String(previewInfoOpen));
 }
 
+// ---------------------------------------------------------------------------
+// Media editor (photo crop/rotate/adjust + video trim, save-on-copy)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed backing-store pixels of the square output-preview tile (2x the 220px
+ * CSS size for HiDPI crispness); the canvas never reallocates per frame.
+ */
+const EDITOR_PREVIEW_BACKING = 440;
+/** Max source pixels fed to the preview sampler; built once per opened image. */
+const EDITOR_PREVIEW_SOURCE_MAX = 1400;
+const EDITOR_MIN_CROP = 0.02;
+const EDITOR_MIN_TRIM_MS = 100;
+const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
+
+function formatEditorMs(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 100) / 10);
+  const minutes = Math.floor(total / 60);
+  const seconds = total - minutes * 60;
+  return `${minutes}:${seconds.toFixed(1).padStart(4, "0")}`;
+}
+
+function editorFilterCss(): string {
+  return `brightness(${state.editorBrightness}) contrast(${state.editorContrast}) saturate(${state.editorSaturation})`;
+}
+
+function resetEditorImageOps(): void {
+  state.editorCrop = { x: 0, y: 0, w: 1, h: 1 };
+  state.editorRotate90 = 0;
+  state.editorFlipH = false;
+  state.editorFlipV = false;
+  state.editorBrightness = 1;
+  state.editorContrast = 1;
+  state.editorSaturation = 1;
+}
+
+async function openEditor(item: MediaItemDto): Promise<void> {
+  state.editorOpen = true;
+  state.editorItem = item;
+  state.editorKind = item.kind === "video" ? "video" : "image";
+  state.editorLoading = true;
+  state.editorBusy = false;
+  state.editorError = null;
+  state.editorNotice = null;
+  state.editorJobId = null;
+  state.editorProgress = null;
+  state.editorPrecise = false;
+  state.editorSourceUrl = "";
+  resetEditorImageOps();
+  state.editorInMs = 0;
+  state.editorOutMs = 0;
+  state.editorDurationMs = 0;
+  editorImageEl = null;
+  editorSourceBitmap = null;
+  editorDrag = null;
+  render();
+  try {
+    const preview = await requestPreview(item.id);
+    if (!state.editorOpen || state.editorItem?.id !== item.id) return;
+    let url = "";
+    if (state.editorKind === "video") {
+      url =
+        preview.sources.find(
+          (source) => source.role === "video" || (source.role === "single" && source.mimeType.startsWith("video/")),
+        )?.url ?? "";
+    } else {
+      const photo = preview.sources.find(
+        (source) => source.role === "photo" || (source.role === "single" && !source.mimeType.startsWith("video/")),
+      );
+      url = photo?.url ?? "";
+      if (photo && HEIC_MIME_TYPES.has(photo.mimeType)) {
+        // The webview cannot decode HEIC; edit against the JPEG thumbnail copy.
+        const thumb = await loadModalThumbnail(item.id).catch(() => undefined);
+        url = thumb?.url ?? url;
+      }
+    }
+    if (!url) throw new Error("没有可编辑的源文件");
+    state.editorSourceUrl = url;
+    state.editorLoading = false;
+    render();
+  } catch (error) {
+    if (!state.editorOpen) return;
+    state.editorLoading = false;
+    state.editorError = toUserMessage(error, "无法打开编辑器");
+    render();
+  }
+}
+
+function closeEditor(): void {
+  // Never orphan a running trim: closing the editor cancels the job.
+  if (state.editorJobId) void cancelEditJob(state.editorJobId).catch(() => undefined);
+  state.editorOpen = false;
+  state.editorItem = null;
+  state.editorSourceUrl = "";
+  state.editorLoading = false;
+  state.editorBusy = false;
+  state.editorError = null;
+  state.editorNotice = null;
+  state.editorJobId = null;
+  state.editorProgress = null;
+  editorImageEl = null;
+  editorDrag = null;
+  editorCropBoxEl = null;
+  editorPreviewCanvasEl = null;
+  editorCropInfoEl = null;
+  editorShadeEls = { top: null, bottom: null, left: null, right: null };
+  editorSourceBitmap = null;
+  render();
+}
+
+function renderEditor(): string {
+  if (!state.editorItem) return "";
+  const body =
+    state.editorKind === "image" ? renderEditorImageBody() : renderEditorVideoBody();
+  return `<div class="modal-backdrop editor-backdrop" id="editor-modal"><div class="editor-modal" role="dialog" aria-modal="true" aria-label="媒体编辑">
+    <header class="modal-header"><div class="modal-header-copy"><span class="modal-kind-pill">${state.editorKind === "image" ? "图片编辑" : "视频剪辑"}</span><span class="modal-position">${escapeHtml(state.editorItem.displayName)}</span></div><button class="modal-close editor-close-button" type="button" aria-label="关闭">×</button></header>
+    <div class="editor-body">${body}</div>
+    ${renderEditorFooter()}
+  </div></div>`;
+}
+
+function renderEditorImageBody(): string {
+  return `<div class="editor-workbench">
+    <div class="editor-stage-wrap"><div class="editor-stage" id="editor-stage">${
+      state.editorLoading
+        ? `<span class="spinner large"></span>`
+        : `<div class="editor-canvas" id="editor-canvas"><img id="editor-image" src="${state.editorSourceUrl}" alt="" draggable="false" decoding="async" /><div class="crop-shades" aria-hidden="true"><span class="crop-shade shade-top"></span><span class="crop-shade shade-bottom"></span><span class="crop-shade shade-left"></span><span class="crop-shade shade-right"></span></div><div class="crop-box" id="crop-box"><span class="crop-grid"></span>${["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((handle) => `<span class="crop-handle handle-${handle}" data-handle="${handle}"></span>`).join("")}</div></div>`
+    }</div></div>
+    <aside class="editor-tools">
+      <div class="editor-tool-group"><span class="editor-tool-label">旋转 / 翻转</span>
+        <div class="editor-tool-row">
+          <button class="outline-button" id="editor-rotate-left" type="button">↺ 左旋</button>
+          <button class="outline-button" id="editor-rotate-right" type="button">↻ 右旋</button>
+          <button class="outline-button" id="editor-flip-h" type="button">⇋ 水平</button>
+          <button class="outline-button" id="editor-flip-v" type="button">⇅ 垂直</button>
+        </div>
+      </div>
+      <div class="editor-tool-group"><span class="editor-tool-label">裁剪</span>
+        <div class="editor-tool-row"><button class="outline-button" id="editor-crop-reset" type="button">重置裁剪</button><span class="editor-hint" id="editor-crop-info"></span></div>
+        <span class="editor-hint">拖动裁剪框边缘调整范围，框内拖动移动位置。</span>
+      </div>
+      <div class="editor-tool-group"><span class="editor-tool-label">调整</span>
+        ${renderEditorSlider("亮度", "editor-brightness", 0.3, 2, state.editorBrightness)}
+        ${renderEditorSlider("对比度", "editor-contrast", 0.5, 1.5, state.editorContrast)}
+        ${renderEditorSlider("饱和度", "editor-saturation", 0, 2, state.editorSaturation)}
+        <button class="text-button" id="editor-adjust-reset" type="button">还原调整</button>
+      </div>
+      <div class="editor-tool-group"><span class="editor-tool-label">输出预览</span>
+        <div class="editor-output-wrap"><canvas id="editor-output" width="${EDITOR_PREVIEW_BACKING}" height="${EDITOR_PREVIEW_BACKING}"></canvas></div>
+      </div>
+    </aside>
+  </div>`;
+}
+
+function renderEditorSlider(label: string, id: string, min: number, max: number, value: number): string {
+  return `<label class="editor-slider"><span>${label}</span><input type="range" id="${id}" min="${min}" max="${max}" step="0.01" value="${value}" /><strong class="editor-slider-value" id="${id}-value">${value.toFixed(2)}</strong></label>`;
+}
+
+function renderEditorVideoBody(): string {
+  const keep = Math.max(0, state.editorOutMs - state.editorInMs);
+  return `<div class="editor-workbench is-video">
+    <div class="editor-stage-wrap"><div class="editor-stage is-video" id="editor-stage">${
+      state.editorLoading
+        ? `<span class="spinner large"></span>`
+        : `<video id="editor-video" src="${state.editorSourceUrl}" controls playsinline preload="metadata"></video>`
+    }</div></div>
+    <aside class="editor-tools">
+      <div class="editor-tool-group"><span class="editor-tool-label">剪辑区间</span>
+        <div class="trim-times"><span>入点 <strong id="trim-in-label">${formatEditorMs(state.editorInMs)}</strong></span><span>出点 <strong id="trim-out-label">${formatEditorMs(state.editorOutMs)}</strong></span><span>保留 <strong id="trim-len-label">${formatEditorMs(keep)}</strong></span></div>
+        <div class="trim-track" id="trim-track">
+          <span class="trim-range" id="trim-range"></span>
+          <span class="trim-handle handle-start" id="trim-handle-in" data-trim="in" title="入点"></span>
+          <span class="trim-handle handle-end" id="trim-handle-out" data-trim="out" title="出点"></span>
+        </div>
+        <div class="editor-tool-row">
+          <button class="outline-button" id="trim-set-in" type="button">设为入点</button>
+          <button class="outline-button" id="trim-set-out" type="button">设为出点</button>
+          <label class="editor-check"><input type="checkbox" id="trim-loop" checked />循环播放选段</label>
+        </div>
+      </div>
+      <div class="editor-tool-group"><span class="editor-tool-label">剪辑方式</span>
+        <label class="editor-check"><input type="radio" name="editor-trim-mode" value="fast" ${state.editorPrecise ? "" : "checked"} />快速 · 无损流复制，秒级完成，切点对齐关键帧</label>
+        <label class="editor-check"><input type="radio" name="editor-trim-mode" value="precise" ${state.editorPrecise ? "checked" : ""} />精确 · 重新编码，任意时刻切点，耗时较长</label>
+      </div>
+      <p class="editor-hint">原视频不会被修改，剪辑结果保存为独立副本并自动入库。</p>
+    </aside>
+  </div>`;
+}
+
+function renderEditorFooter(): string {
+  const busy = state.editorBusy || state.editorJobId !== null;
+  const percent = state.editorProgress?.percent ?? null;
+  const feedback = state.editorError
+    ? `<span class="editor-error">${escapeHtml(state.editorError)}</span>`
+    : state.editorNotice
+      ? `<span class="editor-notice">${escapeHtml(state.editorNotice)}</span>`
+      : state.editorJobId
+        ? `<span class="editor-progress-copy">正在剪辑${percent !== null ? ` ${Math.round(percent)}%` : "…"}（原视频不受影响）</span>`
+        : `<span class="editor-hint">保存后生成新副本并自动入库，原文件保持不变。</span>`;
+  return `<footer class="editor-footer" id="editor-footer">
+    <div class="editor-feedback">${feedback}</div>
+    ${state.editorJobId ? `<div class="progress-track${percent === null ? " is-indeterminate" : ""}"><span style="width:${percent ?? 100}%"></span></div>` : ""}
+    <div class="editor-footer-actions">
+      ${
+        state.editorJobId
+          ? `<button class="outline-button" id="editor-cancel-job" type="button">取消任务</button>`
+          : `<button class="outline-button editor-close-button" type="button">关闭</button>`
+      }
+      <button class="primary-button" id="editor-save" type="button" ${busy || state.editorLoading ? "disabled" : ""}>${state.editorKind === "image" ? "保存为新副本" : "开始剪辑"}</button>
+    </div>
+  </footer>`;
+}
+
+function bindEditorEvents(): void {
+  const modal = app.querySelector<HTMLElement>("#editor-modal");
+  if (!modal) return;
+  modal.querySelectorAll<HTMLButtonElement>(".editor-close-button").forEach((button) => {
+    button.addEventListener("click", closeEditor);
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) closeEditor();
+  });
+  if (state.editorKind === "image") bindEditorImageEvents(modal);
+  else bindEditorVideoEvents(modal);
+  bindEditorFooterEvents(modal);
+}
+
+function bindEditorFooterEvents(modal: HTMLElement): void {
+  modal.querySelector<HTMLButtonElement>("#editor-cancel-job")?.addEventListener("click", () => {
+    if (state.editorJobId) void cancelEditJob(state.editorJobId).catch(() => undefined);
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-save")?.addEventListener("click", () => {
+    if (state.editorKind === "image") void saveImageEdit();
+    else void saveVideoTrim();
+  });
+}
+
+/** Re-render just the footer so progress updates never reset the editor stage. */
+function editorUpdateFooter(): void {
+  const modal = app.querySelector<HTMLElement>("#editor-modal");
+  const footer = modal?.querySelector<HTMLElement>("#editor-footer");
+  if (!modal || !footer) return;
+  footer.innerHTML = renderEditorFooter();
+  bindEditorFooterEvents(modal);
+}
+
+// --- image editor ----------------------------------------------------------
+
+function bindEditorImageEvents(modal: HTMLElement): void {
+  const image = modal.querySelector<HTMLImageElement>("#editor-image");
+  const canvasBox = modal.querySelector<HTMLElement>("#editor-canvas");
+  editorImageEl = image;
+  editorCropBoxEl = modal.querySelector<HTMLElement>("#crop-box");
+  editorPreviewCanvasEl = modal.querySelector<HTMLCanvasElement>("#editor-output");
+  editorCropInfoEl = modal.querySelector<HTMLElement>("#editor-crop-info");
+  const shades = modal.querySelector<HTMLElement>(".crop-shades");
+  editorShadeEls = {
+    top: shades?.querySelector<HTMLElement>(".shade-top") ?? null,
+    bottom: shades?.querySelector<HTMLElement>(".shade-bottom") ?? null,
+    left: shades?.querySelector<HTMLElement>(".shade-left") ?? null,
+    right: shades?.querySelector<HTMLElement>(".shade-right") ?? null,
+  };
+  const onImageReady = (): void => {
+    editorBuildSourceBitmap();
+    state.editorCrop = { x: 0, y: 0, w: 1, h: 1 };
+    editorSyncCropBox();
+    editorSyncFilter();
+    redrawEditorPreview();
+    editorUpdateCropInfo();
+  };
+  image?.addEventListener("load", onImageReady);
+  if (image?.complete) onImageReady();
+  const startDrag = (event: PointerEvent, mode: "move" | "resize", handle: string): void => {
+    if (!canvasBox || editorDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // Cache the canvas bounds once: a getBoundingClientRect on every pointer
+    // move would force synchronous layout each event.
+    const bounds = canvasBox.getBoundingClientRect();
+    editorPointer = { x: event.clientX, y: event.clientY };
+    editorDrag = {
+      mode,
+      handle,
+      startX: event.clientX,
+      startY: event.clientY,
+      rect: { ...state.editorCrop },
+      bounds: { width: bounds.width, height: bounds.height },
+    };
+    canvasBox.setPointerCapture?.(event.pointerId);
+  };
+  modal.querySelector<HTMLElement>("#crop-box")?.addEventListener("pointerdown", (event) => {
+    const handle = (event.target as HTMLElement).dataset?.handle;
+    if (handle) startDrag(event, "resize", handle);
+    else startDrag(event, "move", "move");
+  });
+  modal.addEventListener("pointermove", (event) => {
+    if (!editorDrag) return;
+    editorPointer = { x: event.clientX, y: event.clientY };
+    // Light path: style writes only (bounds are cached, so no layout reads).
+    // Chromium coalesces these into one layout per frame anyway, and applying
+    // immediately keeps the box glued to fast-moving cursors.
+    editorApplyDragGeometry();
+    // Heavy path: preview redraw + info label at most once per frame.
+    if (editorDragFrame !== null) return;
+    editorDragFrame = requestAnimationFrame(() => {
+      editorDragFrame = null;
+      if (editorDrag) editorRefreshPreview();
+    });
+  });
+  const endDrag = (): void => {
+    if (editorDragFrame !== null) {
+      cancelAnimationFrame(editorDragFrame);
+      editorDragFrame = null;
+    }
+    if (editorDrag) {
+      // Final flush so the box and preview land exactly under the pointer.
+      editorApplyDragGeometry();
+      editorRefreshPreview();
+    }
+    editorDrag = null;
+  };
+  modal.addEventListener("pointerup", endDrag);
+  modal.addEventListener("pointercancel", endDrag);
+
+  modal.querySelector<HTMLButtonElement>("#editor-rotate-left")?.addEventListener("click", () => {
+    state.editorRotate90 = (state.editorRotate90 + 3) % 4;
+    redrawEditorPreview();
+    editorUpdateCropInfo();
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-rotate-right")?.addEventListener("click", () => {
+    state.editorRotate90 = (state.editorRotate90 + 1) % 4;
+    redrawEditorPreview();
+    editorUpdateCropInfo();
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-flip-h")?.addEventListener("click", () => {
+    state.editorFlipH = !state.editorFlipH;
+    redrawEditorPreview();
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-flip-v")?.addEventListener("click", () => {
+    state.editorFlipV = !state.editorFlipV;
+    redrawEditorPreview();
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-crop-reset")?.addEventListener("click", () => {
+    state.editorCrop = { x: 0, y: 0, w: 1, h: 1 };
+    editorSyncCropBox();
+    redrawEditorPreview();
+    editorUpdateCropInfo();
+  });
+  modal.querySelector<HTMLButtonElement>("#editor-adjust-reset")?.addEventListener("click", () => {
+    state.editorBrightness = 1;
+    state.editorContrast = 1;
+    state.editorSaturation = 1;
+    for (const id of ["editor-brightness", "editor-contrast", "editor-saturation"]) {
+      const input = modal.querySelector<HTMLInputElement>(`#${id}`);
+      if (input) input.value = "1";
+      const label = modal.querySelector<HTMLElement>(`#${id}-value`);
+      if (label) label.textContent = "1.00";
+    }
+    editorSyncFilter();
+    redrawEditorPreview();
+  });
+  for (const id of ["editor-brightness", "editor-contrast", "editor-saturation"]) {
+    modal.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", (event) => {
+      const value = Number((event.target as HTMLInputElement).value);
+      if (id === "editor-brightness") state.editorBrightness = value;
+      else if (id === "editor-contrast") state.editorContrast = value;
+      else state.editorSaturation = value;
+      const label = modal.querySelector<HTMLElement>(`#${id}-value`);
+      if (label) label.textContent = value.toFixed(2);
+      editorSyncFilter();
+      redrawEditorPreview();
+    });
+  }
+}
+
+/**
+ * Light drag step: recompute the crop rect and write the box/shade styles.
+ * Runs on every pointermove — style writes are cheap and Chromium coalesces
+ * them into one layout per frame, and with bounds cached there are no layout
+ * reads, so fast cursors never wait on the preview redraw.
+ */
+function editorApplyDragGeometry(): void {
+  const drag = editorDrag;
+  if (!drag) return;
+  const bounds = drag.bounds;
+  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const dx = (editorPointer.x - drag.startX) / bounds.width;
+  const dy = (editorPointer.y - drag.startY) / bounds.height;
+  const base = drag.rect;
+  const min = EDITOR_MIN_CROP;
+  let next = state.editorCrop;
+  if (drag.mode === "move") {
+    next = {
+      x: Math.min(Math.max(0, base.x + dx), 1 - base.w),
+      y: Math.min(Math.max(0, base.y + dy), 1 - base.h),
+      w: base.w,
+      h: base.h,
+    };
+  } else {
+    let x1 = base.x;
+    let y1 = base.y;
+    let x2 = base.x + base.w;
+    let y2 = base.y + base.h;
+    if (drag.handle.includes("w")) x1 = Math.min(Math.max(0, base.x + dx), x2 - min);
+    if (drag.handle.includes("e")) x2 = Math.max(Math.min(1, base.x + base.w + dx), x1 + min);
+    if (drag.handle.includes("n")) y1 = Math.min(Math.max(0, base.y + dy), y2 - min);
+    if (drag.handle.includes("s")) y2 = Math.max(Math.min(1, base.y + base.h + dy), y1 + min);
+    next = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+  state.editorCrop = next;
+  editorSyncCropBox();
+}
+
+/** Heavy drag step: preview canvas + info label, at most once per frame. */
+function editorRefreshPreview(): void {
+  redrawEditorPreview();
+  editorUpdateCropInfo();
+}
+
+/**
+ * Crop box uses percentage positioning. The dark surround is four scale-
+ * transformed shade rects: transforms stay on the compositor, while the old
+ * `box-shadow: 0 0 0 9999px` trick repainted the whole glass modal per frame.
+ */
+function editorSyncCropBox(): void {
+  const box = editorCropBoxEl ?? app.querySelector<HTMLElement>("#crop-box");
+  if (!box) return;
+  const { x, y, w, h } = state.editorCrop;
+  box.style.left = `${x * 100}%`;
+  box.style.top = `${y * 100}%`;
+  box.style.width = `${w * 100}%`;
+  box.style.height = `${h * 100}%`;
+  const { top, bottom, left, right } = editorShadeEls;
+  if (top) top.style.transform = `scaleY(${Math.max(0, y)})`;
+  if (bottom) bottom.style.transform = `scaleY(${Math.max(0, 1 - y - h)})`;
+  if (left) left.style.transform = `scaleX(${Math.max(0, x)})`;
+  if (right) right.style.transform = `scaleX(${Math.max(0, 1 - x - w)})`;
+}
+
+function editorSyncFilter(): void {
+  const image = editorImageEl ?? app.querySelector<HTMLImageElement>("#editor-image");
+  if (!image) return;
+  // Neutral sliders need no CSS filter; skipping it keeps the img cheap to
+  // repaint while dragging (filters force an extra compositing pass).
+  const neutral =
+    state.editorBrightness === 1 && state.editorContrast === 1 && state.editorSaturation === 1;
+  image.style.filter = neutral ? "" : editorFilterCss();
+}
+
+function editorUpdateCropInfo(): void {
+  const image = editorImageEl;
+  const label = editorCropInfoEl ?? app.querySelector<HTMLElement>("#editor-crop-info");
+  if (!image?.naturalWidth || !label) return;
+  const cropW = Math.round(state.editorCrop.w * image.naturalWidth);
+  const cropH = Math.round(state.editorCrop.h * image.naturalHeight);
+  const swap = state.editorRotate90 % 2 === 1;
+  const outW = swap ? cropH : cropW;
+  const outH = swap ? cropW : cropH;
+  const flips = state.editorFlipH || state.editorFlipV ? " · 已翻转" : "";
+  label.textContent = `输出约 ${outW} × ${outH}px${flips}`;
+}
+
+/**
+ * Downscale the opened photo once so preview redraws sample a small bitmap
+ * instead of the full-resolution original texture on every drag frame.
+ */
+function editorBuildSourceBitmap(): void {
+  editorSourceBitmap = null;
+  const image = editorImageEl;
+  if (!image?.naturalWidth) return;
+  const natW = image.naturalWidth;
+  const natH = image.naturalHeight;
+  const scale = Math.min(1, EDITOR_PREVIEW_SOURCE_MAX / Math.max(natW, natH));
+  if (scale >= 1) {
+    // Small enough to sample directly.
+    editorSourceBitmap = { el: image, width: natW, height: natH };
+    return;
+  }
+  const bitmap = document.createElement("canvas");
+  bitmap.width = Math.max(1, Math.round(natW * scale));
+  bitmap.height = Math.max(1, Math.round(natH * scale));
+  const ctx = bitmap.getContext("2d");
+  if (!ctx) {
+    editorSourceBitmap = { el: image, width: natW, height: natH };
+    return;
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(image, 0, 0, bitmap.width, bitmap.height);
+  editorSourceBitmap = { el: bitmap, width: bitmap.width, height: bitmap.height };
+}
+
+/**
+ * Live preview canvas: crop → rotate → flip → CSS-equivalent adjustments,
+ * letterboxed inside a fixed square backing store. The backing store is never
+ * resized here, so dragging reallocates nothing and only the pixels change.
+ */
+function redrawEditorPreview(): void {
+  const source = editorSourceBitmap;
+  const canvas = editorPreviewCanvasEl ?? app.querySelector<HTMLCanvasElement>("#editor-output");
+  if (!source || !canvas) return;
+  const srcW = source.width;
+  const srcH = source.height;
+  if (!srcW || !srcH) return;
+  const { x, y, w, h } = state.editorCrop;
+  const sx = x * srcW;
+  const sy = y * srcH;
+  const sw = Math.max(1, w * srcW);
+  const sh = Math.max(1, h * srcH);
+  const rot = state.editorRotate90 % 4;
+  const swap = rot % 2 === 1;
+  const finalW = swap ? sh : sw;
+  const finalH = swap ? sw : sh;
+  // Keep a small margin inside the fixed square so rotated content never
+  // touches the tile border.
+  const scale = Math.min(
+    (EDITOR_PREVIEW_BACKING * 0.96) / finalW,
+    (EDITOR_PREVIEW_BACKING * 0.96) / finalH,
+  );
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  const neutral =
+    state.editorBrightness === 1 && state.editorContrast === 1 && state.editorSaturation === 1;
+  if (!neutral) ctx.filter = editorFilterCss();
+  // Transforms compose in reverse declaration order, so the drawn pixels go
+  // rescale → rotate → flip — exactly the backend pipeline order.
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(state.editorFlipH ? -1 : 1, state.editorFlipV ? -1 : 1);
+  ctx.rotate((rot * Math.PI) / 2);
+  ctx.scale(scale, scale);
+  ctx.drawImage(source.el, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
+  ctx.restore();
+}
+
+async function saveImageEdit(): Promise<void> {
+  const item = state.editorItem;
+  if (!item || state.editorBusy || state.editorJobId) return;
+  state.editorBusy = true;
+  state.editorError = null;
+  editorUpdateFooter();
+  try {
+    const result = await editImage(item.id, {
+      crop: state.editorCrop,
+      rotate90: state.editorRotate90,
+      flipH: state.editorFlipH,
+      flipV: state.editorFlipV,
+      brightness: state.editorBrightness,
+      contrast: state.editorContrast,
+      saturation: state.editorSaturation,
+    });
+    handleEditSaved(result);
+  } catch (error) {
+    state.editorError = toUserMessage(error, "保存编辑失败");
+  } finally {
+    state.editorBusy = false;
+    editorUpdateFooter();
+  }
+}
+
+// --- video editor ----------------------------------------------------------
+
+function bindEditorVideoEvents(modal: HTMLElement): void {
+  const video = modal.querySelector<HTMLVideoElement>("#editor-video");
+  const track = modal.querySelector<HTMLElement>("#trim-track");
+  video?.addEventListener("loadedmetadata", () => {
+    state.editorDurationMs = Math.round((Number.isFinite(video.duration) ? video.duration : 0) * 1000);
+    state.editorInMs = 0;
+    state.editorOutMs = state.editorDurationMs;
+    editorSyncTrimBar();
+  });
+  video?.addEventListener("timeupdate", () => {
+    if (!video || video.paused) return;
+    const loop = modal.querySelector<HTMLInputElement>("#trim-loop")?.checked ?? true;
+    if (!loop) return;
+    const time = video.currentTime * 1000;
+    if (time < state.editorInMs - 60 || time >= state.editorOutMs) {
+      video.currentTime = state.editorInMs / 1000 + 0.01;
+    }
+  });
+  const setPoint = (which: "in" | "out"): void => {
+    if (!video || !Number.isFinite(video.currentTime)) return;
+    const ms = Math.round(video.currentTime * 1000);
+    if (which === "in") state.editorInMs = Math.min(ms, state.editorOutMs - EDITOR_MIN_TRIM_MS);
+    else state.editorOutMs = Math.max(ms, state.editorInMs + EDITOR_MIN_TRIM_MS);
+    state.editorInMs = Math.max(0, state.editorInMs);
+    state.editorOutMs = Math.min(state.editorDurationMs, state.editorOutMs);
+    editorSyncTrimBar();
+  };
+  modal.querySelector<HTMLButtonElement>("#trim-set-in")?.addEventListener("click", () => setPoint("in"));
+  modal.querySelector<HTMLButtonElement>("#trim-set-out")?.addEventListener("click", () => setPoint("out"));
+  for (const input of modal.querySelectorAll<HTMLInputElement>('input[name="editor-trim-mode"]')) {
+    input.addEventListener("change", () => {
+      if (input.checked) state.editorPrecise = input.value === "precise";
+    });
+  }
+  if (!track || !video) return;
+  let trimDrag: "in" | "out" | null = null;
+  const fractionFromEvent = (event: PointerEvent): number => {
+    const bounds = track.getBoundingClientRect();
+    if (bounds.width <= 0) return 0;
+    return Math.min(Math.max(0, (event.clientX - bounds.left) / bounds.width), 1);
+  };
+  const moveTrim = (event: PointerEvent): void => {
+    if (!trimDrag) return;
+    const ms = Math.round(fractionFromEvent(event) * state.editorDurationMs);
+    if (trimDrag === "in") {
+      state.editorInMs = Math.min(Math.max(0, ms), state.editorOutMs - EDITOR_MIN_TRIM_MS);
+    } else {
+      state.editorOutMs = Math.max(
+        Math.min(state.editorDurationMs, ms),
+        state.editorInMs + EDITOR_MIN_TRIM_MS,
+      );
+    }
+    editorSyncTrimBar();
+  };
+  const stopTrim = (): void => {
+    trimDrag = null;
+  };
+  track.addEventListener("pointerdown", (event) => {
+    const handle = (event.target as HTMLElement).dataset?.trim;
+    if (handle === "in" || handle === "out") {
+      event.preventDefault();
+      trimDrag = handle;
+      return;
+    }
+    // Clicking the track seeks the player.
+    video.currentTime = fractionFromEvent(event) * (state.editorDurationMs / 1000);
+  });
+  track.addEventListener("pointermove", moveTrim);
+  track.addEventListener("pointerup", stopTrim);
+  track.addEventListener("pointercancel", stopTrim);
+  track.addEventListener("pointerleave", stopTrim);
+}
+
+/** Selection handles and shades are percentage-positioned over the track. */
+function editorSyncTrimBar(): void {
+  const track = app.querySelector<HTMLElement>("#trim-track");
+  if (!track) return;
+  const duration = state.editorDurationMs;
+  const inFrac = duration > 0 ? state.editorInMs / duration : 0;
+  const outFrac = duration > 0 ? state.editorOutMs / duration : 1;
+  track.style.setProperty("--trim-in", `${inFrac * 100}%`);
+  track.style.setProperty("--trim-out", `${outFrac * 100}%`);
+  const inLabel = app.querySelector<HTMLElement>("#trim-in-label");
+  const outLabel = app.querySelector<HTMLElement>("#trim-out-label");
+  const lenLabel = app.querySelector<HTMLElement>("#trim-len-label");
+  if (inLabel) inLabel.textContent = formatEditorMs(state.editorInMs);
+  if (outLabel) outLabel.textContent = formatEditorMs(state.editorOutMs);
+  if (lenLabel) lenLabel.textContent = formatEditorMs(state.editorOutMs - state.editorInMs);
+}
+
+async function saveVideoTrim(): Promise<void> {
+  const item = state.editorItem;
+  if (!item || state.editorBusy || state.editorJobId) return;
+  if (state.editorOutMs - state.editorInMs < EDITOR_MIN_TRIM_MS) {
+    state.editorError = "选段太短，请调整入点/出点";
+    editorUpdateFooter();
+    return;
+  }
+  state.editorBusy = true;
+  state.editorError = null;
+  try {
+    const start = await startVideoTrim(item.id, {
+      inMs: state.editorInMs,
+      outMs: state.editorOutMs,
+      precise: state.editorPrecise,
+    });
+    state.editorJobId = start.jobId;
+    state.editorProgress = {
+      jobId: start.jobId,
+      kind: "trim",
+      phase: "preparing",
+      state: "running",
+      percent: null,
+      error: null,
+      result: null,
+    };
+  } catch (error) {
+    state.editorError = toUserMessage(error, "无法开始剪辑");
+  } finally {
+    state.editorBusy = false;
+    editorUpdateFooter();
+  }
+}
+
+function handleEditSaved(result: EditResultDto): void {
+  const message = `已保存为 ${result.fileName}，正在自动入库`;
+  showTransientNotice(message, "success");
+  closeEditor();
+  void refreshMedia();
+  // The incremental scan takes a moment; refresh again once it has landed so
+  // the new copy shows up without manual interaction.
+  window.setTimeout(() => void refreshMedia(), 2500);
+}
+
 function closePreview(): void {
   state.previewIndex = null;
   livePlaying = false;
@@ -4104,6 +4893,13 @@ function buildRecentTaskNotice(scans: ScanRunDto[], backups: BackupRunDto[]): st
 }
 
 window.addEventListener("keydown", (event) => {
+  if (state.editorOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeEditor();
+    }
+    return;
+  }
   if (state.tagsManagerOpen) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -4373,6 +5169,26 @@ void onLibraryMergeProgress((progress) => {
   } else {
     render();
     void bootstrap();
+  }
+});
+void onEditProgress((progress) => {
+  if (!state.editorJobId || progress.jobId !== state.editorJobId) return;
+  state.editorProgress = progress;
+  if (progress.state === "running") {
+    editorUpdateFooter();
+    return;
+  }
+  state.editorJobId = null;
+  if (progress.state === "completed" && progress.result) {
+    handleEditSaved(progress.result);
+  } else if (progress.state === "cancelled") {
+    state.editorNotice = "剪辑已取消";
+    state.editorProgress = null;
+    editorUpdateFooter();
+  } else {
+    state.editorError = progress.error ?? "剪辑失败";
+    state.editorProgress = null;
+    editorUpdateFooter();
   }
 });
 initLiquidGlass();

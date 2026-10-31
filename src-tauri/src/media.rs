@@ -22,13 +22,13 @@ use std::process::Stdio;
 /// Windows GUI apps inherit a console host; spawning ffmpeg without
 /// CREATE_NO_WINDOW flashes a black console per thumbnail/preview call.
 #[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
+pub(crate) fn hide_console_window(command: &mut Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
+pub(crate) fn hide_console_window(_command: &mut Command) {}
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,8 +40,9 @@ const MAX_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 static NEXT_PREVIEW_JOB: AtomicU64 = AtomicU64::new(1);
 static NEXT_STREAM_TOKEN: AtomicU64 = AtomicU64::new(1);
 // Camera photos can be very large. Keep full-resolution decodes serialized so
-// several visible cards cannot exhaust the process memory at once.
-static IMAGE_DECODE_LOCK: Mutex<()> = Mutex::new(());
+// several visible cards cannot exhaust the process memory at once. Shared with
+// the editing module which decodes full photos for save-on-copy edits.
+pub(crate) static IMAGE_DECODE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -766,7 +767,10 @@ fn thumbnail_file(details: &MediaItemDetails) -> Result<&MediaFile, crate::error
         .ok_or_else(|| crate::errors::AppError::media_missing("媒体文件不可用"))
 }
 
-fn resolve_media_path(root: &Path, relative: &str) -> Result<PathBuf, crate::errors::AppError> {
+pub(crate) fn resolve_media_path(
+    root: &Path,
+    relative: &str,
+) -> Result<PathBuf, crate::errors::AppError> {
     let relative_path = Path::new(relative);
     if relative.is_empty()
         || relative_path.is_absolute()

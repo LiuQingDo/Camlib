@@ -1342,7 +1342,9 @@ fn remove_merge_scratch(parent: &Path, dest_stem: &str) {
     }
 }
 
-struct TempGuard {
+/// Removes a scratch file when dropped unless disarmed after a successful
+/// commit. Shared with the editing module.
+pub(crate) struct TempGuard {
     path: PathBuf,
     armed: bool,
 }
@@ -1352,6 +1354,16 @@ impl Drop for TempGuard {
         if self.armed {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+impl TempGuard {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 

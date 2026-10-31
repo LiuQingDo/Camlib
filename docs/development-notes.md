@@ -61,6 +61,8 @@ JSON 字段使用 camelCase（Rust 内部 snake_case，`serde` 负责映射）�
 | `backup_preview` | 备份预览：数量、冲突、空间 |
 | `backup_start` / `backup_cancel` / `backup_retry_failed` | 备份执行 / 取消 / 只重试失败项 |
 | `backup_history` / `backup_run_items` | 备份历史与明细 |
+| `media_edit_image` | 图片编辑（裁剪/旋转/翻转/亮度/对比度/饱和度）；同步返回，产物为新副本 |
+| `media_trim_video` / `media_edit_cancel` | 视频剪辑（快速流复制 / 精确转码）；job + `edit-progress` Channel，可取消 |
 
 前端不提交任意物理路径数组；删除与打开文件夹均以 `mediaItemId` 为边界。
 
@@ -120,6 +122,8 @@ persisted scan_runs / backup_runs
 `state`：`queued|running|completed|cancelled|failed`  
 `phase`：`discovering|planning|copying|hashing|indexing|thumbnailing|finalizing` 等。  
 事件中不放绝对路径；错误详情不泄露不必要的系统路径。
+
+剪辑任务走同一条通道（`edit-progress`，`kind: "trim"`），`phase` 为 `preparing|trimming|finalizing`，重编码时以 `percent`（0-100）上报；编辑产物不写 runs 表，完成事件直接携带结果 DTO（新文件名/相对路径/尺寸）。
 
 ### 交付规则
 

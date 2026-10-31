@@ -435,6 +435,89 @@ export interface LibraryMergeStartDto {
   jobId: string;
 }
 
+export interface EditCropRectDto {
+  /** Relative 0..1 coordinates on the EXIF-oriented image. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Result of a save-on-copy edit; the new file joins the library via scan. */
+export interface EditResultDto {
+  fileName: string;
+  relativePath: string;
+  sizeBytes: number;
+  width: number;
+  height: number;
+}
+
+export interface EditProgressDto {
+  jobId: string;
+  kind: "trim";
+  phase: "preparing" | "trimming" | "finalizing";
+  state: "running" | "completed" | "cancelled" | "failed";
+  /** 0..100, only meaningful while re-encoding. */
+  percent: number | null;
+  error: string | null;
+  result: EditResultDto | null;
+}
+
+export interface EditJobStartDto {
+  jobId: string;
+}
+
+/**
+ * Render an edited COPY of a photo beside the original (the original is never
+ * modified); the backend triggers an incremental scan so it joins the library.
+ */
+export function editImage(
+  mediaItemId: string,
+  input: {
+    crop: EditCropRectDto;
+    rotate90?: number;
+    flipH?: boolean;
+    flipV?: boolean;
+    brightness?: number;
+    contrast?: number;
+    saturation?: number;
+  },
+): Promise<EditResultDto> {
+  return invoke<EditResultDto>("media_edit_image", {
+    mediaItemId,
+    crop: input.crop,
+    rotate90: input.rotate90 ?? 0,
+    flipH: input.flipH ?? false,
+    flipV: input.flipV ?? false,
+    brightness: input.brightness ?? 1,
+    contrast: input.contrast ?? 1,
+    saturation: input.saturation ?? 1,
+  });
+}
+
+/** Trim a video into a new `{stem}_edited{ext}` copy via a cancellable job. */
+export function startVideoTrim(
+  mediaItemId: string,
+  input: { inMs: number; outMs: number; precise?: boolean },
+): Promise<EditJobStartDto> {
+  return invoke<EditJobStartDto>("media_trim_video", {
+    mediaItemId,
+    inMs: input.inMs,
+    outMs: input.outMs,
+    precise: input.precise ?? false,
+  });
+}
+
+export function cancelEditJob(jobId: string): Promise<void> {
+  return invoke<void>("media_edit_cancel", { jobId });
+}
+
+export function onEditProgress(
+  callback: (event: EditProgressDto) => void,
+): Promise<UnlistenFn> {
+  return listen<EditProgressDto>("edit-progress", (event) => callback(event.payload));
+}
+
 export function previewLibraryMerge(libraryId: string): Promise<LibraryMergePreviewDto> {
   return invoke<LibraryMergePreviewDto>("library_merge_preview", { libraryId });
 }
