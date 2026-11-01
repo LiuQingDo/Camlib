@@ -93,9 +93,10 @@ pub struct PreviewMetaDto {
     /// AI-generated description (None when the item is unprocessed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_caption: Option<String>,
-    /// AI tag names as produced by the chat model.
+    /// Tags attached via AI, resolved to real tag rows (with ids) so the UI
+    /// can show and detach them inside the shared tag block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ai_tags: Vec<String>,
+    pub ai_tags: Vec<crate::db::Tag>,
 }
 
 #[derive(Debug, Clone, Serialize)]

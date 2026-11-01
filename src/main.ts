@@ -121,6 +121,7 @@ import {
   setAiConfig,
   startAiProcess,
   testAiConnection,
+  detachAiTag,
   onAiProgress,
   type AiConfigDto,
   type AiProcessPreviewDto,
@@ -815,6 +816,15 @@ let editorShadeEls: { top: HTMLElement | null; bottom: HTMLElement | null; left:
 let editorSourceBitmap: { el: CanvasImageSource; width: number; height: number } | null = null;
 // Last loaded preview meta so tag/rating edits can patch the panel in place.
 let previewMetaCache: PreviewMetaDto | null = null;
+// Tag picker (preview panel) and tag-filter popover (toolbar) transient state.
+// Lives outside AppState so opening/filtering them never triggers a re-render.
+let previewTagPickerOpen = false;
+let previewTagPickerQuery = "";
+let tagPopoverOpen = false;
+let tagPopoverQuery = "";
+// Scroll offset of the toolbar tag popover list, kept across the full re-render
+// that follows a filter toggle so the list does not jump back to the top.
+let tagPopoverScroll = 0;
 // Photo viewer zoom/pan. Scale 1 means fit-contain; >1 is a transform zoom.
 type PhotoZoomState = { scale: number; x: number; y: number; dragging: boolean; lastX: number; lastY: number };
 let photoZoom: PhotoZoomState = { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 };
@@ -1088,6 +1098,16 @@ function requestPreview(id: string): Promise<MediaPreviewDto> {
   previewAssetCache.set(id, request);
   void request.catch(() => previewAssetCache.delete(id));
   return request;
+}
+
+/**
+ * Evict cached preview payloads after a meta change (tags/rating/favorite/AI).
+ * The cache stores whole preview DTOs, so without this a reopened preview
+ * replays the stale promise and shows the old tags/rating even though the
+ * database write succeeded.
+ */
+function invalidatePreviewMeta(ids: string[]): void {
+  for (const id of ids) previewAssetCache.delete(id);
 }
 
 function pumpPreviewPrefetch(): void {
@@ -1493,6 +1513,7 @@ async function toggleFavorite(id: string): Promise<void> {
   updateFavoriteButton(id);
   try {
     await setFavorite(id, !wasFavorite);
+    invalidatePreviewMeta([id]);
     if (wasFavorite) {
       state.favorites.delete(id);
       // An item removed from the current "favorites" result should disappear
@@ -1525,6 +1546,7 @@ async function applyBatchFavorite(favorite: boolean): Promise<void> {
   applySelectionChrome();
   try {
     await setFavoritesBatch(ids, favorite);
+    invalidatePreviewMeta(ids);
     for (const id of ids) {
       if (favorite) state.favorites.add(id);
       else {
@@ -1606,6 +1628,7 @@ async function applyBatchTag(attach: boolean): Promise<void> {
   try {
     if (attach) await attachTagsBatch(ids, tagId);
     else await detachTagsBatch(ids, tagId);
+    invalidatePreviewMeta(ids);
     await refreshTags();
     const tagName = state.tags.find((tag) => tag.id === tagId)?.name ?? "标签";
     state.deleteNotice = attach
@@ -1646,6 +1669,7 @@ async function applyBatchRating(): Promise<void> {
   applySelectionChrome();
   try {
     await setRatingsBatch(ids, rating);
+    invalidatePreviewMeta(ids);
     for (const id of ids) {
       if (rating > 0) state.ratings.set(id, rating);
       else state.ratings.delete(id);
@@ -1796,10 +1820,108 @@ function renderPrimaryFilters(): string {
   return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><button class="filter-chip filter-toggle ${hasSecondary ? "has-active" : ""}" type="button" id="toggle-advanced-filters" aria-expanded="${expanded}" aria-controls="advanced-filters">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${expanded ? "▴" : "▾"}</span></button>${summary}`;
 }
 
+/** Inline toolbar chips: selected tags first, then hot tags by media count. */
+function toolbarTagChips(): TagDto[] {
+  const selected = state.tags.filter((tag) => state.tagIds.has(tag.id));
+  const hot = state.tags
+    .filter((tag) => !state.tagIds.has(tag.id))
+    .sort((a, b) => (b.mediaCount ?? 0) - (a.mediaCount ?? 0) || a.name.localeCompare(b.name, "zh-Hans-CN"));
+  return [...selected, ...hot.slice(0, Math.max(0, 8 - selected.length))];
+}
+
+/** Tag count-descending view shared by the popover list and the picker. */
+function sortedTagsByUsage(): TagDto[] {
+  return state.tags
+    .slice()
+    .sort((a, b) => (b.mediaCount ?? 0) - (a.mediaCount ?? 0) || a.name.localeCompare(b.name, "zh-Hans-CN"));
+}
+
+function tagPopoverHtml(): string {
+  const rows = sortedTagsByUsage()
+    .map((tag) => `<button type="button" class="tag-picker-row ${state.tagIds.has(tag.id) ? "is-active" : ""}" data-tag-popover-row="${escapeHtml(tag.id)}" data-tag-name="${escapeHtml(tag.name.toLowerCase())}"><span class="tag-picker-name">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</span>${tag.mediaCount != null ? `<span class="tag-picker-count">${formatCount(tag.mediaCount)} 项</span>` : ""}<span class="tag-picker-check" aria-hidden="true">✓</span></button>`)
+    .join("");
+  return `<div class="tag-popover" id="tag-filter-popover"><div class="tag-picker-search"><span aria-hidden="true">⌕</span><input id="tag-popover-input" type="text" placeholder="搜索标签" value="${escapeHtml(tagPopoverQuery)}" aria-label="搜索标签" /></div><div class="tag-picker-list" id="tag-popover-list">${rows}<div class="tag-picker-empty" data-picker-empty hidden>没有匹配的标签</div></div></div>`;
+}
+
+/** Wire search filtering + row toggles for a mounted popover. */
+function bindTagPopover(scope: HTMLElement): void {
+  const input = scope.querySelector<HTMLInputElement>("#tag-popover-input");
+  if (input) {
+    const filterRows = () => {
+      const query = input.value.trim().toLowerCase();
+      tagPopoverQuery = input.value;
+      let visible = 0;
+      scope.querySelectorAll<HTMLElement>("#tag-popover-list [data-tag-popover-row]").forEach((row) => {
+        const match = !query || (row.dataset.tagName ?? "").includes(query);
+        row.hidden = !match;
+        if (match) visible += 1;
+      });
+      const empty = scope.querySelector<HTMLElement>("#tag-popover-list [data-picker-empty]");
+      if (empty) empty.hidden = visible > 0;
+    };
+    input.addEventListener("input", filterRows);
+    if (tagPopoverQuery) filterRows();
+  }
+  scope.querySelectorAll<HTMLButtonElement>("#tag-filter-popover [data-tag-popover-row]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const tagId = row.dataset.tagPopoverRow;
+      if (!tagId) return;
+      tagPopoverScroll = scope.querySelector<HTMLElement>("#tag-popover-list")?.scrollTop ?? 0;
+      if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
+      else state.tagIds.add(tagId);
+      void refreshMedia();
+    });
+  });
+  const list = scope.querySelector<HTMLElement>("#tag-popover-list");
+  if (list) list.scrollTop = tagPopoverScroll;
+}
+
+/** Mount the toolbar tag popover inside .sticky-controls, anchored below the
+ * toggle button. Mounting outside .advanced-filters dodges its max-height
+ * overflow clipping; the sticky host keeps the anchor stable while scrolling. */
+function mountTagPopover(focusSearch: boolean): void {
+  const toggle = app.querySelector<HTMLElement>("#toggle-tag-popover");
+  const host = app.querySelector<HTMLElement>(".sticky-controls");
+  if (!toggle || !host || host.querySelector("#tag-filter-popover")) return;
+  host.insertAdjacentHTML("beforeend", tagPopoverHtml());
+  const popover = host.querySelector<HTMLElement>("#tag-filter-popover");
+  if (popover) {
+    const buttonRect = toggle.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    popover.style.left = `${Math.max(0, Math.round(buttonRect.left - hostRect.left))}px`;
+    popover.style.top = `${Math.round(buttonRect.bottom - hostRect.top + 6)}px`;
+  }
+  bindTagPopover(host);
+  if (focusSearch) host.querySelector<HTMLInputElement>("#tag-popover-input")?.focus();
+}
+
+/** Remove the popover DOM and reset the toggle button chrome. */
+function unmountTagPopover(): void {
+  tagPopoverScroll = 0;
+  app.querySelector("#tag-filter-popover")?.remove();
+  const toggle = app.querySelector<HTMLButtonElement>("#toggle-tag-popover");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.classList.remove("is-active");
+  }
+}
+
 function renderAdvancedFilters(): string {
-  const tagBlock = state.tags.length
-    ? `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`).join("")}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`
-    : `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
+  let tagBlock: string;
+  if (!state.tags.length) {
+    tagBlock = `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
+  } else {
+    const inline = toolbarTagChips();
+    const chips = inline.map((tag) => `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`).join("");
+    // Everything beyond the inline chips stays reachable through the
+    // searchable popover instead of a flat (truncated) chip row. The popover
+    // itself mounts into .sticky-controls (see mountTagPopover), not here —
+    // this container clips overflow.
+    const moreButton = state.tags.length > inline.length
+      ? `<button class="filter-chip filter-chip-more ${tagPopoverOpen ? "is-active" : ""}" type="button" id="toggle-tag-popover" aria-expanded="${tagPopoverOpen}" aria-haspopup="true">更多标签 <span class="filter-toggle-caret" aria-hidden="true">${tagPopoverOpen ? "▴" : "▾"}</span></button>`
+      : "";
+    tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`;
+  }
   return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}><div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" type="button">清除筛选</button>` : ""}</div>`;
 }
 
@@ -2583,6 +2705,9 @@ function bindTagManagerEvents(): void {
         try {
           await updateTag(tagId, { name });
           await refreshTags();
+          // Renames affect every cached preview; drop them all so reopen
+          // refetches instead of showing the old tag name.
+          previewAssetCache.clear();
           if (previewMetaCache) {
             previewMetaCache = {
               ...previewMetaCache,
@@ -2628,6 +2753,9 @@ function bindTagManagerEvents(): void {
         try {
           await deleteTag(tagId);
           state.tagIds.delete(tagId);
+          // Deleted tags disappear from every cached preview payload; drop
+          // them all so reopen refetches fresh meta.
+          previewAssetCache.clear();
           if (previewMetaCache) {
             previewMetaCache = {
               ...previewMetaCache,
@@ -3342,6 +3470,36 @@ function bindEvents(): void {
     void refreshMedia();
   }));
   app.querySelector<HTMLButtonElement>("#open-tag-manager")?.addEventListener("click", () => openTagManager());
+  app.querySelector<HTMLButtonElement>("#toggle-tag-popover")?.addEventListener("click", () => {
+    if (tagPopoverOpen) {
+      tagPopoverOpen = false;
+      unmountTagPopover();
+      return;
+    }
+    tagPopoverOpen = true;
+    tagPopoverScroll = 0;
+    mountTagPopover(true);
+  });
+  // Re-mount the popover after a full render (filter toggles re-render the app
+  // while the popover stays open) and restore its scroll/search state. Only
+  // while the toolbar is visible: advanced row expanded and no preview modal
+  // (the preview hides .sticky-controls entirely).
+  if (tagPopoverOpen && state.filtersExpanded && state.previewIndex === null) {
+    const toggle = app.querySelector("#toggle-tag-popover");
+    if (toggle) {
+      mountTagPopover(false);
+      toggle.setAttribute("aria-expanded", "true");
+      toggle.classList.add("is-active");
+    } else {
+      tagPopoverOpen = false;
+      tagPopoverQuery = "";
+      tagPopoverScroll = 0;
+    }
+  } else if (tagPopoverOpen) {
+    tagPopoverOpen = false;
+    tagPopoverQuery = "";
+    tagPopoverScroll = 0;
+  }
   app.querySelector<HTMLSelectElement>("#rating-filter")?.addEventListener("change", (event) => {
     const value = (event.target as HTMLSelectElement).value;
     state.ratingEq = null;
@@ -3399,6 +3557,12 @@ function bindEvents(): void {
   });
   app.querySelector<HTMLButtonElement>("#toggle-advanced-filters")?.addEventListener("click", () => {
     state.filtersExpanded = !state.filtersExpanded;
+    // Collapsing the toolbar hides the popover's anchor; dismiss it first so
+    // it cannot float orphaned over the grid.
+    if (!state.filtersExpanded && tagPopoverOpen) {
+      tagPopoverOpen = false;
+      unmountTagPopover();
+    }
     render();
   });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
@@ -4151,6 +4315,9 @@ async function runAiTagging(ids: string[]): Promise<void> {
     updateAiSingleProgress();
     try {
       const result = await processAiItem(id);
+      // The cached preview predates the new AI caption/tags; drop it so the
+      // trailing loadModalAsset() below refetches instead of replaying it.
+      invalidatePreviewMeta([id]);
       if (result.status === "skipped") state.aiSingleFailed++;
     } catch (error) {
       state.aiSingleFailed++;
@@ -4399,11 +4566,32 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
   if (meta.burstGroup) rows.push(["连拍组", meta.burstGroup]);
   if (meta.favorite) rows.push(["收藏", "是"]);
   const files = meta.files.map((file) => `<li class="meta-file ${file.existsNow ? "" : "is-missing"}"><span class="meta-file-role">${fileRoleLabel(file.role)}</span><span class="meta-file-name" title="${escapeHtml(file.relativePath)}">${escapeHtml(file.fileName)}</span><span class="meta-file-size">${formatSize(file.sizeBytes)}</span>${file.existsNow ? "" : `<span class="meta-file-state">缺失</span>`}</li>`).join("");
-  const tagChips = meta.tags.map((tag) => `<span class="tag-chip" ${tag.color ? `style="--tag-accent:${escapeHtml(tag.color)}"` : ""}><span>${escapeHtml(tag.name)}</span><button type="button" class="tag-remove" data-remove-tag="${escapeHtml(tag.id)}" aria-label="移除标签 ${escapeHtml(tag.name)}">×</button></span>`).join("");
-  const remainingTags = state.tags.filter((tag) => !meta.tags.some((attached) => attached.id === tag.id));
-  const tagSuggestions = remainingTags
-    .map((tag) => `<button type="button" class="tag-suggest" data-add-tag="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</button>`)
+  // One merged tag block: user chips first, then AI-only chips. A tag the
+  // item carries through both tables renders once — as the user chip with an
+  // AI badge (hasAi is item-level for preview tags) — so its × always removes
+  // the manual attachment first.
+  const aiTags = meta.aiTags ?? [];
+  const manualIds = new Set(meta.tags.map((tag) => tag.id));
+  const aiOnlyTags = aiTags
+    .filter((tag) => !manualIds.has(tag.id))
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
+  const tagChips = [
+    ...meta.tags.map((tag) => `<span class="tag-chip${tag.hasAi ? " tag-chip-ai" : ""}" ${tag.color ? `style="--tag-accent:${escapeHtml(tag.color)}"` : ""}>${tag.hasAi ? `<i class="ai-badge" aria-label="该标签同时由 AI 打标">AI</i>` : ""}<span>${escapeHtml(tag.name)}</span><button type="button" class="tag-remove" data-remove-tag="${escapeHtml(tag.id)}" aria-label="移除标签 ${escapeHtml(tag.name)}">×</button></span>`),
+    ...aiOnlyTags.map((tag) => `<span class="tag-chip tag-chip-ai"><i class="ai-badge" aria-hidden="true">AI</i><span>${escapeHtml(tag.name)}</span><button type="button" class="tag-remove" data-remove-ai-tag="${escapeHtml(tag.id)}" aria-label="移除 AI 标签 ${escapeHtml(tag.name)}">×</button></span>`),
+  ].join("");
+  const remainingTags = state.tags
+    .filter((tag) => !manualIds.has(tag.id) && !aiTags.some((attached) => attached.id === tag.id))
+    .sort((a, b) => (b.mediaCount ?? 0) - (a.mediaCount ?? 0) || a.name.localeCompare(b.name, "zh-Hans-CN"));
+  // With AI tagging the tag pool can grow large, so remaining tags live in a
+  // searchable picker instead of a flat row of every suggestion.
+  const tagPickerRows = remainingTags
+    .map((tag) => `<button type="button" class="tag-picker-row" data-add-tag="${escapeHtml(tag.id)}" data-tag-name="${escapeHtml(tag.name.toLowerCase())}"><span class="tag-picker-name">${escapeHtml(tag.name)}</span>${tag.mediaCount != null ? `<span class="tag-picker-count">${formatCount(tag.mediaCount)} 项</span>` : ""}</button>`)
     .join("");
+  const tagAddControl = remainingTags.length
+    ? (previewTagPickerOpen
+      ? `<div class="tag-picker" id="preview-tag-picker"><div class="tag-picker-search"><span aria-hidden="true">⌕</span><input id="preview-tag-picker-input" type="text" placeholder="搜索标签" value="${escapeHtml(previewTagPickerQuery)}" aria-label="搜索标签" /></div><div class="tag-picker-list" id="preview-tag-picker-list">${tagPickerRows}<div class="tag-picker-empty" data-picker-empty hidden>没有匹配的标签</div></div></div>`
+      : `<button type="button" class="tag-add-button" id="toggle-preview-tag-picker">＋ 添加标签</button>`)
+    : (state.tags.length ? `<div class="tag-empty">该媒体已带有全部标签</div>` : `<div class="tag-empty">还没有标签，请先在「标签管理」中新建</div>`);
   return `<div class="meta-panel-body">
     <h3>媒体信息</h3>
     <div class="meta-rating-block">
@@ -4418,14 +4606,11 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
         <button type="button" class="text-button" id="open-tag-manager-from-preview">管理标签</button>
       </div>
       <div class="tag-chip-row" id="preview-tag-chips">${tagChips || `<span class="tag-empty">暂无标签</span>`}</div>
-      ${remainingTags.length
-        ? `<div class="tag-suggest-row">${tagSuggestions}</div>`
-        : (state.tags.length ? `<div class="tag-empty">该媒体已带有全部标签</div>` : `<div class="tag-empty">还没有标签，请先在「标签管理」中新建</div>`)}
+      ${tagAddControl}
     </div>
     ${item.kind !== "video" ? `<div class="meta-ai-block">
       <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span><span class="meta-ai-tools">${(meta.aiCaption || (meta.aiTags && meta.aiTags.length)) ? `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>重新打标</button>` : `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>AI 打标</button>`}</span></div>
       ${meta.aiCaption ? `<p class="meta-ai-caption">${escapeHtml(meta.aiCaption)}</p>` : `<p class="meta-ai-caption meta-ai-empty">尚未生成。将发送该照片缩略图到你配置的 AI 服务。</p>`}
-      ${meta.aiTags && meta.aiTags.length ? `<div class="tag-chip-row">${meta.aiTags.map((tag) => `<span class="tag-chip tag-chip-ai"><i class="ai-badge" aria-hidden="true">AI</i><span>${escapeHtml(tag)}</span></span>`).join("")}</div>` : ""}
     </div>` : ""}
     <h4>关联文件</h4>
     <ul class="meta-files">${files}</ul>
@@ -4468,6 +4653,13 @@ function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): void {
       void applyPreviewTag(panel, item, tagId, "remove");
     });
   });
+  panel.querySelectorAll<HTMLButtonElement>("[data-remove-ai-tag]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tagId = button.dataset.removeAiTag;
+      if (!tagId) return;
+      void applyPreviewAiTagDetach(panel, item, tagId);
+    });
+  });
   panel.querySelectorAll<HTMLButtonElement>("[data-add-tag]").forEach((button) => {
     button.addEventListener("click", () => {
       const tagId = button.dataset.addTag;
@@ -4478,6 +4670,32 @@ function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): void {
   panel.querySelector<HTMLButtonElement>("#open-tag-manager-from-preview")?.addEventListener("click", () => {
     openTagManager();
   });
+  panel.querySelector<HTMLButtonElement>("#toggle-preview-tag-picker")?.addEventListener("click", () => {
+    previewTagPickerOpen = true;
+    previewTagPickerQuery = "";
+    if (!previewMetaCache) return;
+    panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+    bindPreviewMetaEvents(panel, item);
+  });
+  const pickerInput = panel.querySelector<HTMLInputElement>("#preview-tag-picker-input");
+  if (pickerInput) {
+    // Filter rows in place: re-rendering on each keystroke would drop focus.
+    const filterRows = () => {
+      const query = pickerInput.value.trim().toLowerCase();
+      previewTagPickerQuery = pickerInput.value;
+      let visible = 0;
+      panel.querySelectorAll<HTMLElement>("#preview-tag-picker-list [data-add-tag]").forEach((row) => {
+        const match = !query || (row.dataset.tagName ?? "").includes(query);
+        row.hidden = !match;
+        if (match) visible += 1;
+      });
+      const empty = panel.querySelector<HTMLElement>("#preview-tag-picker-list [data-picker-empty]");
+      if (empty) empty.hidden = visible > 0;
+    };
+    pickerInput.addEventListener("input", filterRows);
+    if (previewTagPickerQuery) filterRows();
+    pickerInput.focus();
+  }
   panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.addEventListener("click", () => {
     const mediaId = panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.dataset.mediaId || item.id;
     void runAiTagging([mediaId]);
@@ -4492,6 +4710,7 @@ async function applyPreviewRating(
 ): Promise<void> {
   try {
     await setRating(mediaId, rating);
+    invalidatePreviewMeta([mediaId]);
     item.rating = rating;
     if (rating > 0) state.ratings.set(mediaId, rating);
     else state.ratings.delete(mediaId);
@@ -4516,12 +4735,18 @@ async function applyPreviewTag(
   try {
     if (mode === "add" && tagId) {
       await attachTag(mediaId, tagId);
+      invalidatePreviewMeta([mediaId]);
       const tag = state.tags.find((entry) => entry.id === tagId);
       if (tag && previewMetaCache && !previewMetaCache.tags.some((entry) => entry.id === tagId)) {
-        previewMetaCache = { ...previewMetaCache, tags: [...previewMetaCache.tags, tag] };
+        // hasAi on preview tags is item-level (this item also carries the tag
+        // via media_ai_tags), not the global "AI has ever used this tag"
+        // flag that state.tags carries.
+        const itemHasAi = (previewMetaCache.aiTags ?? []).some((entry) => entry.id === tagId);
+        previewMetaCache = { ...previewMetaCache, tags: [...previewMetaCache.tags, { ...tag, hasAi: itemHasAi }] };
       }
     } else if (mode === "remove" && tagId) {
       await detachTag(mediaId, tagId);
+      invalidatePreviewMeta([mediaId]);
       if (previewMetaCache) {
         previewMetaCache = {
           ...previewMetaCache,
@@ -4532,6 +4757,12 @@ async function applyPreviewTag(
       return;
     }
     await refreshTags();
+    // The last remaining tag was just attached; collapse the picker so the
+    // empty-state message shows instead of an empty dropdown.
+    if (previewMetaCache && previewMetaCache.tags.length >= state.tags.length) {
+      previewTagPickerOpen = false;
+      previewTagPickerQuery = "";
+    }
     if (previewMetaCache) {
       // Keep counts roughly fresh without another preview fetch.
       previewMetaCache = {
@@ -4550,6 +4781,49 @@ async function applyPreviewTag(
     }
   } catch (error) {
     state.error = toUserMessage(error, "更新标签失败");
+    render();
+  }
+}
+
+/** Re-render the open preview's meta panel in place from previewMetaCache. */
+function rerenderPreviewMetaPanel(): void {
+  if (state.previewIndex === null || !previewMetaCache) return;
+  const panel = app.querySelector<HTMLElement>("#modal-meta");
+  const item = state.page.items[state.previewIndex];
+  if (!panel || !item) return;
+  panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+  bindPreviewMetaEvents(panel, item);
+}
+
+/** Detach one AI tag from the open preview item (manual tags untouched). */
+async function applyPreviewAiTagDetach(
+  panel: HTMLElement,
+  item: MediaItemDto,
+  tagId: string,
+): Promise<void> {
+  try {
+    await detachAiTag(item.id, tagId);
+    invalidatePreviewMeta([item.id]);
+    if (previewMetaCache) {
+      const remaining = (previewMetaCache.aiTags ?? []).filter((tag) => tag.id !== tagId);
+      previewMetaCache = {
+        ...previewMetaCache,
+        aiTags: remaining,
+        // Manual chips keep their AI badge only while the AI attachment for
+        // this item still exists.
+        tags: previewMetaCache.tags.map((tag) => ({
+          ...tag,
+          hasAi: remaining.some((ai) => ai.id === tag.id),
+        })),
+      };
+    }
+    await refreshTags();
+    if (previewMetaCache) {
+      panel.innerHTML = renderMetaPanel(previewMetaCache, item);
+      bindPreviewMetaEvents(panel, item);
+    }
+  } catch (error) {
+    state.error = toUserMessage(error, "移除 AI 标签失败");
     render();
   }
 }
@@ -5742,6 +6016,8 @@ function closePreview(): void {
   livePlaying = false;
   liveHoldActive = false;
   previewMetaCache = null;
+  previewTagPickerOpen = false;
+  previewTagPickerQuery = "";
   previewImmersiveOpen = false;
   document.documentElement.classList.remove("is-immersive-view");
   resetPhotoZoom();
@@ -5761,6 +6037,9 @@ function movePreview(delta: number): void {
   livePlaying = false;
   liveHoldActive = false;
   resetPhotoZoom();
+  // The picker belongs to the previous item's tag block; start fresh.
+  previewTagPickerOpen = false;
+  previewTagPickerQuery = "";
   if (liveHoldTimer !== null) {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
@@ -6451,6 +6730,15 @@ function buildRecentTaskNotice(scans: ScanRunDto[], backups: BackupRunDto[]): st
   return parts.length ? `上次应用中断的任务已标记为失败。${parts.join(" · ")}` : null;
 }
 
+// Registered once at module level: clicking anywhere outside the toolbar tag
+// popover (or its toggle button) dismisses it without a full re-render.
+document.addEventListener("pointerdown", (event) => {
+  if (!tagPopoverOpen) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest("#tag-filter-popover") || target?.closest("#toggle-tag-popover")) return;
+  tagPopoverOpen = false;
+  unmountTagPopover();
+});
 window.addEventListener("keydown", (event) => {
   if (state.editorOpen) {
     if (event.key === "Escape") {
@@ -6501,6 +6789,14 @@ window.addEventListener("keydown", (event) => {
       return;
     }
   }
+  // The toolbar tag popover closes before the "/" shortcut / preview Escape
+  // paths can act on the same keypress.
+  if (tagPopoverOpen && event.key === "Escape") {
+    event.preventDefault();
+    tagPopoverOpen = false;
+    unmountTagPopover();
+    return;
+  }
   if (state.previewIndex === null) {
     if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
       event.preventDefault();
@@ -6510,6 +6806,15 @@ window.addEventListener("keydown", (event) => {
   }
   const target = event.target as HTMLElement | null;
   const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable === true;
+  // The preview tag picker swallows Escape first so it closes without taking
+  // the whole preview down, even while its search input holds focus.
+  if (previewTagPickerOpen && event.key === "Escape") {
+    event.preventDefault();
+    previewTagPickerOpen = false;
+    previewTagPickerQuery = "";
+    rerenderPreviewMetaPanel();
+    return;
+  }
   if (typing) return;
   if (event.key === "Escape") {
     // Fullscreen Escape should only leave fullscreen, not close the modal.
@@ -6748,6 +7053,9 @@ void onAiProgress((progress) => {
   }
   state.aiJobId = null;
   state.aiConfirming = false;
+  // The batch may have retagged any item in the library; drop every cached
+  // preview so an open/reopened modal refetches fresh AI meta.
+  previewAssetCache.clear();
   state.settingsNotice =
     progress.state === "completed"
       ? `AI 处理完成：成功 ${progress.succeeded}，失败 ${progress.failed}${progress.skipped ? `，跳过 ${progress.skipped}` : ""}`

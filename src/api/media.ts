@@ -176,8 +176,8 @@ export interface PreviewMetaDto {
   tags: TagDto[];
   /** AI 生成的一句话描述（未处理时缺省）。 */
   aiCaption?: string;
-  /** AI 标签名列表（模型原样输出）。 */
-  aiTags?: string[];
+  /** AI 打标的标签（独立关联表，解析为真实标签行、可单独移除）。 */
+  aiTags?: TagDto[];
 }
 
 export interface MediaPreviewDto {

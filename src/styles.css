@@ -927,17 +927,65 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 }
 .tag-add-form input:focus { border-color:rgba(0,0,0,.28); }
 .tag-add-form .outline-button { padding:6px 10px; font-size:11px; }
-.tag-suggest-row { display:flex; flex-wrap:wrap; gap:4px; margin-top:7px; }
-.tag-suggest {
-  padding:3px 8px;
-  border:1px dashed rgba(0,0,0,.14);
+/* ── Tag picker (preview panel) and toolbar tag popover ─────────────────── */
+.tag-add-button {
+  margin-top:7px;
+  padding:3px 10px;
+  border:1px dashed rgba(0,0,0,.18);
   border-radius:999px;
   color:#555555;
   background:transparent;
-  font-size:10px;
+  font-size:11px;
   cursor:pointer;
 }
-.tag-suggest:hover { color:#111111; background:rgba(255,255,255,.65); }
+.tag-add-button:hover { color:#111111; background:rgba(255,255,255,.65); }
+/* Attached-tag rows scroll instead of stretching the info panel indefinitely. */
+.meta-tags-block .tag-chip-row, .meta-ai-block .tag-chip-row { max-height:96px; overflow-y:auto; scrollbar-width:thin; }
+.tag-picker {
+  margin-top:7px;
+  border:1px solid rgba(0,0,0,.1);
+  border-radius:10px;
+  background:rgba(255,255,255,.92);
+  box-shadow:0 10px 28px rgba(0,0,0,.12);
+  overflow:hidden;
+}
+.tag-picker-search { display:flex; align-items:center; gap:6px; padding:7px 9px; border-bottom:1px solid rgba(0,0,0,.07); color:#888888; }
+.tag-picker-search input { flex:1; min-width:0; border:0; background:transparent; color:#222222; font-size:11px; outline:0; }
+.tag-picker-list { display:flex; max-height:200px; flex-direction:column; gap:1px; overflow-y:auto; padding:4px; scrollbar-color:rgba(0,0,0,.2) transparent; scrollbar-width:thin; }
+.tag-picker-row {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 8px;
+  border:0;
+  border-radius:7px;
+  background:transparent;
+  color:#333333;
+  font-size:11px;
+  text-align:left;
+  cursor:pointer;
+}
+.tag-picker-row:hover { background:rgba(0,0,0,.05); }
+.tag-picker-row .tag-picker-name { display:inline-flex; flex:1; align-items:center; gap:4px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tag-picker-row .tag-picker-count { flex-shrink:0; color:#999999; font-size:10px; }
+.tag-picker-row .tag-picker-check { visibility:hidden; color:#111111; font-weight:700; }
+.tag-picker-row.is-active { background:rgba(0,0,0,.06); font-weight:650; }
+.tag-picker-row.is-active .tag-picker-check { visibility:visible; }
+.tag-picker-empty { padding:10px 8px; color:#999999; font-size:11px; text-align:center; }
+/* Toolbar variant floats over the media grid, anchored below「更多标签」. */
+.tag-popover {
+  position:absolute;
+  z-index:9;
+  width:264px;
+  border:1px solid rgba(0,0,0,.1);
+  border-radius:12px;
+  background:rgba(255,255,255,.97);
+  box-shadow:0 18px 44px rgba(0,0,0,.18);
+  overflow:hidden;
+  animation:filters-expand .18s ease both;
+}
+.tag-popover .tag-picker-list { max-height:280px; }
+.filter-chip-more { display:inline-flex; align-items:center; gap:5px; }
 
 .batch-tag-row {
   display:inline-flex;
@@ -2632,11 +2680,29 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   color: var(--ink);
 }
 [data-theme="dark"] .tag-add-form input:focus { border-color: rgba(255,255,255,.3); }
-[data-theme="dark"] .tag-suggest {
+[data-theme="dark"] .tag-add-button {
   border-color: rgba(255,255,255,.2);
   color: var(--muted);
 }
-[data-theme="dark"] .tag-suggest:hover { color: var(--ink); background: var(--chip-hover); }
+[data-theme="dark"] .tag-add-button:hover { color: var(--ink); background: var(--chip-hover); }
+[data-theme="dark"] .tag-picker {
+  border-color: rgba(255,255,255,.12);
+  background: rgba(30,30,32,.97);
+  box-shadow: 0 14px 34px rgba(0,0,0,.5);
+}
+[data-theme="dark"] .tag-picker-search { border-color: rgba(255,255,255,.08); color: var(--faint); }
+[data-theme="dark"] .tag-picker-search input { color: var(--ink); }
+[data-theme="dark"] .tag-picker-row { color: var(--ink); }
+[data-theme="dark"] .tag-picker-row:hover { background: var(--chip-hover); }
+[data-theme="dark"] .tag-picker-row .tag-picker-count { color: var(--faint); }
+[data-theme="dark"] .tag-picker-row .tag-picker-check { color: var(--ink); }
+[data-theme="dark"] .tag-picker-row.is-active { background: rgba(255,255,255,.08); }
+[data-theme="dark"] .tag-picker-empty { color: var(--faint); }
+[data-theme="dark"] .tag-popover {
+  border-color: rgba(255,255,255,.12);
+  background: rgba(28,28,30,.97);
+  box-shadow: 0 18px 44px rgba(0,0,0,.55);
+}
 [data-theme="dark"] .batch-tag-row { border-left-color: var(--border-hairline); }
 [data-theme="dark"] .batch-tag-row select {
   border-color: var(--border-control);

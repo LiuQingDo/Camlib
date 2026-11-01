@@ -1892,6 +1892,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(details.ai_caption.as_deref(), Some("湖边秋色"));
-        assert_eq!(details.ai_tags, vec!["风景", "秋"]);
+        // Relation-table order is name-sorted, so compare as a set.
+        assert_eq!(
+            details
+                .ai_tags
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["风景", "秋"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 }

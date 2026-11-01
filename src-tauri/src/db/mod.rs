@@ -626,17 +626,21 @@ impl Repository {
         let ai = self
             .get_media_ai(&id)?
             .filter(|row| row.status == "success");
+        // AI tags resolve through the relation table so each carries a real
+        // tag id the UI can detach individually; tags whose row was deleted
+        // (cascade) naturally drop out instead of lingering as bare strings.
+        let ai_tags = if ai.is_some() {
+            self.list_ai_tags_for_media(id)?
+        } else {
+            Vec::new()
+        };
         Ok(Some(MediaItemDetails {
             item,
             files,
             favorite,
             tags,
             ai_caption: ai.as_ref().and_then(|row| row.caption.clone()),
-            ai_tags: ai
-                .as_ref()
-                .and_then(|row| row.tags_json.as_deref())
-                .and_then(|json| serde_json::from_str(json).ok())
-                .unwrap_or_default(),
+            ai_tags,
         }))
     }
 
@@ -1077,6 +1081,21 @@ impl Repository {
                             WHERE mat.tag_id = t.id AND mat.media_item_id = ?1)
              FROM tags t JOIN media_tags mt ON mt.tag_id = t.id
              WHERE mt.media_item_id = ?1 ORDER BY t.name COLLATE NOCASE, t.id",
+        )?;
+        let rows = statement.query_map([media_item_id], map_tag)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Tags attached to one item via AI (`media_ai_tags`), with real tag ids
+    /// so the UI can detach them individually. `has_ai` here flags tags the
+    /// item also carries through the user-managed `media_tags` table.
+    pub fn list_ai_tags_for_media(&self, media_item_id: &str) -> DbResult<Vec<Tag>> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.id, t.name, t.color, t.created_at, 0,
+                    EXISTS (SELECT 1 FROM media_tags mt
+                            WHERE mt.tag_id = t.id AND mt.media_item_id = ?1)
+             FROM tags t JOIN media_ai_tags mat ON mat.tag_id = t.id
+             WHERE mat.media_item_id = ?1 ORDER BY t.name COLLATE NOCASE, t.id",
         )?;
         let rows = statement.query_map([media_item_id], map_tag)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2230,9 +2249,10 @@ pub struct MediaItemDetails {
     /// AI-generated one-line description; `None` when AI is unprocessed.
     #[serde(default)]
     pub ai_caption: Option<String>,
-    /// AI tag names as produced by the chat model (independent of `tags`).
+    /// Tags attached via AI (`media_ai_tags`), resolved to real tag rows so
+    /// they stay individually detachable; independent of `tags`.
     #[serde(default)]
-    pub ai_tags: Vec<String>,
+    pub ai_tags: Vec<Tag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
