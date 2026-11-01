@@ -2325,6 +2325,102 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 [data-theme="dark"] .settings-ffmpeg.is-ok { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
 [data-theme="dark"] .settings-ffmpeg.is-missing { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
 
+/* ── 侧边栏 AI 区块 ─────────────────────────────────────────────────────── */
+.ai-section { flex:0 0 auto; }
+.ai-sidebar-stats {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:6px;
+  margin:0 0 8px;
+}
+.ai-sidebar-stats > div {
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  padding:7px 9px;
+  border:1px solid rgba(255,255,255,.7);
+  border-radius:12px;
+  background:rgba(255,255,255,.4);
+}
+.ai-sidebar-stats dt {
+  color:#8a8a8a;
+  font-size:9px;
+  font-weight:700;
+  letter-spacing:.06em;
+}
+.ai-sidebar-stats dd {
+  margin:0;
+  color:#111111;
+  font-size:14px;
+  font-weight:750;
+  font-variant-numeric:tabular-nums;
+}
+.ai-sidebar-stats > div.has-failed dd { color:#8a2a2a; }
+.ai-sidebar-hint {
+  margin:0 0 8px;
+  padding:8px 10px;
+  border-radius:12px;
+  color:#8a8a8a;
+  font-size:11px;
+  background:rgba(255,255,255,.3);
+}
+.ai-sidebar-actions {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:0 2px;
+}
+.ai-sidebar-actions .text-button { font-weight:700; }
+.ai-single-progress {
+  margin:0 0 8px;
+  padding:8px 10px;
+  border:1px solid rgba(255,255,255,.7);
+  border-radius:12px;
+  background:rgba(255,255,255,.4);
+}
+.ai-single-copy {
+  display:flex;
+  align-items:center;
+  gap:7px;
+  font-size:11px;
+  font-weight:700;
+}
+.ai-single-copy .spinner { width:12px; height:12px; }
+.ai-single-copy .text-button { margin-left:auto; }
+.ai-single-progress .progress-track { margin-top:6px; }
+.ai-single-current {
+  margin-top:5px;
+  overflow:hidden;
+  color:#8a8a8a;
+  font-size:10px;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.ai-single-notice {
+  margin:0 0 8px;
+  padding:7px 10px;
+  border-radius:12px;
+  color:#1f6b3a;
+  font-size:11px;
+  line-height:1.5;
+  background:rgba(31,107,58,.08);
+}
+.meta-ai-tools { margin-left:auto; }
+.meta-ai-caption.meta-ai-empty { color:#999999; }
+
+[data-theme="dark"] .ai-sidebar-stats > div,
+[data-theme="dark"] .ai-single-progress {
+  border-color: var(--border-hairline);
+  background: var(--control-bg, rgba(255,255,255,.06));
+}
+[data-theme="dark"] .ai-sidebar-stats dt { color: var(--faint); }
+[data-theme="dark"] .ai-sidebar-stats dd { color: var(--ink); }
+[data-theme="dark"] .ai-sidebar-stats > div.has-failed dd { color: var(--danger); }
+[data-theme="dark"] .ai-sidebar-hint { color: var(--faint); background: rgba(255,255,255,.04); }
+[data-theme="dark"] .ai-single-current { color: var(--faint); }
+[data-theme="dark"] .ai-single-notice { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
+[data-theme="dark"] .meta-ai-caption.meta-ai-empty { color: var(--faint); }
+
 /* ── AI 增强（自动打标 + 语义搜索） ─────────────────────────────────────── */
 
 /* AI 徽标：标签筛选区与详情面板共用的小号角标。 */

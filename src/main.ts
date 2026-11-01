@@ -117,6 +117,7 @@ import {
   getAiConfig,
   getAiStats,
   previewAiProcess,
+  processAiItem,
   setAiConfig,
   startAiProcess,
   testAiConnection,
@@ -302,6 +303,13 @@ interface AppState {
   semanticDraft: string;
   semanticMeta: AiSearchResultDto["parsed"] | null;
   semanticMode: AiSearchResultDto["mode"] | null;
+  /** 单张/选中打标（前端逐张调用单条命令）的进行中状态。 */
+  aiSingleBusy: boolean;
+  aiSingleTotal: number;
+  aiSingleDone: number;
+  aiSingleFailed: number;
+  aiSingleCurrent: string | null;
+  aiSingleNotice: string | null;
 }
 
 const state: AppState = {
@@ -445,6 +453,12 @@ const state: AppState = {
   semanticDraft: "",
   semanticMeta: null,
   semanticMode: null,
+  aiSingleBusy: false,
+  aiSingleTotal: 0,
+  aiSingleDone: 0,
+  aiSingleFailed: 0,
+  aiSingleCurrent: null,
+  aiSingleNotice: null,
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "ai" | "system" | "about";
@@ -1406,6 +1420,10 @@ function bindSelectionToolbarEvents(): void {
   app.querySelector<HTMLButtonElement>("#favorite-selected")?.addEventListener("click", () => void applyBatchFavorite(true));
   app.querySelector<HTMLButtonElement>("#unfavorite-selected")?.addEventListener("click", () => void applyBatchFavorite(false));
   app.querySelector<HTMLButtonElement>("#batch-tag-attach")?.addEventListener("click", () => void applyBatchTag(true));
+  app.querySelector<HTMLButtonElement>("#batch-ai-tag")?.addEventListener("click", () => {
+    const ids = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video").map((item) => item.id);
+    void runAiTagging(ids);
+  });
   app.querySelector<HTMLButtonElement>("#batch-tag-detach")?.addEventListener("click", () => void applyBatchTag(false));
   app.querySelector<HTMLButtonElement>("#batch-rating-apply")?.addEventListener("click", () => void applyBatchRating());
   app.querySelector<HTMLButtonElement>("#merge-selected")?.addEventListener("click", () => void openMergeModal());
@@ -2068,7 +2086,14 @@ function renderSelectionToolbar(): string {
     mergeUnavailable || state.mergeBusy || state.mergeJobId || state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available",
   );
   const mergeTitle = mergeUnavailable || "将所选视频按顺序合并为一个新文件";
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
+  const aiEligible = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video");
+  const aiDisabled = Boolean(
+    state.aiSingleBusy || state.aiJobId || state.availability !== "available" || (selectedCount > 0 && aiEligible.length === 0),
+  );
+  const aiTitle = aiEligible.length === 0 && selectedCount > 0
+    ? "所选项目中没有可打标的照片（视频暂不支持）"
+    : `对所选 ${formatCount(aiEligible.length)} 张照片执行 AI 打标`;
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="batch-ai-tag" type="button" title="${escapeHtml(aiTitle)}" ${aiDisabled ? "disabled" : ""}>${state.aiSingleBusy ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…` : `✦ AI 打标`}</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderDeleteFeedback(): string {
@@ -3133,6 +3158,28 @@ function updateSettingsPanel(options?: { animate?: boolean }): void {
   bindSettingsEvents();
 }
 
+/**
+ * Sidebar AI section: run counters plus quick entries for semantic search,
+ * batch processing and the settings. Only rendered once a library exists.
+ */
+function renderAiSidebarSection(): string {
+  if (!state.library) return "";
+  const stats = state.aiStats;
+  const busy = state.aiSingleBusy;
+  const progressPercent = state.aiSingleTotal > 0
+    ? Math.min(100, Math.round((state.aiSingleDone / state.aiSingleTotal) * 100))
+    : 0;
+  const statsRow = stats
+    ? `<dl class="ai-sidebar-stats"><div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div><div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div><div class="${stats.failed > 0 ? "has-failed" : ""}"><dt>失败</dt><dd>${formatCount(stats.failed)}</dd></div></dl>`
+    : `<div class="ai-sidebar-hint">加载统计…</div>`;
+  return `<div class="sidebar-section ai-section" aria-label="AI 增强"><div class="section-label"><span>AI 增强</span><span class="section-actions"><button class="icon-button" id="ai-open-settings" title="AI 设置" aria-label="AI 设置">⚙</button></span></div>
+    ${statsRow}
+    ${busy ? `<div class="ai-single-progress" id="ai-single-progress"><div class="ai-single-copy"><span class="spinner"></span><span data-ai-single-count>${state.aiSingleDone} / ${state.aiSingleTotal}</span><button class="text-button" id="ai-single-cancel" type="button">取消</button></div><div class="progress-track"><span data-ai-single-track style="width:${progressPercent}%"></span></div><div class="ai-single-current" data-ai-single-current>${escapeHtml(state.aiSingleCurrent ?? "")}</div></div>`
+      : state.aiSingleNotice ? `<div class="ai-single-notice">${escapeHtml(state.aiSingleNotice)}</div>` : ""}
+    <div class="ai-sidebar-actions"><button class="text-button" id="ai-semantic-focus" type="button">✦ 语义搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
+  </div>`;
+}
+
 function render(): void {
   // Full innerHTML rebuild resets the scroller. Keep the user's place unless a
   // caller explicitly scrolls away (refreshMedia → scrollToContentTop).
@@ -3145,6 +3192,7 @@ function render(): void {
     <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/camlib-icon.png" alt="" width="37" height="37" /></span><div><strong>Camlib</strong><span>媒体库</span></div><button class="icon-button brand-settings" type="button" id="settings-button-top" title="设置" aria-label="打开设置">⚙</button></div>
     <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
     <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
+    ${renderAiSidebarSection()}
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button theme-toggle" type="button" title="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" id="theme-toggle" aria-label="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
@@ -3374,6 +3422,18 @@ function bindEvents(): void {
   });
   app.querySelector<HTMLButtonElement>("#semantic-search-button")?.addEventListener("click", () => commitSemanticSearch());
   app.querySelector<HTMLButtonElement>("#exit-semantic-search")?.addEventListener("click", () => exitSemanticSearch());
+  // Sidebar AI section entries.
+  app.querySelector<HTMLButtonElement>("#ai-open-settings")?.addEventListener("click", () => void openSettings("ai"));
+  app.querySelector<HTMLButtonElement>("#ai-open-batch")?.addEventListener("click", () => void openSettings("ai"));
+  app.querySelector<HTMLButtonElement>("#ai-semantic-focus")?.addEventListener("click", () => {
+    state.filtersExpanded = true;
+    render();
+    app.querySelector<HTMLInputElement>("#semantic-search-input")?.focus();
+  });
+  app.querySelector<HTMLButtonElement>("#ai-single-cancel")?.addEventListener("click", () => {
+    // The sequential loop checks this flag before each photo.
+    state.aiSingleBusy = false;
+  });
   app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => {
     state.sort = (event.target as HTMLSelectElement).value as SortMode;
     void persistUiPrefs({ uiSort: state.sort });
@@ -4057,6 +4117,83 @@ async function cancelAiRun(): Promise<void> {
   }
 }
 
+/** Sidebar counters; failures keep the previous values visible. */
+async function loadAiStats(): Promise<void> {
+  if (!state.library) {
+    state.aiStats = null;
+    return;
+  }
+  try {
+    state.aiStats = await getAiStats(state.library.id);
+  } catch {
+    // Sidebar keeps showing the previous counters; settings reloads on entry.
+  }
+}
+
+/**
+ * Tag one or a few photos with the single-item command, sequentially. This is
+ * the "optional per-photo" path next to the background batch run: no job, no
+ * preview gate — just immediate feedback per photo in the sidebar progress.
+ */
+async function runAiTagging(ids: string[]): Promise<void> {
+  if (state.aiSingleBusy || ids.length === 0) return;
+  state.aiSingleBusy = true;
+  state.aiSingleTotal = ids.length;
+  state.aiSingleDone = 0;
+  state.aiSingleFailed = 0;
+  state.aiSingleCurrent = null;
+  state.aiSingleNotice = null;
+  render();
+  const names = new Map(state.page.items.map((entry) => [entry.id, entry.displayName]));
+  for (const id of ids) {
+    if (!state.aiSingleBusy) break;
+    state.aiSingleCurrent = names.get(id) ?? id;
+    updateAiSingleProgress();
+    try {
+      const result = await processAiItem(id);
+      if (result.status === "skipped") state.aiSingleFailed++;
+    } catch (error) {
+      state.aiSingleFailed++;
+      state.aiSingleNotice = toDetailedMessage(error, "AI 打标失败");
+    }
+    state.aiSingleDone++;
+    updateAiSingleProgress();
+  }
+  const succeeded = state.aiSingleDone - state.aiSingleFailed;
+  state.aiSingleBusy = false;
+  state.aiSingleCurrent = null;
+  state.aiSingleNotice = state.aiSingleDone === state.aiSingleTotal
+    ? `AI 打标完成：成功 ${formatCount(succeeded)}${state.aiSingleFailed ? `，失败/跳过 ${formatCount(state.aiSingleFailed)}` : ""}`
+    : "AI 打标已取消";
+  await Promise.all([refreshTags(), loadAiStats()]);
+  render();
+  // The open preview may show one of the just-tagged items — reload its meta
+  // so the new AI description and tags appear without closing the dialog.
+  if (state.previewIndex !== null) {
+    const item = state.page.items[state.previewIndex];
+    if (item && ids.includes(item.id)) void loadModalAsset();
+  }
+}
+
+/** Patch the sidebar progress (and toolbar label) without a full rebuild. */
+function updateAiSingleProgress(): void {
+  const progress = app.querySelector<HTMLElement>("#ai-single-progress");
+  if (progress) {
+    progress.querySelector<HTMLElement>("[data-ai-single-count]")!.textContent =
+      `${state.aiSingleDone} / ${state.aiSingleTotal}`;
+    progress.querySelector<HTMLElement>("[data-ai-single-current]")!.textContent =
+      state.aiSingleCurrent ?? "";
+    const track = progress.querySelector<HTMLElement>("[data-ai-single-track]");
+    if (track) {
+      track.style.width = `${Math.min(100, Math.round((state.aiSingleDone / Math.max(1, state.aiSingleTotal)) * 100))}%`;
+    }
+  }
+  const toolbar = app.querySelector<HTMLButtonElement>("#batch-ai-tag");
+  if (toolbar) {
+    toolbar.textContent = `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…`;
+  }
+}
+
 async function saveSystemSettings(): Promise<void> {
   const behaviorSelect = app.querySelector<HTMLSelectElement>("#settings-close-behavior");
   const notifications = app.querySelector<HTMLInputElement>("#settings-notifications");
@@ -4285,9 +4422,9 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
         ? `<div class="tag-suggest-row">${tagSuggestions}</div>`
         : (state.tags.length ? `<div class="tag-empty">该媒体已带有全部标签</div>` : `<div class="tag-empty">还没有标签，请先在「标签管理」中新建</div>`)}
     </div>
-    ${meta.aiCaption || (meta.aiTags && meta.aiTags.length) ? `<div class="meta-ai-block">
-      <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span></div>
-      ${meta.aiCaption ? `<p class="meta-ai-caption">${escapeHtml(meta.aiCaption)}</p>` : ""}
+    ${item.kind !== "video" ? `<div class="meta-ai-block">
+      <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span><span class="meta-ai-tools">${(meta.aiCaption || (meta.aiTags && meta.aiTags.length)) ? `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>重新打标</button>` : `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>AI 打标</button>`}</span></div>
+      ${meta.aiCaption ? `<p class="meta-ai-caption">${escapeHtml(meta.aiCaption)}</p>` : `<p class="meta-ai-caption meta-ai-empty">尚未生成。将发送该照片缩略图到你配置的 AI 服务。</p>`}
       ${meta.aiTags && meta.aiTags.length ? `<div class="tag-chip-row">${meta.aiTags.map((tag) => `<span class="tag-chip tag-chip-ai"><i class="ai-badge" aria-hidden="true">AI</i><span>${escapeHtml(tag)}</span></span>`).join("")}</div>` : ""}
     </div>` : ""}
     <h4>关联文件</h4>
@@ -4340,6 +4477,10 @@ function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): void {
   });
   panel.querySelector<HTMLButtonElement>("#open-tag-manager-from-preview")?.addEventListener("click", () => {
     openTagManager();
+  });
+  panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.addEventListener("click", () => {
+    const mediaId = panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.dataset.mediaId || item.id;
+    void runAiTagging([mediaId]);
   });
 }
 
@@ -6286,6 +6427,7 @@ async function bootstrap(): Promise<void> {
       state.facets = await listDateFacets(state.library.id);
       resetSidebarExpansionForSelection();
       void refreshTags();
+      void loadAiStats();
       await refreshMedia();
       void maybeAutoScan();
     }
@@ -6614,7 +6756,7 @@ void onAiProgress((progress) => {
         : `AI 处理失败：${progress.error ?? "未知错误"}`;
   // Refresh counters (and tags, since AI tagging may add new ones) after a run.
   void refreshTags();
-  if (state.library) void getAiStats(state.library.id).then((stats) => { state.aiStats = stats; });
+  if (state.library) void loadAiStats().then(() => renderSettingsAware());
   if (state.settingsOpen) {
     updateSettingsPanel();
     void loadSettingsSectionData().then(() => updateSettingsPanel());
