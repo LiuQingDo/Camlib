@@ -68,6 +68,8 @@ export interface TagDto {
   color: string | null;
   createdAt: string;
   mediaCount?: number;
+  /** AI 打标曾使用过该标签（media_ai_tags 中存在关联）。 */
+  hasAi?: boolean;
 }
 
 export interface MediaItemDetailsDto {
@@ -172,6 +174,10 @@ export interface PreviewMetaDto {
   scanState: ScanState;
   files: PreviewFileDto[];
   tags: TagDto[];
+  /** AI 生成的一句话描述（未处理时缺省）。 */
+  aiCaption?: string;
+  /** AI 标签名列表（模型原样输出）。 */
+  aiTags?: string[];
 }
 
 export interface MediaPreviewDto {

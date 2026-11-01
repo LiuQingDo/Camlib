@@ -1,7 +1,7 @@
 # Camlib SQLite 数据模型
 
 > 真相来源：`src-tauri/src/db/migrations/`  
-> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 6`（`src-tauri/src/db/mod.rs`）  
+> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 7`（`src-tauri/src/db/mod.rs`）  
 > 迁移在应用启动时按版本顺序自动执行；版本过高时拒绝打开，避免降级损坏。
 
 ## 1. 设计原则
@@ -23,6 +23,7 @@
 | 4 | `0004_backup_items.sql` | backup_items（备份单文件状态） |
 | 5 | `0005_media_ratings.sql` | media_ratings（1–5 星评分） |
 | 6 | `0006_backup_merge.sql` | backup_items.merge_sources_json（相机分段合并源列表） |
+| 7 | `0007_ai_tags.sql` | media_ai、media_ai_tags（AI 自动打标 + 语义搜索，可选增强） |
 
 ## 3. 表结构（与迁移对齐）
 
@@ -192,6 +193,37 @@ CREATE TABLE media_ratings (
 - 评分存在独立 `media_ratings` 表；`rating = 0` 表示未评分（删除行）。
 - 扫描 upsert **不得**改写 favorites / tags / ratings。
 
+### AI 增强（v7，可选功能）
+
+```sql
+CREATE TABLE media_ai (
+  media_item_id   TEXT PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+  caption         TEXT,                -- 对话模型生成的一句话中文描述
+  tags_json       TEXT,                -- 打标时的标签名快照（筛选以关系表为准）
+  embedding       BLOB,                -- caption 向量（little-endian f32）
+  embedding_model TEXT,                -- 生成向量的模型名；检索只匹配同名模型
+  ai_model        TEXT,
+  embedding_dim   INTEGER,
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed')),
+  error_message   TEXT,
+  processed_at    TEXT
+);
+
+CREATE TABLE media_ai_tags (
+  media_item_id  TEXT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  tag_id         TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (media_item_id, tag_id)
+);
+```
+
+说明：
+
+- AI 标签**不写入** `media_tags`：`tag_detach` 等用户操作不会误删 AI 关联；同名标签复用 `tags` 表同一行（`tags.name` 唯一），`list_tags` 投影 `has_ai` 供筛选区加 AI 徽标。
+- `query_media` 的 `tag_ids` 过滤同时匹配 `media_tags` 与 `media_ai_tags`（AND 语义不变）。
+- `embedding` 仅作暴力余弦检索（Rust 端，top-K + 阈值），不引入向量扩展；更换 embedding 模型后需全量重算，检索按 `embedding_model` 过滤避免混用维度。
+- AI 配置存于 `app_settings` 表（key = `ai_config`），含总开关与两组模型配置；功能默认关闭。
+
 ## 4. 索引与查询约定
 
 v1 已建索引包括：
@@ -208,6 +240,8 @@ idx_media_tags_tag
 idx_backup_runs_target_status
 idx_backup_items_run_status      -- v4
 idx_media_ratings_rating         -- v5
+idx_media_ai_status              -- v7
+idx_media_ai_tags_tag            -- v7
 ```
 
 文件名搜索使用 `display_name LIKE ? ESCAPE '\\'` 并对用户输入做通配符转义；数据量增大后再评估 FTS5。日期导航、类型统计、收藏/评分过滤由 SQL 聚合完成，不在前端持有全库数组。

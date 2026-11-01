@@ -34,6 +34,9 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled", "collation"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 exif = { package = "kamadak-exif", version = "0.6" }
+# Optional AI enhancement: OpenAI-compatible chat + embeddings over HTTPS.
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell"] }

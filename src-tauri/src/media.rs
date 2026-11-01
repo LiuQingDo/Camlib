@@ -90,6 +90,12 @@ pub struct PreviewMetaDto {
     pub scan_state: String,
     pub files: Vec<PreviewFileDto>,
     pub tags: Vec<crate::db::Tag>,
+    /// AI-generated description (None when the item is unprocessed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_caption: Option<String>,
+    /// AI tag names as produced by the chat model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -714,6 +720,8 @@ pub fn preview_meta(details: &MediaItemDetails) -> PreviewMetaDto {
             })
             .collect(),
         tags: details.tags.clone(),
+        ai_caption: details.ai_caption.clone(),
+        ai_tags: details.ai_tags.clone(),
     }
 }
 
@@ -1132,7 +1140,10 @@ mod tests {
                 color: None,
                 created_at: "unix-ms:5".to_owned(),
                 media_count: 1,
+                has_ai: false,
             }],
+            ai_caption: None,
+            ai_tags: Vec::new(),
         };
 
         let registry = MediaStreamRegistry::default();
@@ -1179,6 +1190,8 @@ mod tests {
             )],
             favorite: false,
             tags: vec![],
+            ai_caption: None,
+            ai_tags: Vec::new(),
         };
         details.files[0].exists_now = false;
         let registry = MediaStreamRegistry::default();

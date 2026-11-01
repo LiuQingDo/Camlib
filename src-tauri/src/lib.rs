@@ -1,3 +1,4 @@
+mod ai;
 mod backup;
 pub mod db;
 mod deletion;
@@ -10,6 +11,7 @@ mod scanner;
 mod system;
 mod video_merge;
 
+use ai::{AiConfig, AiJobManagerState, AiRunMode, AiTransport};
 use backup::{
     BackupManagerState, BackupPreviewDto, BackupPreviewRequest, BackupStartResponse,
     BackupVolumeDto,
@@ -390,6 +392,7 @@ fn media_query(
                 date_to: query.date_to,
                 first_seen_from: query.first_seen_from,
                 tag_ids: query.tag_ids.unwrap_or_default(),
+                item_ids: Vec::new(),
                 rating_eq: query.rating_eq,
                 rating_min: query.rating_min,
                 offset: query.offset.unwrap_or(0),
@@ -1452,6 +1455,326 @@ fn library_merge_cancel(
     merges.cancel(&job_id)
 }
 
+// ── AI enhancement (optional, cloud API) ────────────────────────────────────
+
+#[tauri::command]
+fn ai_get_config(state: State<'_, InfrastructureState>) -> Result<AiConfig, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
+    })
+}
+
+#[tauri::command]
+fn ai_set_config(
+    config: AiConfig,
+    state: State<'_, InfrastructureState>,
+) -> Result<AiConfig, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        ai::save_config(infrastructure.repository(), config).map_err(InfrastructureError::App)
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiTestResultDto {
+    ok: bool,
+    message: String,
+    latency_ms: u64,
+    dimension: Option<i64>,
+}
+
+/// Minimal reachability probe for one endpoint group. Works while AI is still
+/// disabled so users can validate credentials before turning the feature on.
+#[tauri::command]
+fn ai_test_connection(
+    target: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<AiTestResultDto, AppError> {
+    let config = state.with_infrastructure(|infrastructure| {
+        ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
+    })?;
+    let transport = ai::UreqTransport;
+    let started = std::time::Instant::now();
+    match target.as_str() {
+        "chat" => {
+            if !config.chat_ready() {
+                return Ok(AiTestResultDto {
+                    ok: false,
+                    message: "请先填写对话模型 Base URL 与模型名称".to_owned(),
+                    latency_ms: 0,
+                    dimension: None,
+                });
+            }
+            let reply = transport.chat(&config, "请只回复两个字：正常", None)?;
+            let latency = started.elapsed().as_millis() as u64;
+            Ok(AiTestResultDto {
+                ok: !reply.trim().is_empty(),
+                message: format!("模型 {} 已连通（{latency} ms）", config.chat_model),
+                latency_ms: latency,
+                dimension: None,
+            })
+        }
+        "embedding" => {
+            if !config.embedding_ready() {
+                return Ok(AiTestResultDto {
+                    ok: false,
+                    message: "请先填写 Embedding 模型 Base URL 与模型名称".to_owned(),
+                    latency_ms: 0,
+                    dimension: None,
+                });
+            }
+            let vector = transport.embed(&config, "连通性测试")?;
+            let latency = started.elapsed().as_millis() as u64;
+            Ok(AiTestResultDto {
+                ok: true,
+                message: format!(
+                    "模型 {} 已连通，向量维度 {}（{latency} ms）",
+                    config.embedding_model,
+                    vector.len()
+                ),
+                latency_ms: latency,
+                dimension: Some(vector.len() as i64),
+            })
+        }
+        other => Err(AppError::invalid_argument(format!(
+            "不支持的测试目标: {other}"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiStatsDto {
+    total_photos: i64,
+    processed: i64,
+    failed: i64,
+    pending: i64,
+    missing_embedding: i64,
+    embedding_model: Option<String>,
+}
+
+/// Counters for the settings AI card.
+#[tauri::command]
+fn ai_stats(
+    library_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<AiStatsDto, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        let repository = infrastructure.repository();
+        let config = ai::load_config(repository).map_err(InfrastructureError::App)?;
+        let stats = repository
+            .ai_stats(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)?;
+        let missing_embedding = if config.embedding_ready() {
+            repository
+                .list_ai_missing_embeddings(&library_id, config.embedding_model.trim())
+                .map_err(infrastructure::InfrastructureError::database)?
+                .len() as i64
+        } else {
+            0
+        };
+        Ok(AiStatsDto {
+            total_photos: stats.total_photos,
+            processed: stats.processed,
+            failed: stats.failed,
+            pending: stats.pending,
+            missing_embedding,
+            embedding_model: config
+                .embedding_ready()
+                .then(|| config.embedding_model.clone()),
+        })
+    })
+}
+
+#[tauri::command]
+fn ai_process_preview(
+    library_id: String,
+    mode: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<ai::AiProcessPreviewDto, AppError> {
+    let mode = AiRunMode::parse(&mode)?;
+    state.with_infrastructure(|infrastructure| {
+        let repository = infrastructure.repository();
+        let config = ai::load_config(repository).map_err(InfrastructureError::App)?;
+        ai::validate_config_for_run(&config).map_err(InfrastructureError::App)?;
+        ai::preview(repository, &config, &library_id, mode).map_err(InfrastructureError::App)
+    })
+}
+
+/// Start a cancellable AI batch run; progress arrives on `ai-progress`.
+#[tauri::command]
+fn ai_process_start(
+    library_id: String,
+    mode: String,
+    app: AppHandle,
+    infrastructure: State<'_, InfrastructureState>,
+    jobs: State<'_, AiJobManagerState>,
+) -> Result<ai::AiJobStartDto, AppError> {
+    let mode = AiRunMode::parse(&mode)?;
+    let (database_path, root, cache_dir) = infrastructure.with_infrastructure(|value| {
+        ensure_library_ready(value, &library_id)?;
+        let library = value
+            .repository()
+            .get_library(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        let settings = value.settings()?;
+        Ok((
+            value.database_path(),
+            PathBuf::from(&library.root_path),
+            PathBuf::from(&settings.thumbnail_cache_dir),
+        ))
+    })?;
+    {
+        let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
+        let config = ai::load_config(&repository)?;
+        ai::validate_config_for_run(&config)?;
+    }
+    let (job_id, cancel) = jobs.start()?;
+    ai::spawn_run(
+        app,
+        std::sync::Arc::new(jobs.inner().clone()),
+        database_path,
+        root,
+        cache_dir,
+        library_id,
+        job_id.clone(),
+        cancel,
+        mode,
+    );
+    Ok(ai::AiJobStartDto { job_id })
+}
+
+#[tauri::command]
+fn ai_process_cancel(job_id: String, jobs: State<'_, AiJobManagerState>) -> Result<(), AppError> {
+    jobs.cancel(&job_id)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiProcessItemDto {
+    status: String,
+    caption: Option<String>,
+    tags: Vec<String>,
+    message: Option<String>,
+}
+
+/// Run the full pipeline for one photo synchronously (single retry / testing).
+#[tauri::command]
+fn ai_process_item(
+    media_item_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<AiProcessItemDto, AppError> {
+    let (database_path, root, cache_dir) = state.with_infrastructure(|infrastructure| {
+        let details = infrastructure
+            .repository()
+            .get_media_item_details(&media_item_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::MediaMissing("媒体不存在".to_owned())
+            })?;
+        let library = infrastructure
+            .repository()
+            .get_library(&details.item.library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        let settings = infrastructure.settings()?;
+        Ok((
+            infrastructure.database_path(),
+            PathBuf::from(&library.root_path),
+            PathBuf::from(&settings.thumbnail_cache_dir),
+        ))
+    })?;
+    let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
+    let config = ai::load_config(&repository)?;
+    ai::validate_config_for_run(&config)?;
+    let details = repository
+        .get_media_item_details(&media_item_id)
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::media_missing("媒体不存在"))?;
+    let transport = ai::UreqTransport;
+    match ai::process_item(
+        &repository,
+        &transport,
+        &config,
+        &details,
+        &root,
+        &cache_dir,
+    )? {
+        ai::AiItemOutcome::Tagged { .. } => {
+            let row = repository
+                .get_media_ai(&media_item_id)
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError::internal("AI 结果未写入"))?;
+            Ok(AiProcessItemDto {
+                status: "success".to_owned(),
+                caption: row.caption,
+                tags: row
+                    .tags_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default(),
+                message: None,
+            })
+        }
+        ai::AiItemOutcome::Skipped => Ok(AiProcessItemDto {
+            status: "skipped".to_owned(),
+            caption: None,
+            tags: Vec::new(),
+            message: Some("缩略图不可用，已跳过".to_owned()),
+        }),
+    }
+}
+
+/// Natural-language semantic search over AI captions/embeddings.
+#[tauri::command]
+fn ai_search(
+    library_id: String,
+    query: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    state: State<'_, InfrastructureState>,
+) -> Result<ai::AiSearchResult, AppError> {
+    let config = state.with_infrastructure(|infrastructure| {
+        ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
+    })?;
+    let repository = state.with_infrastructure(|infrastructure| {
+        let path = infrastructure.database_path();
+        db::Repository::open(path)
+            .map_err(AppError::from)
+            .map_err(InfrastructureError::App)
+    })?;
+    let transport = ai::UreqTransport;
+    ai::search(
+        &repository,
+        &transport,
+        &config,
+        &library_id,
+        &query,
+        offset.unwrap_or(0),
+        limit.unwrap_or(120).clamp(1, 500),
+    )
+}
+
+/// Remove one AI tag from one photo (does not touch user tags).
+#[tauri::command]
+fn ai_tag_detach(
+    media_item_id: String,
+    tag_id: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), AppError> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .detach_ai_tag(&media_item_id, &tag_id)
+            .map_err(infrastructure::InfrastructureError::database)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let streams = MediaStreamRegistry::default();
@@ -1494,6 +1817,7 @@ pub fn run() {
             app.manage(editing::EditJobManagerState::new());
             app.manage(video_merge::VideoMergeManagerState::new());
             app.manage(PreviewJobManagerState::new());
+            app.manage(AiJobManagerState::new());
             app.manage(streams.clone());
 
             if let Some(window) = app.get_webview_window("main") {
@@ -1567,7 +1891,17 @@ pub fn run() {
             media_cut_video_segments,
             media_edit_cancel,
             media_merge_videos,
-            media_merge_cancel
+            media_merge_cancel,
+            ai_get_config,
+            ai_set_config,
+            ai_test_connection,
+            ai_stats,
+            ai_process_preview,
+            ai_process_start,
+            ai_process_cancel,
+            ai_process_item,
+            ai_search,
+            ai_tag_detach
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

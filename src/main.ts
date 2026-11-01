@@ -111,6 +111,24 @@ import {
   cancelPreviewJob,
   onPreviewProgress,
 } from "./api/media";
+import {
+  aiSearch,
+  cancelAiProcess,
+  getAiConfig,
+  getAiStats,
+  previewAiProcess,
+  setAiConfig,
+  startAiProcess,
+  testAiConnection,
+  onAiProgress,
+  type AiConfigDto,
+  type AiProcessPreviewDto,
+  type AiProgressDto,
+  type AiRunMode,
+  type AiSearchResultDto,
+  type AiStatsDto,
+  type AiTestResultDto,
+} from "./api/ai";
 
 type SortMode = UiSortMode;
 type Density = 1 | 2 | 3 | 4 | 5;
@@ -268,6 +286,22 @@ interface AppState {
   mergeProgress: VideoMergeProgressDto | null;
   mergeError: string | null;
   mergeNotice: string | null;
+  /** AI 增强（云端 API 自动打标 + 语义搜索），配置/统计/任务进度。 */
+  aiConfig: AiConfigDto | null;
+  aiStats: AiStatsDto | null;
+  aiPreview: AiProcessPreviewDto | null;
+  aiPreviewLoading: boolean;
+  aiJobId: string | null;
+  aiProgress: AiProgressDto | null;
+  aiProcessMode: AiRunMode;
+  aiConfirming: boolean;
+  aiTestBusy: "chat" | "embedding" | null;
+  aiTestResult: (AiTestResultDto & { target: "chat" | "embedding" }) | null;
+  /** 激活的语义搜索查询（null = 常规筛选模式）。 */
+  semanticSearch: string | null;
+  semanticDraft: string;
+  semanticMeta: AiSearchResultDto["parsed"] | null;
+  semanticMode: AiSearchResultDto["mode"] | null;
 }
 
 const state: AppState = {
@@ -397,15 +431,30 @@ const state: AppState = {
   mergeProgress: null,
   mergeError: null,
   mergeNotice: null,
+  aiConfig: null,
+  aiStats: null,
+  aiPreview: null,
+  aiPreviewLoading: false,
+  aiJobId: null,
+  aiProgress: null,
+  aiProcessMode: "incremental",
+  aiConfirming: false,
+  aiTestBusy: null,
+  aiTestResult: null,
+  semanticSearch: null,
+  semanticDraft: "",
+  semanticMeta: null,
+  semanticMode: null,
 };
 
-type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "system" | "about";
+type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "ai" | "system" | "about";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "library", label: "媒体库" },
   { id: "index", label: "扫描与索引" },
   { id: "thumbnails", label: "缩略图" },
   { id: "backup", label: "备份默认" },
+  { id: "ai", label: "AI 增强" },
   { id: "system", label: "系统" },
   { id: "about", label: "关于" },
 ];
@@ -678,6 +727,8 @@ const app: HTMLElement = appRoot;
 // Keep the text being composed separate from the submitted query so typing
 // never refreshes the media grid. This also preserves unsent text on redraws.
 let searchDraft = "";
+// Same draft discipline for the semantic (natural-language) search box.
+let semanticDraft = "";
 // Bootstrap re-runs after every scan terminal event. Auto-scan must only fire
 // for the first successful launch of this session so completion cannot loop.
 let startupAutoScanStarted = false;
@@ -1224,12 +1275,13 @@ function hasDateFilter(): boolean {
 }
 
 function hasAnyFilter(): boolean {
-  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null);
+  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null || state.semanticSearch);
 }
 
 /** Secondary toolbar conditions live under the collapsible「筛选」panel. */
 function secondaryFilterParts(): string[] {
   const parts: string[] = [];
+  if (state.semanticSearch) parts.push("语义搜索");
   if (state.tagIds.size) parts.push(`标签×${state.tagIds.size}`);
   if (state.datePrefix || state.dateFrom || state.dateTo) parts.push("日期");
   if (state.firstSeenFrom) parts.push("新导入");
@@ -1254,7 +1306,33 @@ function clearAllFilters(): void {
   state.tagIds.clear();
   state.ratingEq = null;
   state.ratingMin = null;
+  state.semanticSearch = null;
+  semanticDraft = "";
+  state.semanticMeta = null;
+  state.semanticMode = null;
   resetSidebarExpansionForSelection();
+  void refreshMedia();
+}
+
+/** Exit semantic search and return to the normal filter pipeline. */
+function exitSemanticSearch(): void {
+  state.semanticSearch = null;
+  semanticDraft = "";
+  state.semanticMeta = null;
+  state.semanticMode = null;
+  void refreshMedia();
+}
+
+/** Commit the semantic search box: empty input exits back to normal filters. */
+function commitSemanticSearch(): void {
+  const input = app.querySelector<HTMLInputElement>("#semantic-search-input");
+  const draft = (input?.value ?? semanticDraft).trim();
+  semanticDraft = draft;
+  state.semanticSearch = draft || null;
+  // A committed semantic query replaces the plain filename search so the two
+  // do not fight; other filters stay (the result banner explains precedence).
+  state.search = "";
+  searchDraft = "";
   void refreshMedia();
 }
 
@@ -1702,9 +1780,9 @@ function renderPrimaryFilters(): string {
 
 function renderAdvancedFilters(): string {
   const tagBlock = state.tags.length
-    ? `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}</button>`).join("")}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`
+    ? `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${state.tags.slice(0, 12).map((tag) => `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`).join("")}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`
     : `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
-  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" type="button">清除筛选</button>` : ""}</div>`;
+  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}><div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" type="button">清除筛选</button>` : ""}</div>`;
 }
 
 function renderRatingFilter(): string {
@@ -1754,6 +1832,23 @@ function scanPercentLabel(progress: ScanProgressDto): string {
 }
 
 function renderStatusBannerBase(): string {
+  if (state.semanticSearch) {
+    const meta = state.semanticMeta;
+    const modeLabel = state.semanticMode === "vector"
+      ? "向量检索"
+      : state.semanticMode === "text"
+        ? "描述/标签关键字"
+        : state.semanticMode === "structured"
+          ? "时间/类型条件"
+          : "检索中…";
+    const conditions: string[] = [];
+    if (meta?.dateFrom || meta?.dateTo) {
+      conditions.push(meta?.dateFrom && meta?.dateTo ? `${meta.dateFrom} ~ ${meta.dateTo}` : meta?.dateFrom ? `自 ${meta.dateFrom}` : `至 ${meta.dateTo}`);
+    }
+    if (meta?.kind) conditions.push(meta.kind === "photo" ? "照片" : meta.kind === "video" ? "视频" : "实况");
+    if (meta?.keywords) conditions.push(`语义「${meta.keywords}」`);
+    return `<div class="notice-banner is-info" role="status"><span class="notice-icon">✦</span><div><strong>语义搜索：${escapeHtml(state.semanticSearch)}</strong><span>${escapeHtml(`模式：${modeLabel}${conditions.length ? ` · 解析条件：${conditions.join("，")}` : ""}。结果由 AI 检索决定，不叠加其他筛选。`)}</span></div><button class="text-button" id="exit-semantic-search" type="button">退出语义搜索</button></div>`;
+  }
   if (state.scanning && state.scanProgress) {
     const progress = state.scanProgress.total > 0 ? Math.round((state.scanProgress.processed / state.scanProgress.total) * 100) : 0;
     const status = scanStatusLabel(state.scanProgress);
@@ -2745,6 +2840,97 @@ function renderSettingsBackupSection(): string {
   </div>`;
 }
 
+/** AI 增强（可选）：总开关、两组模型配置、连通性测试、批量处理入口。 */
+function renderSettingsAiSection(): string {
+  const config = state.aiConfig;
+  if (!config) {
+    return `<div class="settings-section-body"><div class="settings-status-card"><div class="settings-note">加载 AI 配置…</div></div></div>`;
+  }
+  const running = Boolean(state.aiJobId) || state.aiProgress?.state === "running";
+  const progress = state.aiProgress;
+  const percent = progress && progress.total > 0
+    ? Math.min(100, Math.max(0, Math.round((progress.processed / progress.total) * 100)))
+    : 0;
+  const stats = state.aiStats;
+  const testPill = (target: "chat" | "embedding"): string => {
+    const result = state.aiTestResult?.target === target ? state.aiTestResult : null;
+    if (!result) return "";
+    return `<span class="ai-test-pill ${result.ok ? "is-ok" : "is-error"}">${escapeHtml(result.message)}</span>`;
+  };
+  const preview = state.aiPreview;
+  const modeLabels: Record<AiRunMode, string> = {
+    incremental: "增量处理（仅未处理 + 补算向量）",
+    full: "全量重跑（重新打标所有照片）",
+    retry: "仅重试失败项",
+    embeddings: "仅补算描述向量（不重新打标）",
+  };
+  return `<div class="settings-section-body">
+    <div class="settings-status-card">
+      <h3>AI 自动打标与语义搜索</h3>
+      <div class="settings-note">可选增强功能，<strong>默认关闭</strong>。开启并执行处理后，照片缩略图（约 512px 压缩图，非原图）将发送到你配置的第三方 API；标签与描述保存在本地索引中。</div>
+      <label class="settings-checkbox"><input type="checkbox" id="settings-ai-enabled" ${config.enabled ? "checked" : ""} /><span>启用 AI 增强（对话模型打标 + 语义搜索）</span></label>
+      ${stats ? `<dl class="settings-kv">
+        <div><dt>可处理照片</dt><dd>${formatCount(stats.totalPhotos)}</dd></div>
+        <div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div>
+        <div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div>
+        <div><dt>失败</dt><dd>${formatCount(stats.failed)}</dd></div>
+        <div><dt>缺向量</dt><dd>${formatCount(stats.missingEmbedding)}</dd></div>
+      </dl>${stats.embeddingModel ? `<div class="settings-note">当前向量模型：${escapeHtml(stats.embeddingModel)}。更换模型后需「全量重跑」重新计算向量。</div>` : `<div class="settings-note">未配置 Embedding 模型：语义搜索将降级为描述/标签关键字匹配。</div>`}` : `<div class="settings-note">统计需要已配置的媒体库。</div>`}
+      <div class="settings-form">
+        <label><span>对话模型 Base URL</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://api.openai.com/v1" /></label>
+        <label><span>对话模型名称</span><input id="settings-ai-chat-model" value="${escapeHtml(config.chatModel)}" spellcheck="false" placeholder="gpt-4o-mini / qwen-vl-…（需支持图片输入）" /></label>
+        <label><span>对话模型 API Key</span><input id="settings-ai-chat-key" type="password" value="${escapeHtml(config.chatApiKey)}" spellcheck="false" placeholder="本地服务的兼容接口可留空" /></label>
+        <label><span>Embedding Base URL</span><input id="settings-ai-embed-url" value="${escapeHtml(config.embeddingBaseUrl)}" spellcheck="false" placeholder="https://api.openai.com/v1（留空则停用向量检索）" /></label>
+        <label><span>Embedding 模型名称</span><input id="settings-ai-embed-model" value="${escapeHtml(config.embeddingModel)}" spellcheck="false" placeholder="text-embedding-3-small / bge-…" /></label>
+        <label><span>Embedding API Key</span><input id="settings-ai-embed-key" type="password" value="${escapeHtml(config.embeddingApiKey)}" spellcheck="false" placeholder="留空则沿用对话模型 Key 不发送鉴权头" /></label>
+        <label><span>并发请求数</span><select id="settings-ai-concurrency">
+          ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
+        </select></label>
+        <div class="settings-actions">
+          <button class="primary-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存 AI 配置"}</button>
+          <button class="outline-button" type="button" id="settings-ai-test-chat" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy === "chat" ? "测试中…" : "测试对话模型"}</button>
+          <button class="outline-button" type="button" id="settings-ai-test-embed" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy === "embedding" ? "测试中…" : "测试 Embedding"}</button>
+        </div>
+        ${testPill("chat")}${testPill("embedding")}
+      </div>
+      <div class="settings-note">Base URL 填到 /v1 这一级；任何支持图片输入的 OpenAI 兼容对话模型均可。</div>
+    </div>
+    <div class="settings-status-card">
+      <h3>批量处理</h3>
+      <div class="settings-form">
+        <label><span>处理方式</span><select id="settings-ai-mode">
+          ${(Object.keys(modeLabels) as AiRunMode[]).map((mode) => `<option value="${mode}" ${state.aiProcessMode === mode ? "selected" : ""}>${modeLabels[mode]}</option>`).join("")}
+        </select></label>
+        <div class="settings-actions">
+          <button class="outline-button" type="button" id="settings-ai-preview" ${!state.library || running || state.aiPreviewLoading ? "disabled" : ""}>${state.aiPreviewLoading ? "统计中…" : "生成预览"}</button>
+          <button class="outline-button" type="button" id="settings-ai-start" ${!state.library || running || !preview || preview.estimatedCalls === 0 ? "disabled" : ""}>开始处理</button>
+          ${running ? `<button class="outline-button" type="button" id="settings-ai-cancel">取消</button>` : ""}
+        </div>
+      </div>
+      ${preview && preview.mode === state.aiProcessMode ? `<dl class="settings-kv">
+        <div><dt>预计 API 调用</dt><dd>${formatCount(preview.estimatedCalls)} 次（对话 ${formatCount(preview.chatCalls)} + 向量 ${formatCount(preview.embeddingCalls)}）</dd></div>
+        <div><dt>涉及照片</dt><dd>${formatCount(preview.mode === "full" ? preview.totalPhotos : preview.mode === "retry" ? preview.failed : preview.pending + preview.missingEmbedding)}</dd></div>
+      </dl>
+      ${state.aiConfirming ? `<div class="settings-confirm"><span>将向上方配置的第三方 API 发送约 ${formatCount(preview.estimatedCalls)} 次请求，确认执行？</span><button class="outline-button" type="button" id="settings-ai-start-cancel">取消</button><button class="primary-button" type="button" id="settings-ai-start-confirm">确认执行</button></div>` : ""}` : ""}
+      ${progress ? `<div class="settings-note ai-progress-note">
+        ${progress.state === "running" ? `<span class="spinner"></span>` : ""}
+        ${progress.state === "running"
+          ? `处理中：${formatCount(progress.processed)} / ${formatCount(progress.total)} · 成功 ${formatCount(progress.succeeded)} · 失败 ${formatCount(progress.failed)} · 跳过 ${formatCount(progress.skipped)}`
+          : progress.state === "completed"
+            ? `处理完成：成功 ${formatCount(progress.succeeded)} · 失败 ${formatCount(progress.failed)} · 跳过 ${formatCount(progress.skipped)}`
+            : progress.state === "cancelled"
+              ? `已取消：成功 ${formatCount(progress.succeeded)} · 失败 ${formatCount(progress.failed)}`
+              : `处理失败：${escapeHtml(progress.error ?? "未知错误")}`}
+      </div>
+      ${progress.state === "running" ? `<div class="progress-track${progress.total > 0 ? "" : " is-indeterminate"}"><span style="width:${progress.total > 0 ? percent : 35}%"></span></div>` : ""}
+      ${progress.state === "running" && progress.current ? `<div class="settings-note">${escapeHtml(progress.current)}</div>` : ""}
+      ${progress.errors.length ? `<div class="settings-note is-danger">${progress.errors.slice(0, 3).map(escapeHtml).join("；")}</div>` : ""}` : ""}
+      ${!running && state.aiStats && state.aiStats.failed > 0 ? `<div class="settings-note">有 ${formatCount(state.aiStats.failed)} 个失败项，可用「仅重试失败项」重新处理。</div>` : ""}
+      <div class="settings-note">处理只读缩略图缓存与索引，不修改原始文件；完成后可关闭窗口，任务不会自动续跑。</div>
+    </div>
+  </div>`;
+}
+
 function renderSettingsAboutSection(): string {
   const about = state.aboutInfo;
   if (!about) {
@@ -2891,6 +3077,7 @@ function settingsSectionBodyHtml(): string {
   if (state.settingsSection === "index") return renderSettingsIndexSection();
   if (state.settingsSection === "thumbnails") return renderSettingsThumbnailSection();
   if (state.settingsSection === "backup") return renderSettingsBackupSection();
+  if (state.settingsSection === "ai") return renderSettingsAiSection();
   if (state.settingsSection === "system") return renderSettingsSystemSection();
   return renderSettingsAboutSection();
 }
@@ -3178,6 +3365,15 @@ function bindEvents(): void {
     state.search = searchDraft.trim();
     void refreshMedia();
   });
+  const semanticInput = app.querySelector<HTMLInputElement>("#semantic-search-input");
+  semanticInput?.addEventListener("input", () => { semanticDraft = semanticInput.value; });
+  semanticInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitSemanticSearch();
+  });
+  app.querySelector<HTMLButtonElement>("#semantic-search-button")?.addEventListener("click", () => commitSemanticSearch());
+  app.querySelector<HTMLButtonElement>("#exit-semantic-search")?.addEventListener("click", () => exitSemanticSearch());
   app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => {
     state.sort = (event.target as HTMLSelectElement).value as SortMode;
     void persistUiPrefs({ uiSort: state.sort });
@@ -3334,6 +3530,7 @@ function bindSettingsEvents(): void {
       state.settingsNotice = null;
       state.fullRebuildConfirm = false;
       state.purgeMissingConfirm = false;
+      state.aiConfirming = false;
       state.settingsLoading = true;
       updateSettingsPanel();
       void loadSettingsSectionData().finally(() => {
@@ -3451,6 +3648,30 @@ function bindSettingsBodyEvents(): void {
   app.querySelector<HTMLButtonElement>("#settings-rebuild-thumbnails")?.addEventListener("click", () => void runThumbnailRebuild());
   app.querySelector<HTMLButtonElement>("#settings-thumbnail-cancel")?.addEventListener("click", () => void cancelThumbnailRebuild());
   app.querySelector<HTMLButtonElement>("#settings-save-backup-defaults")?.addEventListener("click", () => void saveBackupDefaults());
+  app.querySelector<HTMLButtonElement>("#settings-save-ai")?.addEventListener("click", () => void saveAiSettings());
+  app.querySelector<HTMLInputElement>("#settings-ai-enabled")?.addEventListener("change", (event) => {
+    if (state.aiConfig) state.aiConfig.enabled = (event.target as HTMLInputElement).checked;
+  });
+  app.querySelector<HTMLButtonElement>("#settings-ai-test-chat")?.addEventListener("click", () => void testAiConnectionFor("chat"));
+  app.querySelector<HTMLButtonElement>("#settings-ai-test-embed")?.addEventListener("click", () => void testAiConnectionFor("embedding"));
+  app.querySelector<HTMLSelectElement>("#settings-ai-mode")?.addEventListener("change", (event) => {
+    state.aiProcessMode = (event.target as HTMLSelectElement).value as AiRunMode;
+    state.aiConfirming = false;
+    state.aiPreview = null;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#settings-ai-preview")?.addEventListener("click", () => void previewAiRun());
+  app.querySelector<HTMLButtonElement>("#settings-ai-start")?.addEventListener("click", () => {
+    state.aiConfirming = true;
+    state.settingsError = null;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#settings-ai-start-cancel")?.addEventListener("click", () => {
+    state.aiConfirming = false;
+    updateSettingsPanel();
+  });
+  app.querySelector<HTMLButtonElement>("#settings-ai-start-confirm")?.addEventListener("click", () => void startAiRun());
+  app.querySelector<HTMLButtonElement>("#settings-ai-cancel")?.addEventListener("click", () => void cancelAiRun());
   app.querySelector<HTMLButtonElement>("#settings-save-system")?.addEventListener("click", () => void saveSystemSettings());
   app.querySelector<HTMLButtonElement>("#settings-save-preview-mode")?.addEventListener("click", () => void savePreviewModeSetting());
   app.querySelector<HTMLSelectElement>("#settings-preview-mode")?.addEventListener("change", () => void savePreviewModeSetting());
@@ -3547,6 +3768,17 @@ async function loadSettingsSectionData(): Promise<void> {
       state.thumbnailCacheDir = infra.settings.thumbnail_cache_dir;
       state.notificationsEnabled = infra.settings.notifications_enabled;
       state.closeBehavior = infra.settings.close_behavior;
+    }
+    if (state.settingsSection === "ai") {
+      const config = await getAiConfig();
+      state.aiConfig = config;
+      state.aiConfirming = false;
+      state.aiTestResult = null;
+      if (state.library) {
+        state.aiStats = await getAiStats(state.library.id);
+      } else {
+        state.aiStats = null;
+      }
     }
     if (state.settingsSection === "system") {
       const [infra, backups] = await Promise.all([getInfrastructureState(), listBackupHistory(8)]);
@@ -3719,6 +3951,108 @@ async function saveBackupDefaults(): Promise<void> {
     state.settingsError = toUserMessage(error, "保存备份默认项失败");
   } finally {
     state.settingsBusy = false;
+    renderSettingsAware();
+  }
+}
+
+// ── AI 增强（设置页） ───────────────────────────────────────────────────────
+
+function readAiConfigFromInputs(base: AiConfigDto): AiConfigDto {
+  const value = (selector: string): string =>
+    app.querySelector<HTMLInputElement | HTMLSelectElement>(selector)?.value?.trim() ?? "";
+  const concurrency = Number.parseInt(value("#settings-ai-concurrency"), 10);
+  return {
+    ...base,
+    enabled: app.querySelector<HTMLInputElement>("#settings-ai-enabled")?.checked ?? base.enabled,
+    chatBaseUrl: value("#settings-ai-chat-url"),
+    chatModel: value("#settings-ai-chat-model"),
+    chatApiKey: app.querySelector<HTMLInputElement>("#settings-ai-chat-key")?.value?.trim() ?? "",
+    embeddingBaseUrl: value("#settings-ai-embed-url"),
+    embeddingModel: value("#settings-ai-embed-model"),
+    embeddingApiKey: app.querySelector<HTMLInputElement>("#settings-ai-embed-key")?.value?.trim() ?? "",
+    concurrency: Number.isFinite(concurrency) ? concurrency : base.concurrency,
+  };
+}
+
+async function saveAiSettings(): Promise<void> {
+  if (!state.aiConfig) return;
+  state.settingsBusy = true;
+  state.settingsError = null;
+  try {
+    state.aiConfig = await setAiConfig(readAiConfigFromInputs(state.aiConfig));
+    state.settingsNotice = state.aiConfig.enabled ? "AI 配置已保存并启用" : "AI 配置已保存（功能保持关闭）";
+    if (state.library) state.aiStats = await getAiStats(state.library.id);
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "保存 AI 配置失败");
+  } finally {
+    state.settingsBusy = false;
+    renderSettingsAware();
+  }
+}
+
+async function testAiConnectionFor(target: "chat" | "embedding"): Promise<void> {
+  state.aiTestBusy = target;
+  state.aiTestResult = null;
+  state.settingsError = null;
+  renderSettingsAware();
+  try {
+    // Test with the values currently in the inputs so users can validate
+    // before saving; persist nothing.
+    if (state.aiConfig) {
+      await setAiConfig(readAiConfigFromInputs(state.aiConfig));
+    }
+    const result = await testAiConnection(target);
+    state.aiTestResult = { ...result, target };
+  } catch (error) {
+    state.aiTestResult = {
+      ok: false,
+      message: toUserMessage(error, "连接失败"),
+      latencyMs: 0,
+      target,
+    };
+  } finally {
+    state.aiTestBusy = null;
+    renderSettingsAware();
+  }
+}
+
+async function previewAiRun(): Promise<void> {
+  if (!state.library) return;
+  state.aiPreviewLoading = true;
+  state.settingsError = null;
+  state.aiConfirming = false;
+  renderSettingsAware();
+  try {
+    state.aiPreview = await previewAiProcess(state.library.id, state.aiProcessMode);
+  } catch (error) {
+    state.aiPreview = null;
+    state.settingsError = toUserMessage(error, "生成处理预览失败");
+  } finally {
+    state.aiPreviewLoading = false;
+    renderSettingsAware();
+  }
+}
+
+async function startAiRun(): Promise<void> {
+  if (!state.library) return;
+  state.aiConfirming = false;
+  state.settingsError = null;
+  try {
+    const start = await startAiProcess(state.library.id, state.aiProcessMode);
+    state.aiJobId = start.jobId;
+    state.aiProgress = null;
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "无法开始 AI 处理");
+  }
+  renderSettingsAware();
+}
+
+async function cancelAiRun(): Promise<void> {
+  if (!state.aiJobId) return;
+  try {
+    await cancelAiProcess(state.aiJobId);
+  } catch (error) {
+    state.settingsError = toUserMessage(error, "无法取消 AI 处理");
     renderSettingsAware();
   }
 }
@@ -3951,6 +4285,11 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
         ? `<div class="tag-suggest-row">${tagSuggestions}</div>`
         : (state.tags.length ? `<div class="tag-empty">该媒体已带有全部标签</div>` : `<div class="tag-empty">还没有标签，请先在「标签管理」中新建</div>`)}
     </div>
+    ${meta.aiCaption || (meta.aiTags && meta.aiTags.length) ? `<div class="meta-ai-block">
+      <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span></div>
+      ${meta.aiCaption ? `<p class="meta-ai-caption">${escapeHtml(meta.aiCaption)}</p>` : ""}
+      ${meta.aiTags && meta.aiTags.length ? `<div class="tag-chip-row">${meta.aiTags.map((tag) => `<span class="tag-chip tag-chip-ai"><i class="ai-badge" aria-hidden="true">AI</i><span>${escapeHtml(tag)}</span></span>`).join("")}</div>` : ""}
+    </div>` : ""}
     <h4>关联文件</h4>
     <ul class="meta-files">${files}</ul>
   </div>`;
@@ -5289,6 +5628,25 @@ function movePreview(delta: number): void {
   void loadModalAsset();
 }
 
+/**
+ * One media page through the active retrieval path: semantic AI search when a
+ * natural-language query is committed, the plain SQL pipeline otherwise.
+ */
+async function fetchMediaPage(offset: number, limit: number): Promise<MediaPageDto> {
+  if (!state.library) throw new Error("媒体库未就绪");
+  if (state.semanticSearch) {
+    const result = await aiSearch(state.library.id, state.semanticSearch, offset, limit);
+    if (offset === 0) {
+      state.semanticMeta = result.parsed;
+      state.semanticMode = result.mode;
+    }
+    return { items: result.items, total: result.total, offset: result.offset, limit: result.limit };
+  }
+  state.semanticMeta = null;
+  state.semanticMode = null;
+  return queryMedia({ ...currentQueryFields(), offset, limit });
+}
+
 async function refreshMedia(): Promise<void> {
   if (!state.library) { renderSettingsAware(); return; }
   const token = ++mediaQueryToken;
@@ -5298,7 +5656,7 @@ async function refreshMedia(): Promise<void> {
   disconnectLoadMoreObserver();
   state.loading = true; state.error = null; renderSettingsAware();
   try {
-    const page = await queryMedia({ ...currentQueryFields(), limit: 120 });
+    const page = await fetchMediaPage(0, 120);
     if (token !== mediaQueryToken) return;
     state.page = page;
     state.selectedIds.clear();
@@ -5394,7 +5752,7 @@ async function loadMore(): Promise<void> {
   loadMoreInFlight = true;
   updateLoadMoreFooter();
   try {
-    const next = await queryMedia({ ...currentQueryFields(), offset: state.page.items.length, limit: 120 });
+    const next = await fetchMediaPage(state.page.items.length, 120);
     // Discard pages that finished after a filter switch.
     if (token !== mediaQueryToken) return;
     state.page.items.push(...next.items);
@@ -6235,6 +6593,33 @@ void onLibraryMergeProgress((progress) => {
   } else {
     render();
     void bootstrap();
+  }
+});
+void onAiProgress((progress) => {
+  if (state.aiJobId && progress.jobId !== state.aiJobId && progress.state === "running") return;
+  if (!state.aiJobId && progress.state === "running") return;
+  state.aiProgress = progress;
+  if (progress.state === "running") {
+    state.aiJobId = progress.jobId;
+    if (state.settingsOpen) updateSettingsPanel();
+    return;
+  }
+  state.aiJobId = null;
+  state.aiConfirming = false;
+  state.settingsNotice =
+    progress.state === "completed"
+      ? `AI 处理完成：成功 ${progress.succeeded}，失败 ${progress.failed}${progress.skipped ? `，跳过 ${progress.skipped}` : ""}`
+      : progress.state === "cancelled"
+        ? "AI 处理已取消"
+        : `AI 处理失败：${progress.error ?? "未知错误"}`;
+  // Refresh counters (and tags, since AI tagging may add new ones) after a run.
+  void refreshTags();
+  if (state.library) void getAiStats(state.library.id).then((stats) => { state.aiStats = stats; });
+  if (state.settingsOpen) {
+    updateSettingsPanel();
+    void loadSettingsSectionData().then(() => updateSettingsPanel());
+  } else {
+    renderSettingsAware();
   }
 });
 void onEditProgress((progress) => {

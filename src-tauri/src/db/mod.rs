@@ -19,6 +19,7 @@ mod migrations {
     pub const BACKUP_ITEMS: &str = include_str!("migrations/0004_backup_items.sql");
     pub const MEDIA_RATINGS: &str = include_str!("migrations/0005_media_ratings.sql");
     pub const BACKUP_MERGE: &str = include_str!("migrations/0006_backup_merge.sql");
+    pub const AI_TAGS: &str = include_str!("migrations/0007_ai_tags.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -28,7 +29,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -622,11 +623,20 @@ impl Repository {
             .collect::<Result<Vec<_>, _>>()?;
         let favorite = self.is_favorite(id)?;
         let tags = self.list_tags_for_media(id)?;
+        let ai = self
+            .get_media_ai(&id)?
+            .filter(|row| row.status == "success");
         Ok(Some(MediaItemDetails {
             item,
             files,
             favorite,
             tags,
+            ai_caption: ai.as_ref().and_then(|row| row.caption.clone()),
+            ai_tags: ai
+                .as_ref()
+                .and_then(|row| row.tags_json.as_deref())
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default(),
         }))
     }
 
@@ -686,15 +696,32 @@ impl Repository {
             }
         }
         // Tag filters compose as AND: the media must carry every selected tag.
+        // Both relation tables count — AI-tagged rows live in `media_ai_tags`
+        // so user-managed `media_tags` rows can never be clobbered by AI runs.
         for tag_id in &query.tag_ids {
             if tag_id.trim().is_empty() {
                 continue;
             }
             conditions.push(format!(
-                "EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id = m.id AND mt.tag_id = ?{})",
-                values.len() + 1
+                "(EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id = m.id AND mt.tag_id = ?{}) \
+                 OR EXISTS (SELECT 1 FROM media_ai_tags mat WHERE mat.media_item_id = m.id AND mat.tag_id = ?{}))",
+                values.len() + 1,
+                values.len() + 2
             ));
             values.push(tag_id.trim().to_owned());
+            values.push(tag_id.trim().to_owned());
+        }
+        if !query.item_ids.is_empty() {
+            let placeholders = query
+                .item_ids
+                .iter()
+                .map(|id| {
+                    values.push(id.clone());
+                    format!("?{}", values.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!("m.id IN ({placeholders})"));
         }
         if let Some(rating_eq) = query.rating_eq.filter(|value| (0..=5).contains(value)) {
             if rating_eq == 0 {
@@ -1015,7 +1042,10 @@ impl Repository {
     pub fn get_tag(&self, id: &str) -> DbResult<Option<Tag>> {
         self.connection
             .query_row(
-                "SELECT id, name, color, created_at FROM tags WHERE id = ?1",
+                "SELECT id, name, color, created_at,
+                        (SELECT COUNT(*) FROM media_tags mt WHERE mt.tag_id = tags.id),
+                        EXISTS (SELECT 1 FROM media_ai_tags mat WHERE mat.tag_id = tags.id)
+                 FROM tags WHERE id = ?1",
                 [id],
                 map_tag,
             )
@@ -1042,7 +1072,9 @@ impl Repository {
 
     pub fn list_tags_for_media(&self, media_item_id: &str) -> DbResult<Vec<Tag>> {
         let mut statement = self.connection.prepare(
-            "SELECT t.id, t.name, t.color, t.created_at, 0
+            "SELECT t.id, t.name, t.color, t.created_at, 0,
+                    EXISTS (SELECT 1 FROM media_ai_tags mat
+                            WHERE mat.tag_id = t.id AND mat.media_item_id = ?1)
              FROM tags t JOIN media_tags mt ON mt.tag_id = t.id
              WHERE mt.media_item_id = ?1 ORDER BY t.name COLLATE NOCASE, t.id",
         )?;
@@ -1054,7 +1086,8 @@ impl Repository {
     pub fn list_tags(&self) -> DbResult<Vec<Tag>> {
         let mut statement = self.connection.prepare(
             "SELECT t.id, t.name, t.color, t.created_at,
-                    (SELECT COUNT(*) FROM media_tags mt WHERE mt.tag_id = t.id)
+                    (SELECT COUNT(*) FROM media_tags mt WHERE mt.tag_id = t.id),
+                    EXISTS (SELECT 1 FROM media_ai_tags mat WHERE mat.tag_id = t.id)
              FROM tags t ORDER BY t.name COLLATE NOCASE, t.id",
         )?;
         let rows = statement.query_map([], map_tag)?;
@@ -1066,7 +1099,8 @@ impl Repository {
         validate_non_empty("tag name", trimmed)?;
         self.connection
             .query_row(
-                "SELECT t.id, t.name, t.color, t.created_at, 0
+                "SELECT t.id, t.name, t.color, t.created_at, 0,
+                        EXISTS (SELECT 1 FROM media_ai_tags mat WHERE mat.tag_id = t.id)
                  FROM tags t WHERE t.name = ?1 COLLATE NOCASE",
                 [trimmed],
                 map_tag,
@@ -1485,6 +1519,263 @@ impl Repository {
             })
             .transpose()
     }
+
+    // ── AI tagging / semantic search (media_ai, media_ai_tags) ──────────────
+
+    pub fn get_media_ai(&self, media_item_id: &str) -> DbResult<Option<MediaAiRow>> {
+        self.connection
+            .query_row(
+                "SELECT media_item_id, caption, tags_json, embedding, embedding_model,
+                        ai_model, embedding_dim, status, error_message, processed_at
+                 FROM media_ai WHERE media_item_id = ?1",
+                [media_item_id],
+                map_media_ai,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Insert or replace the AI processing row. `embedding` fields stay as
+    /// provided; pass `None` while only the tag/caption outcome is known.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_media_ai(&self, row: MediaAiUpsert<'_>) -> DbResult<()> {
+        validate_non_empty("media_item_id", row.media_item_id)?;
+        validate_non_empty("status", row.status)?;
+        self.connection.execute(
+            "INSERT INTO media_ai
+             (media_item_id, caption, tags_json, embedding, embedding_model, ai_model,
+              embedding_dim, status, error_message, processed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(media_item_id) DO UPDATE SET
+               caption = excluded.caption,
+               tags_json = excluded.tags_json,
+               embedding = excluded.embedding,
+               embedding_model = excluded.embedding_model,
+               ai_model = excluded.ai_model,
+               embedding_dim = excluded.embedding_dim,
+               status = excluded.status,
+               error_message = excluded.error_message,
+               processed_at = excluded.processed_at",
+            params![
+                row.media_item_id,
+                row.caption,
+                row.tags_json,
+                row.embedding,
+                row.embedding_model,
+                row.ai_model,
+                row.embedding_dim,
+                row.status,
+                row.error_message,
+                row.processed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Store (or replace) just the caption embedding after a later backfill.
+    pub fn set_media_ai_embedding(
+        &self,
+        media_item_id: &str,
+        embedding: &[u8],
+        embedding_model: &str,
+        embedding_dim: i64,
+        processed_at: &str,
+    ) -> DbResult<()> {
+        validate_non_empty("media_item_id", media_item_id)?;
+        self.connection.execute(
+            "UPDATE media_ai SET embedding = ?2, embedding_model = ?3,
+                    embedding_dim = ?4, processed_at = ?5
+             WHERE media_item_id = ?1",
+            params![
+                media_item_id,
+                embedding,
+                embedding_model,
+                embedding_dim,
+                processed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Photo/live items eligible for AI tagging, newest capture first.
+    pub fn list_ai_candidates(&self, library_id: &str) -> DbResult<Vec<AiWorkItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.display_name FROM media_items m
+             WHERE m.library_id = ?1 AND m.kind IN ('photo', 'live')
+               AND m.scan_state = 'present'
+             ORDER BY m.capture_date DESC, m.id",
+        )?;
+        let rows = statement
+            .query_map([library_id], |row| {
+                Ok(AiWorkItem {
+                    media_item_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Rows that succeeded but lack a current-model embedding (never embedded,
+    /// or produced by a different embedding model that was since configured).
+    pub fn list_ai_missing_embeddings(
+        &self,
+        library_id: &str,
+        embedding_model: &str,
+    ) -> DbResult<Vec<AiWorkItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.display_name FROM media_ai a
+             JOIN media_items m ON m.id = a.media_item_id
+             WHERE m.library_id = ?1 AND a.status = 'success'
+               AND (a.embedding IS NULL OR a.embedding_model IS NULL
+                    OR a.embedding_model != ?2)",
+        )?;
+        let rows = statement
+            .query_map(params![library_id, embedding_model], |row| {
+                Ok(AiWorkItem {
+                    media_item_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// All current-model caption vectors for a library, for brute-force cosine.
+    pub fn list_ai_embeddings(
+        &self,
+        library_id: &str,
+        embedding_model: &str,
+    ) -> DbResult<Vec<AiEmbeddingRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.media_item_id, a.embedding FROM media_ai a
+             JOIN media_items m ON m.id = a.media_item_id
+             WHERE m.library_id = ?1 AND a.status = 'success'
+               AND a.embedding IS NOT NULL AND a.embedding_model = ?2",
+        )?;
+        let rows = statement
+            .query_map(params![library_id, embedding_model], |row| {
+                Ok(AiEmbeddingRow {
+                    media_item_id: row.get(0)?,
+                    embedding: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Rows whose caption/tags contain the term (LIKE). Fallback search path
+    /// when no embedding model is configured; case-insensitive for ASCII.
+    pub fn search_media_ai_text(&self, library_id: &str, term: &str) -> DbResult<Vec<String>> {
+        let pattern = format!("%{}%", escape_like(term));
+        let mut statement = self.connection.prepare(
+            "SELECT a.media_item_id FROM media_ai a
+             JOIN media_items m ON m.id = a.media_item_id
+             WHERE m.library_id = ?1 AND a.status = 'success'
+               AND (a.caption LIKE ?2 ESCAPE '\\' OR a.tags_json LIKE ?2 ESCAPE '\\')",
+        )?;
+        let rows = statement
+            .query_map(params![library_id, pattern], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Replace the AI tag assignments of one item inside one transaction.
+    /// Missing tags are created first so the names survive in the tag list.
+    pub fn replace_ai_tags(
+        &self,
+        media_item_id: &str,
+        tag_names: &[String],
+        tag_prefix: &str,
+        at: &str,
+    ) -> DbResult<usize> {
+        validate_non_empty("media_item_id", media_item_id)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM media_ai_tags WHERE media_item_id = ?1",
+            [media_item_id],
+        )?;
+        let mut applied = 0usize;
+        for name in tag_names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let tag_id = match transaction
+                .query_row(
+                    "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+                    [trimmed],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                Some(id) => id,
+                None => {
+                    let id = format!("{tag_prefix}{:016x}", {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        trimmed.to_lowercase().hash(&mut hasher);
+                        at.hash(&mut hasher);
+                        hasher.finish()
+                    });
+                    transaction.execute(
+                        "INSERT INTO tags (id, name, color, created_at) VALUES (?1, ?2, NULL, ?3)",
+                        params![id, trimmed, at],
+                    )?;
+                    id
+                }
+            };
+            transaction.execute(
+                "INSERT INTO media_ai_tags (media_item_id, tag_id, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(media_item_id, tag_id) DO NOTHING",
+                params![media_item_id, tag_id, at],
+            )?;
+            applied += 1;
+        }
+        transaction.commit()?;
+        Ok(applied)
+    }
+
+    /// Remove one AI tag from one item (user explicitly declines an AI tag).
+    pub fn detach_ai_tag(&self, media_item_id: &str, tag_id: &str) -> DbResult<()> {
+        validate_non_empty("media_item_id", media_item_id)?;
+        validate_non_empty("tag id", tag_id)?;
+        self.connection.execute(
+            "DELETE FROM media_ai_tags WHERE media_item_id = ?1 AND tag_id = ?2",
+            params![media_item_id, tag_id],
+        )?;
+        Ok(())
+    }
+
+    /// Aggregate counters for the settings AI card.
+    pub fn ai_stats(&self, library_id: &str) -> DbResult<AiStats> {
+        self.connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM media_items
+                     WHERE library_id = ?1 AND kind IN ('photo', 'live')
+                       AND scan_state = 'present'),
+                   (SELECT COUNT(*) FROM media_ai a
+                     JOIN media_items m ON m.id = a.media_item_id
+                     WHERE m.library_id = ?1 AND a.status = 'success'),
+                   (SELECT COUNT(*) FROM media_ai a
+                     JOIN media_items m ON m.id = a.media_item_id
+                     WHERE m.library_id = ?1 AND a.status = 'failed')",
+                [library_id],
+                |row| {
+                    let total: i64 = row.get(0)?;
+                    let success: i64 = row.get(1)?;
+                    let failed: i64 = row.get(2)?;
+                    Ok(AiStats {
+                        total_photos: total,
+                        processed: success,
+                        failed,
+                        pending: (total - success - failed).max(0),
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
 }
 
 fn configure_connection(connection: &Connection) -> DbResult<()> {
@@ -1609,6 +1900,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         transaction.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             [6_i64],
+        )?;
+        transaction.commit()?;
+    }
+    if max_version < 7 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::AI_TAGS)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [7_i64],
         )?;
         transaction.commit()?;
     }
@@ -1927,6 +2227,12 @@ pub struct MediaItemDetails {
     pub files: Vec<MediaFile>,
     pub favorite: bool,
     pub tags: Vec<Tag>,
+    /// AI-generated one-line description; `None` when AI is unprocessed.
+    #[serde(default)]
+    pub ai_caption: Option<String>,
+    /// AI tag names as produced by the chat model (independent of `tags`).
+    #[serde(default)]
+    pub ai_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1939,6 +2245,10 @@ pub struct Tag {
     /// How many media items currently carry this tag. Projected, not stored.
     #[serde(default)]
     pub media_count: i64,
+    /// Whether AI tagging has ever attached this tag. Projected, not stored;
+    /// used by the filter bar to badge AI-assisted tags.
+    #[serde(default)]
+    pub has_ai: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1947,6 +2257,63 @@ pub struct NewTag {
     pub name: String,
     pub color: Option<String>,
     pub created_at: String,
+}
+
+/// One persisted AI processing outcome for a media item (`media_ai` row).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAiRow {
+    pub media_item_id: String,
+    pub caption: Option<String>,
+    pub tags_json: Option<String>,
+    pub embedding: Option<Vec<u8>>,
+    pub embedding_model: Option<String>,
+    pub ai_model: Option<String>,
+    pub embedding_dim: Option<i64>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub processed_at: Option<String>,
+}
+
+/// Write-side counterpart of `MediaAiRow`; string fields are borrows so the
+/// worker can stream results without cloning tag JSON.
+#[derive(Debug, Clone, Default)]
+pub struct MediaAiUpsert<'a> {
+    pub media_item_id: &'a str,
+    pub caption: Option<&'a str>,
+    pub tags_json: Option<&'a str>,
+    pub embedding: Option<&'a [u8]>,
+    pub embedding_model: Option<&'a str>,
+    pub ai_model: Option<&'a str>,
+    pub embedding_dim: Option<i64>,
+    pub status: &'a str,
+    pub error_message: Option<&'a str>,
+    pub processed_at: Option<&'a str>,
+}
+
+/// A media item queued for AI processing, with a display name for progress UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiWorkItem {
+    pub media_item_id: String,
+    pub display_name: String,
+}
+
+/// A persisted caption vector ready for cosine scoring.
+#[derive(Debug, Clone)]
+pub struct AiEmbeddingRow {
+    pub media_item_id: String,
+    pub embedding: Vec<u8>,
+}
+
+/// Counters shown in the settings AI card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiStats {
+    pub total_photos: i64,
+    pub processed: i64,
+    pub failed: i64,
+    pub pending: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2043,6 +2410,10 @@ pub struct MediaQuery {
     pub first_seen_from: Option<String>,
     /// Keep media that carry every listed tag id (AND).
     pub tag_ids: Vec<String>,
+    /// Restrict to these media item ids (semantic search candidate sets).
+    /// Ignored when empty; no artificial cap beyond SQLite's parameter limit,
+    /// so callers must keep the list bounded (a few hundred at most).
+    pub item_ids: Vec<String>,
     /// Keep media with this exact rating (0 = unrated only). Takes precedence
     /// over `rating_min` when both are set.
     pub rating_eq: Option<i64>,
@@ -2380,6 +2751,22 @@ fn map_tag(row: &Row<'_>) -> rusqlite::Result<Tag> {
         color: row.get(2)?,
         created_at: row.get(3)?,
         media_count: row.get(4).unwrap_or(0),
+        has_ai: row.get::<_, i64>(5).unwrap_or(0) != 0,
+    })
+}
+
+fn map_media_ai(row: &Row<'_>) -> rusqlite::Result<MediaAiRow> {
+    Ok(MediaAiRow {
+        media_item_id: row.get(0)?,
+        caption: row.get(1)?,
+        tags_json: row.get(2)?,
+        embedding: row.get(3)?,
+        embedding_model: row.get(4)?,
+        ai_model: row.get(5)?,
+        embedding_dim: row.get(6)?,
+        status: row.get(7)?,
+        error_message: row.get(8)?,
+        processed_at: row.get(9)?,
     })
 }
 fn map_backup_run(row: &Row<'_>) -> rusqlite::Result<BackupRun> {
@@ -2538,10 +2925,10 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 6);
+        assert_eq!(repository.schema_version().unwrap(), 7);
         apply_migrations(&mut repository.connection).unwrap();
-        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','media_ratings','backup_runs','backup_items','app_settings','deletion_logs')", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 11);
+        let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','media_ratings','backup_runs','backup_items','app_settings','deletion_logs','media_ai','media_ai_tags')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 13);
         let indexes: i64 = repository
             .connection
             .query_row(
@@ -2550,7 +2937,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(indexes, 13);
+        assert_eq!(indexes, 15);
         let has_merge_column: i64 = repository
             .connection
             .query_row(

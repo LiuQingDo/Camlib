@@ -15,6 +15,16 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Added
+
+- AI 增强（可选，默认关闭）：云端 API 自动打标与语义搜索，共用一条 OpenAI 兼容管线
+  - 设置 → AI 增强：总开关（含隐私提示）、对话模型与 Embedding 两组独立配置、"测试连通性"按钮、已处理/待处理/失败统计
+  - 自动打标：多模态对话模型对照片缩略图（~512px，复用现有缩略图管线，不上传原图）生成中文标签 + 一句话描述；标签写入现有标签体系但存于独立关联表 `media_ai_tags`，删除手打标签绝不误删 AI 标签，筛选区 AI 标签带徽标
+  - 批量处理：增量 / 全量 / 仅重试失败 / 仅补算向量四种模式；预览预计 API 调用次数后确认执行；进度事件、可取消、并发 1–4 可调、失败指数退避；缩略图不可用的照片跳过并保持待处理
+  - 语义搜索：筛选区自然语言输入（如"去年秋天湖边的照片"）→ 对话模型解析为时间范围/类型 + 语义文本；条件走 SQL、语义文本实时 embedding 后与库存向量暴力余弦检索，结果取交集；纯向量无法处理"去年秋天"类时间表达，查询解析为必需环节
+  - 降级路径：未配置 Embedding 模型时语义搜索退化为 caption/标签关键字（LIKE）匹配；纯时间/类型查询直接走 SQL
+  - 详情面板新增"AI 描述"区块；新增 migration 0007（media_ai、media_ai_tags），schema 版本 7
+
 ## [0.4.0] - 2026-11-01
 
 Assets: [GitHub Release v0.4.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.4.0) — `Camlib_0.4.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.4.0_x64_en-US.msi` (WiX)

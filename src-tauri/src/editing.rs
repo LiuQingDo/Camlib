@@ -1503,6 +1503,8 @@ mod tests {
             ],
             favorite: false,
             tags: vec![],
+            ai_caption: None,
+            ai_tags: Vec::new(),
         };
         assert_eq!(image_source_file(&details).unwrap().extension, "jpg");
         assert_eq!(video_source_file(&details).unwrap().extension, "mp4");
