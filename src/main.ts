@@ -101,7 +101,7 @@ import {
   type UiTheme,
 } from "./api/infrastructure";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { toUserMessage } from "./api/errors";
+import { toDetailedMessage, toUserMessage } from "./api/errors";
 import { initLiquidGlass, syncLiquidGlass } from "./liquid-glass";
 import { initTitlebar } from "./titlebar";
 import { listen } from "@tauri-apps/api/event";
@@ -3983,7 +3983,7 @@ async function saveAiSettings(): Promise<void> {
     state.settingsNotice = state.aiConfig.enabled ? "AI 配置已保存并启用" : "AI 配置已保存（功能保持关闭）";
     if (state.library) state.aiStats = await getAiStats(state.library.id);
   } catch (error) {
-    state.settingsError = toUserMessage(error, "保存 AI 配置失败");
+    state.settingsError = toDetailedMessage(error, "保存 AI 配置失败");
   } finally {
     state.settingsBusy = false;
     renderSettingsAware();
@@ -4006,7 +4006,7 @@ async function testAiConnectionFor(target: "chat" | "embedding"): Promise<void> 
   } catch (error) {
     state.aiTestResult = {
       ok: false,
-      message: toUserMessage(error, "连接失败"),
+      message: toDetailedMessage(error, "连接失败"),
       latencyMs: 0,
       target,
     };
@@ -4026,7 +4026,7 @@ async function previewAiRun(): Promise<void> {
     state.aiPreview = await previewAiProcess(state.library.id, state.aiProcessMode);
   } catch (error) {
     state.aiPreview = null;
-    state.settingsError = toUserMessage(error, "生成处理预览失败");
+    state.settingsError = toDetailedMessage(error, "生成处理预览失败");
   } finally {
     state.aiPreviewLoading = false;
     renderSettingsAware();
@@ -4042,7 +4042,7 @@ async function startAiRun(): Promise<void> {
     state.aiJobId = start.jobId;
     state.aiProgress = null;
   } catch (error) {
-    state.settingsError = toUserMessage(error, "无法开始 AI 处理");
+    state.settingsError = toDetailedMessage(error, "无法开始 AI 处理");
   }
   renderSettingsAware();
 }
@@ -4052,7 +4052,7 @@ async function cancelAiRun(): Promise<void> {
   try {
     await cancelAiProcess(state.aiJobId);
   } catch (error) {
-    state.settingsError = toUserMessage(error, "无法取消 AI 处理");
+    state.settingsError = toDetailedMessage(error, "无法取消 AI 处理");
     renderSettingsAware();
   }
 }

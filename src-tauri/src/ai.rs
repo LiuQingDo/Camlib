@@ -193,6 +193,8 @@ impl UreqTransport {
 
 /// Map HTTP/transport failures onto the shared error contract. 429/5xx and
 /// network-level issues are retryable (`IoError`), config problems are not.
+/// The message always carries the HTTP status and a response snippet so the
+/// settings test button can show the provider's own words.
 fn map_http_error(context: &str, error: ureq::Error) -> AppError {
     match error {
         ureq::Error::Status(code, response) => {
@@ -201,7 +203,15 @@ fn map_http_error(context: &str, error: ureq::Error) -> AppError {
             if (500..=599).contains(&code) || code == 429 {
                 AppError::io(format!("{context} 失败（HTTP {code}，可重试）: {snippet}"))
             } else {
-                AppError::invalid_argument(format!("{context} 失败（HTTP {code}）: {snippet}"))
+                let hint = match code {
+                    401 | 403 => "。请检查 API Key 是否正确、是否有该模型权限",
+                    404 => "。请检查 Base URL（一般填到 /v1 这一级，不要带 /chat/completions）与模型名称",
+                    400 => "。请检查模型名称是否正确、该模型是否支持当前请求",
+                    _ => "",
+                };
+                AppError::invalid_argument(format!(
+                    "{context} 失败（HTTP {code}）{hint}: {snippet}"
+                ))
             }
         }
         ureq::Error::Transport(transport) => {
@@ -210,12 +220,15 @@ fn map_http_error(context: &str, error: ureq::Error) -> AppError {
     }
 }
 
+/// `Authorization: Bearer …` only when a key is configured; local compatible
+/// servers may run without any key.
 fn authorization_header(key: &str) -> Option<(&'static str, String)> {
     let trimmed = key.trim();
-    trimmed
-        .is_empty()
-        .then_some(())
-        .map(|_| ("Authorization", format!("Bearer {trimmed}")))
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(("Authorization", format!("Bearer {trimmed}")))
+    }
 }
 
 impl AiTransport for UreqTransport {
@@ -1482,6 +1495,15 @@ mod tests {
     #[test]
     fn local_today_is_a_valid_iso_date() {
         assert!(is_valid_date(&local_today()));
+    }
+
+    #[test]
+    fn authorization_header_only_when_key_present() {
+        assert!(authorization_header("").is_none());
+        assert!(authorization_header("   ").is_none());
+        let (name, value) = authorization_header(" sk-abc ").unwrap();
+        assert_eq!(name, "Authorization");
+        assert_eq!(value, "Bearer sk-abc");
     }
 
     #[test]

@@ -90,6 +90,17 @@ export function toUserMessage(error: unknown, fallback?: string): string {
   return base;
 }
 
+/**
+ * Prefer the backend's own (already localized) message over the fixed code
+ * copy. Used where provider detail matters — AI connectivity tests and model
+ * configuration surface the provider's HTTP status and response body.
+ */
+export function toDetailedMessage(error: unknown, fallback?: string): string {
+  const payload = parseCommandError(error);
+  if (payload.message) return payload.message;
+  return toUserMessage(error, fallback);
+}
+
 export function errorCodeOf(error: unknown): string {
   return parseCommandError(error).code;
 }

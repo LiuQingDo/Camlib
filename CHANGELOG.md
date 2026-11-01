@@ -25,6 +25,10 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
   - 降级路径：未配置 Embedding 模型时语义搜索退化为 caption/标签关键字（LIKE）匹配；纯时间/类型查询直接走 SQL
   - 详情面板新增"AI 描述"区块；新增 migration 0007（media_ai、media_ai_tags），schema 版本 7
 
+### Fixed
+
+- AI 连通性测试不发送 Authorization 请求头（键存在性判断写反），导致所有带鉴权的提供商返回 401 并被笼统提示为"请求参数无效"；同时 AI 相关错误改为直接显示后端原始信息（含 HTTP 状态码、排查提示与提供商响应摘要），不再被通用文案吞掉
+
 ## [0.4.0] - 2026-11-01
 
 Assets: [GitHub Release v0.4.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.4.0) — `Camlib_0.4.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.4.0_x64_en-US.msi` (WiX)
