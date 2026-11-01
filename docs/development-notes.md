@@ -64,6 +64,22 @@ JSON 字段使用 camelCase（Rust 内部 snake_case，`serde` 负责映射）�
 | `media_edit_image` | 图片编辑（裁剪/旋转/翻转/亮度/对比度/饱和度）；同步返回，产物为新副本 |
 | `media_trim_video` / `media_edit_cancel` | 视频剪辑（快速流复制 / 精确转码）；job + `edit-progress` Channel，可取消 |
 
+### AI 增强（可选，默认关闭）
+
+| Command | 说明 |
+| --- | --- |
+| `ai_get_config` / `ai_set_config` | AI 配置（存 SQLite `app_settings`，key=`ai_config`） |
+| `ai_test_connection` | 连通性测试（target: `chat` / `embedding`，未启用也可测） |
+| `ai_stats` | 打标统计（已处理/待处理/失败） |
+| `ai_process_preview` / `ai_process_start` / `ai_process_cancel` | 批量打标预览/执行/取消；进度走 `ai-progress` 事件 |
+| `ai_process_item` | 单张同步打标 |
+| `ai_search` | 语义搜索（vector / text / structured 三模式） |
+| `ai_tag_detach` | 移除单个 AI 标签关联 |
+| `ai_chat` | AI 助手流式对话；系统提示词由 Rust 端注入媒体库概况（`LibraryBrief`）+ 当前浏览/预览/多选上下文；文本 delta 走 Tauri `Channel` 逐段回传，命令结束时返回完整内容 |
+| `ai_chat_cancel` | 请求停止当前流式回复（部分内容随 `ai_chat` 结果返回） |
+
+前端不提交系统提示词；助手只读（唯一的"动作"是回复末尾 `[搜索] 关键词` 标记，由前端渲染为一键语义搜索 chip）。
+
 前端不提交任意物理路径数组；删除与打开文件夹均以 `mediaItemId` 为边界。
 
 ## 2. 错误合约

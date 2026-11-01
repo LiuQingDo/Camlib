@@ -4,7 +4,7 @@
  * 命令与 DTO 与 `src-tauri/src/ai.rs` 一一对应；错误由调用方通过
  * `toUserMessage` 转成中文提示（本层不捕获）。
  */
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { MediaItemDto } from "./media";
@@ -151,4 +151,72 @@ export function onAiProgress(
   callback: (progress: AiProgressDto) => void,
 ): Promise<UnlistenFn> {
   return listen<AiProgressDto>("ai-progress", (event) => callback(event.payload));
+}
+
+// ── AI 助手（聊天抽屉，流式回传） ────────────────────────────────────────────
+
+/** 与 Rust `AiChatTurn` 对齐；系统提示词由 Rust 端统一构建，前端只传对话轮次。 */
+export interface AiChatTurnDto {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** 正在预览的照片上下文；mediaId 用于 Rust 端取缩略图随消息发送。 */
+export interface AiChatPreviewDto {
+  mediaId: string;
+  displayName: string;
+  kind?: string;
+  captureDate?: string;
+  rating?: number;
+  favorite?: boolean;
+  aiCaption?: string;
+  aiTags?: string[];
+}
+
+export interface AiChatSelectionDto {
+  count: number;
+  names: string[];
+}
+
+/** 与 Rust `AiChatContext` 对齐；view 为当前筛选条件的自由 JSON。 */
+export interface AiChatContextDto {
+  view?: Record<string, unknown>;
+  preview?: AiChatPreviewDto;
+  selection?: AiChatSelectionDto;
+}
+
+export interface AiChatResultDto {
+  content: string;
+  cancelled: boolean;
+}
+
+/** Rust `AiChatEvent` 的序列化形态（内部 tagged enum）。 */
+export interface AiChatEventDto {
+  type: "delta";
+  text: string;
+}
+
+/**
+ * 流式对话：delta 通过 Tauri Channel 逐段回调，Promise 在整条回复结束时
+ * 兑现（含取消后的部分内容）。本层不捕获错误。
+ */
+export function streamAiChat(
+  libraryId: string,
+  history: AiChatTurnDto[],
+  context: AiChatContextDto,
+  onDelta: (text: string) => void,
+): Promise<AiChatResultDto> {
+  const channel = new Channel<AiChatEventDto>();
+  channel.onmessage = (event) => onDelta(event.text);
+  return invoke<AiChatResultDto>("ai_chat", {
+    libraryId,
+    history,
+    context,
+    onEvent: channel,
+  });
+}
+
+/** 请求停止当前流式回复；已生成的部分内容会随命令结果返回。 */
+export function cancelAiChat(): Promise<void> {
+  return invoke<void>("ai_chat_cancel");
 }

@@ -1795,6 +1795,37 @@ impl Repository {
             )
             .map_err(Into::into)
     }
+
+    /// Whole-library counters over present items. `SUM`/`MIN` return NULL on
+    /// an empty library, hence the `Option` round-trip.
+    pub fn library_brief(&self, library_id: &str) -> DbResult<LibraryBrief> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(kind = 'photo'), SUM(kind = 'video'), SUM(kind = 'live'),
+                        (SELECT COUNT(*) FROM favorites f
+                          JOIN media_items m2 ON m2.id = f.media_item_id
+                          WHERE m2.library_id = ?1),
+                        SUM(total_size_bytes),
+                        MIN(capture_date), MAX(capture_date)
+                 FROM media_items
+                 WHERE library_id = ?1 AND scan_state = 'present'",
+                [library_id],
+                |row| {
+                    Ok(LibraryBrief {
+                        total: row.get(0)?,
+                        photos: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        videos: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        lives: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        favorites: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                        total_size_bytes: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                        date_from: row.get(6)?,
+                        date_to: row.get(7)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
 }
 
 fn configure_connection(connection: &Connection) -> DbResult<()> {
@@ -2334,6 +2365,21 @@ pub struct AiStats {
     pub processed: i64,
     pub failed: i64,
     pub pending: i64,
+}
+
+/// Compact whole-library snapshot, injected into the AI assistant system
+/// prompt so answers about "how many / when" come from the real index.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrief {
+    pub total: i64,
+    pub photos: i64,
+    pub videos: i64,
+    pub lives: i64,
+    pub favorites: i64,
+    pub total_size_bytes: i64,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

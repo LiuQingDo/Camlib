@@ -42,6 +42,16 @@ const MAX_TAGS_PER_PHOTO: usize = 10;
 const MAX_TAG_CHARS: usize = 24;
 const MAX_CAPTION_CHARS: usize = 120;
 const MAX_RUN_ERRORS: usize = 20;
+/// Assistant history sent to the model is capped so prompt size stays bounded
+/// even after a long conversation.
+const MAX_CHAT_HISTORY: usize = 16;
+/// Top tags (by usage) injected into the assistant system prompt.
+const CHAT_TOP_TAGS: usize = 30;
+const CHAT_TEMPERATURE: f32 = 0.4;
+const CHAT_MAX_TOKENS: u32 = 1200;
+/// Model-side marker requesting a semantic search; the frontend strips it and
+/// renders a one-click chip. The assistant itself stays read-only.
+const CHAT_SEARCH_MARKER: &str = "[搜索]";
 
 static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +173,69 @@ pub fn validate_config_for_run(config: &AiConfig) -> Result<(), AppError> {
     Ok(())
 }
 
+// ── Chat assistant DTOs ─────────────────────────────────────────────────────
+
+/// One conversation turn as sent by the frontend (user/assistant only; the
+/// system prompt is always rebuilt server-side so prompt engineering stays
+/// out of the webview).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// Browsing context the frontend attaches to every chat request; all fields
+/// are optional so a bare question still works.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiChatContext {
+    /// Current filter state as a small JSON object built by the frontend.
+    pub view: Option<serde_json::Value>,
+    /// The photo open in the preview modal, if any. Its thumbnail rides on
+    /// the last user message so the model can see the picture.
+    pub preview: Option<AiChatPreview>,
+    /// Multi-selection summary from the grid toolbar.
+    pub selection: Option<AiChatSelection>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiChatPreview {
+    pub media_id: String,
+    pub display_name: String,
+    pub kind: Option<String>,
+    pub capture_date: Option<String>,
+    pub rating: Option<i64>,
+    pub favorite: Option<bool>,
+    pub ai_caption: Option<String>,
+    #[serde(default)]
+    pub ai_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiChatSelection {
+    pub count: usize,
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+/// Progress event streamed to the drawer over a Tauri `Channel`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiChatEvent {
+    Delta { text: String },
+}
+
+/// Final command result: the full reply, or the partial text after a cancel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatOutcome {
+    pub content: String,
+    pub cancelled: bool,
+}
+
 // ── Transport (OpenAI-compatible HTTP) ──────────────────────────────────────
 
 /// Abstraction over the two HTTP calls so batch logic is unit-testable.
@@ -173,6 +246,17 @@ pub trait AiTransport: Send + Sync {
         config: &AiConfig,
         prompt: &str,
         image_jpeg: Option<&[u8]>,
+    ) -> Result<String, AppError>;
+
+    /// Multi-turn streaming chat over the OpenAI SSE protocol. `on_delta`
+    /// receives every text chunk; return `false` to stop reading early (user
+    /// cancel). Returns the accumulated text.
+    fn chat_stream(
+        &self,
+        config: &AiConfig,
+        messages: &[AiChatTurn],
+        image_jpeg: Option<&[u8]>,
+        on_delta: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, AppError>;
 
     /// One text embedding vector.
@@ -274,6 +358,85 @@ impl AiTransport for UreqTransport {
             .and_then(|content| content.as_str())
             .map(str::to_owned)
             .ok_or_else(|| AppError::internal("对话模型响应缺少 choices[0].message.content"))
+    }
+
+    fn chat_stream(
+        &self,
+        config: &AiConfig,
+        messages: &[AiChatTurn],
+        image_jpeg: Option<&[u8]>,
+        on_delta: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<String, AppError> {
+        let mut payload: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|turn| json!({"role": turn.role, "content": turn.content}))
+            .collect();
+        // The preview thumbnail rides on the last user message, same data-URL
+        // shape as the single-shot `chat` path.
+        if let Some(bytes) = image_jpeg {
+            if let Some(turn) = payload.iter_mut().rev().find(|turn| turn["role"] == "user") {
+                let text = turn["content"].as_str().unwrap_or_default().to_owned();
+                turn["content"] = json!([
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/jpeg;base64,{}", BASE64.encode(bytes))
+                        }
+                    },
+                    {"type": "text", "text": text}
+                ]);
+            }
+        }
+        let body = json!({
+            "model": config.chat_model,
+            "messages": payload,
+            "temperature": CHAT_TEMPERATURE,
+            "max_tokens": CHAT_MAX_TOKENS,
+            "stream": true,
+        });
+        // Per-read idle timeout instead of an overall deadline: long replies
+        // must not hit a hard cap, but a stalled connection still errors out
+        // after one silent minute.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_read(Duration::from_secs(60))
+            .build();
+        let mut request = agent
+            .post(format!("{}/chat/completions", config.chat_base_url).as_str())
+            .set("Accept", "text/event-stream");
+        if let Some((name, value)) = authorization_header(&config.chat_api_key) {
+            request = request.set(name, &value);
+        }
+        let response = request
+            .send_json(body)
+            .map_err(|error| map_http_error("对话模型请求", error))?;
+        let reader = std::io::BufReader::new(response.into_reader());
+        let mut full = String::new();
+        use std::io::BufRead;
+        for line in reader.lines() {
+            let line = line.map_err(|error| AppError::io(format!("对话模型流式读取失败: {error}")))?;
+            let trimmed = line.trim();
+            // Empty lines separate SSE events; `:` lines are keep-alive
+            // comments (e.g. OpenRouter's processing pings).
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                continue;
+            }
+            let data = trimmed.strip_prefix("data:").map(str::trim).unwrap_or(trimmed);
+            if data == "[DONE]" {
+                break;
+            }
+            match parse_stream_delta(data)? {
+                Some(text) if !text.is_empty() => {
+                    if !on_delta(&text) {
+                        // User cancelled: keep what we already streamed.
+                        return Ok(full);
+                    }
+                    full.push_str(&text);
+                }
+                _ => {}
+            }
+        }
+        Ok(full)
     }
 
     fn embed(&self, config: &AiConfig, text: &str) -> Result<Vec<f32>, AppError> {
@@ -1312,6 +1475,233 @@ fn timestamp_now() -> String {
     )
 }
 
+// ── Chat assistant (drawer) ─────────────────────────────────────────────────
+
+/// Extract the text delta from one SSE `data:` payload. Tolerates malformed
+/// keep-alive lines (skipped) but surfaces an in-stream error object.
+fn parse_stream_delta(data: &str) -> Result<Option<String>, AppError> {
+    if !data.starts_with('{') {
+        return Ok(None);
+    }
+    let value: serde_json::Value = match serde_json::from_str(data) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if let Some(error) = value.get("error") {
+        return Err(AppError::internal(format!(
+            "对话模型流式返回错误: {}",
+            truncate(&error.to_string(), 200)
+        )));
+    }
+    Ok(value
+        .pointer("/choices/0/delta/content")
+        .and_then(|content| content.as_str())
+        .map(str::to_owned))
+}
+
+/// Keep only the last few turns, drop empty/foreign roles, and make sure the
+/// sequence starts with a user message (some providers reject otherwise).
+fn capped_history(history: &[AiChatTurn]) -> Vec<AiChatTurn> {
+    let kept: Vec<AiChatTurn> = history
+        .iter()
+        .rev()
+        .take(MAX_CHAT_HISTORY)
+        .rev()
+        .filter(|turn| {
+            matches!(turn.role.as_str(), "user" | "assistant") && !turn.content.trim().is_empty()
+        })
+        .cloned()
+        .collect();
+    match kept.first() {
+        Some(turn) if turn.role == "assistant" => kept[1..].to_vec(),
+        _ => kept,
+    }
+}
+
+fn describe_preview(preview: &AiChatPreview) -> String {
+    let mut parts = vec![format!("文件名 {}", preview.display_name)];
+    if let Some(kind) = &preview.kind {
+        parts.push(format!("类型 {kind}"));
+    }
+    if let Some(date) = &preview.capture_date {
+        parts.push(format!("拍摄日期 {date}"));
+    }
+    if let Some(rating) = preview.rating {
+        parts.push(format!("评分 {rating}/5"));
+    }
+    if let Some(favorite) = preview.favorite {
+        parts.push(format!("收藏 {favorite}"));
+    }
+    if let Some(caption) = &preview.ai_caption {
+        parts.push(format!("AI 描述：{caption}"));
+    }
+    if !preview.ai_tags.is_empty() {
+        parts.push(format!("AI 标签：{}", preview.ai_tags.join("、")));
+    }
+    parts.join("，")
+}
+
+/// System prompt grounding the assistant in local index data. Everything the
+/// model knows about this library is injected here; nothing is invented.
+fn build_chat_system_prompt(
+    brief: Option<&crate::db::LibraryBrief>,
+    top_tags: &[crate::db::Tag],
+    context: &AiChatContext,
+    today: &str,
+) -> String {
+    let mut prompt = format!("你是 Camlib 个人相册的 AI 助手，帮用户了解和管理本地媒体库。今天是 {today}。\n");
+    match brief {
+        Some(brief) => prompt.push_str(&format!(
+            "\n【媒体库概况】（本地索引统计，回答数量、时间范围、容量等问题时以此为准）\n{}\n",
+            serde_json::to_string(brief).unwrap_or_default()
+        )),
+        None => prompt.push_str("\n【媒体库概况】暂不可用。\n"),
+    }
+    if !top_tags.is_empty() {
+        let tags = top_tags
+            .iter()
+            .map(|tag| {
+                if tag.has_ai {
+                    format!("{}×{}(AI)", tag.name, tag.media_count)
+                } else {
+                    format!("{}×{}", tag.name, tag.media_count)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        prompt.push_str(&format!("\n【常用标签】{tags}\n"));
+    }
+    match &context.view {
+        Some(serde_json::Value::Object(view)) if !view.is_empty() => {
+            prompt.push_str(&format!(
+                "\n【当前浏览上下文】用户正在按这些条件浏览媒体：{}\n",
+                context.view.as_ref().unwrap()
+            ));
+        }
+        _ => {}
+    }
+    if let Some(preview) = &context.preview {
+        prompt.push_str(&format!(
+            "\n【正在查看的照片】{}。用户消息可能附带这张照片的缩略图，可结合画面回答。\n",
+            describe_preview(preview)
+        ));
+    }
+    if let Some(selection) = &context.selection {
+        if selection.count > 0 {
+            let names: String = selection
+                .names
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            prompt.push_str(&format!(
+                "\n【已选中】{} 张照片（{}）。\n",
+                selection.count, names
+            ));
+        }
+    }
+    prompt.push_str(&format!(
+        "\n回答要求：\n\
+         - 用简体中文，简洁、准确、口语化；不确定的不要编造。\n\
+         - 优先回答与相册、照片、视频相关的问题，也可以聊通用摄影话题。\n\
+         - 如果用户想找出某些照片或视频（例如\u{201c}去年秋天的湖边\u{201d}），在回答的最后另起一行输出 \
+         `{CHAT_SEARCH_MARKER} 关键词`，关键词将用于语义搜索；一次最多一个，其他情况不要输出这个标记。\n"
+    ));
+    prompt
+}
+
+/// Collect grounding context, then stream one assistant reply. Thumbnail and
+/// tag lookups degrade silently: a chat answer is more important than a
+/// missing image or tag list.
+#[allow(clippy::too_many_arguments)]
+pub fn run_chat(
+    repository: &Repository,
+    transport: &dyn AiTransport,
+    config: &AiConfig,
+    library_id: Option<&str>,
+    history: &[AiChatTurn],
+    context: &AiChatContext,
+    library_root: Option<&Path>,
+    cache_dir: Option<&Path>,
+    cancel: &AtomicBool,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<AiChatOutcome, AppError> {
+    validate_config_for_run(config)?;
+    let brief = library_id.and_then(|id| repository.library_brief(id).ok());
+    let mut tags = repository.list_tags().unwrap_or_default();
+    tags.retain(|tag| tag.media_count > 0);
+    tags.sort_by(|left, right| {
+        right
+            .media_count
+            .cmp(&left.media_count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    tags.truncate(CHAT_TOP_TAGS);
+
+    let image_jpeg = match (&context.preview, library_root, cache_dir) {
+        (Some(preview), Some(root), Some(cache_dir)) => repository
+            .get_media_item_details(&preview.media_id)
+            .map_err(AppError::from)
+            .ok()
+            .flatten()
+            .and_then(|details| {
+                media::thumbnail_for_item(&details, root, cache_dir, AI_THUMBNAIL_WIDTH, None, None)
+                    .ok()
+                    .and_then(|thumbnail| std::fs::read(&thumbnail.cache_path).ok())
+            }),
+        _ => None,
+    };
+
+    let mut messages: Vec<AiChatTurn> = Vec::with_capacity(history.len() + 1);
+    messages.push(AiChatTurn {
+        role: "system".to_owned(),
+        content: build_chat_system_prompt(brief.as_ref(), &tags, context, &local_today()),
+    });
+    let history = capped_history(history);
+    messages.extend(history.iter().cloned());
+    if !messages.iter().any(|turn| turn.role == "user") {
+        return Err(AppError::invalid_argument("消息内容为空"));
+    }
+
+    let mut interrupted = false;
+    let content = transport.chat_stream(config, &messages, image_jpeg.as_deref(), &mut |delta| {
+        if cancel.load(Ordering::Relaxed) {
+            interrupted = true;
+            return false;
+        }
+        on_delta(delta);
+        true
+    })?;
+    let content = content.trim_end().to_owned();
+    if interrupted {
+        return Ok(AiChatOutcome {
+            content,
+            cancelled: true,
+        });
+    }
+    if content.is_empty() {
+        return Err(AppError::internal("模型未返回内容"));
+    }
+    Ok(AiChatOutcome {
+        content,
+        cancelled: false,
+    })
+}
+
+/// Peek whether the reply asks for a semantic search (`[搜索] 关键词` on its
+/// own line). Exposed for tests; the frontend re-implements the same marker.
+#[cfg(test)]
+fn extract_search_marker(content: &str) -> Option<String> {
+    content.lines().rev().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix(CHAT_SEARCH_MARKER)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1345,6 +1735,23 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| AppError::internal("mock exhausted"))
+        }
+
+        fn chat_stream(
+            &self,
+            _config: &AiConfig,
+            _messages: &[AiChatTurn],
+            _image_jpeg: Option<&[u8]>,
+            on_delta: &mut dyn FnMut(&str) -> bool,
+        ) -> Result<String, AppError> {
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| AppError::internal("mock exhausted"))?;
+            on_delta(&reply);
+            Ok(reply)
         }
 
         fn embed(&self, _config: &AiConfig, _text: &str) -> Result<Vec<f32>, AppError> {
@@ -1903,5 +2310,197 @@ mod tests {
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
         );
+    }
+
+    #[test]
+    fn parse_stream_delta_handles_sse_payloads() {
+        // Regular content chunk.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{"content":"你好"}}]}"#).unwrap(),
+            Some("你好".to_owned())
+        );
+        // Role-only first chunk and finish chunk carry no content.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#).unwrap(),
+            None
+        );
+        // Keep-alive noise is skipped, not fatal.
+        assert_eq!(parse_stream_delta("").unwrap(), None);
+        assert_eq!(parse_stream_delta("not json at all").unwrap(), None);
+        assert_eq!(parse_stream_delta("{broken").unwrap(), None);
+        // Provider-side in-stream errors surface.
+        assert!(parse_stream_delta(r#"{"error":{"message":"quota"}}"#).is_err());
+    }
+
+    #[test]
+    fn capped_history_bounds_and_starts_with_user() {
+        let turn = |role: &str, content: &str| AiChatTurn {
+            role: role.to_owned(),
+            content: content.to_owned(),
+        };
+        let history: Vec<AiChatTurn> = (0..30)
+            .map(|index| {
+                if index % 2 == 0 {
+                    turn("user", &format!("q{index}"))
+                } else {
+                    turn("assistant", &format!("a{index}"))
+                }
+            })
+            .collect();
+        let capped = capped_history(&history);
+        assert_eq!(capped.len(), MAX_CHAT_HISTORY);
+        assert_eq!(capped[0].content, "q14");
+        // Odd turn counts leave an assistant turn first; it is dropped.
+        let odd = vec![
+            turn("assistant", "a"),
+            turn("user", "q"),
+            turn("assistant", "a2"),
+            turn("user", "q2"),
+        ];
+        let capped_odd = capped_history(&odd);
+        assert_eq!(capped_odd.first().unwrap().content, "q");
+        // Empty and unknown roles are filtered out.
+        let noisy = vec![turn("system", "should not survive"), turn("user", "")];
+        assert!(capped_history(&noisy).is_empty());
+    }
+
+    #[test]
+    fn library_brief_counts_present_items() {
+        let repository = setup();
+        let brief = repository.library_brief("library-1").unwrap();
+        assert_eq!(brief.total, 3);
+        assert_eq!(brief.photos, 2);
+        assert_eq!(brief.videos, 1);
+        assert_eq!(brief.lives, 0);
+        assert_eq!(brief.favorites, 0);
+        assert_eq!(brief.date_from.as_deref(), Some("2025-10-20"));
+        assert_eq!(brief.date_to.as_deref(), Some("2025-10-20"));
+    }
+
+    #[test]
+    fn run_chat_streams_and_injects_context() {
+        let repository = setup();
+        let transport = MockTransport::new(
+            "你的媒体库共有 3 项，其中照片 2 张。\n[搜索] 湖边",
+            Vec::new(),
+        );
+        let cancel = AtomicBool::new(false);
+        let context = AiChatContext {
+            view: Some(json!({"kind": "photo"})),
+            preview: Some(AiChatPreview {
+                media_id: "photo-lake".into(),
+                display_name: "photo-lake.jpg".into(),
+                kind: Some("photo".into()),
+                capture_date: Some("2025-10-20".into()),
+                rating: Some(4),
+                favorite: Some(true),
+                ai_caption: Some("湖边秋色".into()),
+                ai_tags: vec!["风景".into()],
+            }),
+            selection: Some(AiChatSelection {
+                count: 1,
+                names: vec!["photo-food.jpg".into()],
+            }),
+        };
+        let history = vec![
+            AiChatTurn {
+                role: "user".into(),
+                content: "我拍过多少照片？".into(),
+            },
+            AiChatTurn {
+                role: "assistant".into(),
+                content: "2 张。".into(),
+            },
+            AiChatTurn {
+                role: "user".into(),
+                content: "帮我找湖边的照片".into(),
+            },
+        ];
+        let mut deltas: Vec<String> = Vec::new();
+        let outcome = run_chat(
+            &repository,
+            &transport,
+            &ready_config(),
+            Some("library-1"),
+            &history,
+            &context,
+            None,
+            None,
+            &cancel,
+            &mut |delta| deltas.push(delta.to_owned()),
+        )
+        .unwrap();
+        assert!(!outcome.cancelled);
+        assert_eq!(deltas, vec![outcome.content.clone()]);
+        assert_eq!(
+            extract_search_marker(&outcome.content).as_deref(),
+            Some("湖边")
+        );
+    }
+
+    #[test]
+    fn run_chat_reports_cancel_and_rejects_empty() {
+        let repository = setup();
+        // Reply arrives, but the cancel flag is already set: partial output.
+        let transport = MockTransport::new("未完成的回复", Vec::new());
+        let cancel = AtomicBool::new(true);
+        let outcome = run_chat(
+            &repository,
+            &transport,
+            &ready_config(),
+            Some("library-1"),
+            &[AiChatTurn {
+                role: "user".into(),
+                content: "你好".into(),
+            }],
+            &AiChatContext::default(),
+            None,
+            None,
+            &cancel,
+            &mut |_| {}
+        )
+        .unwrap();
+        assert!(outcome.cancelled);
+
+        // No user turn at all → rejected before any network call.
+        let transport = MockTransport::new("unused", Vec::new());
+        let cancel = AtomicBool::new(false);
+        let error = run_chat(
+            &repository,
+            &transport,
+            &ready_config(),
+            Some("library-1"),
+            &[],
+            &AiChatContext::default(),
+            None,
+            None,
+            &cancel,
+            &mut |_| {}
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("消息内容为空"));
+    }
+
+    #[test]
+    fn system_prompt_contains_brief_and_marker_rule() {
+        let brief = crate::db::LibraryBrief {
+            total: 12,
+            photos: 10,
+            videos: 2,
+            lives: 0,
+            favorites: 3,
+            total_size_bytes: 4096,
+            date_from: Some("2024-01-01".into()),
+            date_to: Some("2025-12-31".into()),
+        };
+        let context = AiChatContext::default();
+        let prompt = build_chat_system_prompt(Some(&brief), &[], &context, "2026-11-01");
+        assert!(prompt.contains("2026-11-01"));
+        assert!(prompt.contains("\"total\":12"));
+        assert!(prompt.contains(CHAT_SEARCH_MARKER));
     }
 }

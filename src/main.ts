@@ -113,6 +113,7 @@ import {
 } from "./api/media";
 import {
   aiSearch,
+  cancelAiChat,
   cancelAiProcess,
   getAiConfig,
   getAiStats,
@@ -120,9 +121,13 @@ import {
   processAiItem,
   setAiConfig,
   startAiProcess,
+  streamAiChat,
   testAiConnection,
   detachAiTag,
   onAiProgress,
+  type AiChatContextDto,
+  type AiChatPreviewDto,
+  type AiChatTurnDto,
   type AiConfigDto,
   type AiProcessPreviewDto,
   type AiProgressDto,
@@ -137,6 +142,15 @@ type Density = 1 | 2 | 3 | 4 | 5;
 
 /** One requested cut range of the video editor; the active one drives the handles. */
 type EditorSegment = { inMs: number; outMs: number; merge: boolean };
+
+/** AI 助手抽屉的一条消息；streaming 标记正在流式接收的助手回复。 */
+interface AiChatUiMessage {
+  role: "user" | "assistant";
+  content: string;
+  streaming?: boolean;
+  /** 助手回复末尾解析出的 [搜索] 标记，渲染为一键语义搜索 chip。 */
+  searchAction?: string;
+}
 
 interface AppState {
   availability: LibraryAvailability;
@@ -311,6 +325,10 @@ interface AppState {
   aiSingleFailed: number;
   aiSingleCurrent: string | null;
   aiSingleNotice: string | null;
+  /** AI 助手聊天抽屉（仅会话内存，不持久化）。 */
+  aiChatOpen: boolean;
+  aiChatBusy: boolean;
+  aiChatMessages: AiChatUiMessage[];
 }
 
 const state: AppState = {
@@ -460,6 +478,9 @@ const state: AppState = {
   aiSingleFailed: 0,
   aiSingleCurrent: null,
   aiSingleNotice: null,
+  aiChatOpen: false,
+  aiChatBusy: false,
+  aiChatMessages: [],
 };
 
 type SettingsSection = "library" | "index" | "thumbnails" | "backup" | "ai" | "system" | "about";
@@ -744,6 +765,12 @@ const app: HTMLElement = appRoot;
 let searchDraft = "";
 // Same draft discipline for the semantic (natural-language) search box.
 let semanticDraft = "";
+// AI 助手抽屉：输入草稿与会话内调宽。消息本体在 state 中（会话内存）。
+let aiChatDraft = "";
+let aiChatWidth = 400;
+// 预览弹窗“问 AI 助手”时钉住的照片上下文：抽屉层级低于预览，需先关预览，
+// 再把这张照片作为固定上下文带入抽屉（mediaId 仍可用于取缩略图）。
+let aiChatPinnedPreview: AiChatPreviewDto | null = null;
 // Bootstrap re-runs after every scan terminal event. Auto-scan must only fire
 // for the first successful launch of this session so completion cannot loop.
 let startupAutoScanStarted = false;
@@ -3304,8 +3331,254 @@ function renderAiSidebarSection(): string {
     ${statsRow}
     ${busy ? `<div class="ai-single-progress" id="ai-single-progress"><div class="ai-single-copy"><span class="spinner"></span><span data-ai-single-count>${state.aiSingleDone} / ${state.aiSingleTotal}</span><button class="text-button" id="ai-single-cancel" type="button">取消</button></div><div class="progress-track"><span data-ai-single-track style="width:${progressPercent}%"></span></div><div class="ai-single-current" data-ai-single-current>${escapeHtml(state.aiSingleCurrent ?? "")}</div></div>`
       : state.aiSingleNotice ? `<div class="ai-single-notice">${escapeHtml(state.aiSingleNotice)}</div>` : ""}
-    <div class="ai-sidebar-actions"><button class="text-button" id="ai-semantic-focus" type="button">✦ 语义搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
+    <div class="ai-sidebar-actions"><button class="text-button" id="ai-chat-open" type="button">✬ AI 助手</button><button class="text-button" id="ai-semantic-focus" type="button">✦ 语义搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
   </div>`;
+}
+
+// ── AI 助手（聊天抽屉） ─────────────────────────────────────────────────────
+
+/** 对话模型是否已配置完整（前端预检，与 Rust validate_config_for_run 对齐）。 */
+function aiChatReady(): boolean {
+  const config = state.aiConfig;
+  return (
+    !!config?.enabled &&
+    config.chatModel.trim().length > 0 &&
+    /^https?:\/\//.test(config.chatBaseUrl.trim())
+  );
+}
+
+/** 助手当前能“看到”的照片：预览中者优先，其次预览里钉住的那张。 */
+function aiChatActivePreview(): AiChatPreviewDto | null {
+  if (state.previewIndex !== null) {
+    const item = state.page.items[state.previewIndex];
+    if (!item) return null;
+    return {
+      mediaId: item.id,
+      displayName: item.displayName,
+      kind: item.kind,
+      captureDate: item.captureDate ?? undefined,
+      rating: item.rating || undefined,
+      favorite: item.favorite || undefined,
+      aiCaption: previewMetaCache?.aiCaption ?? undefined,
+      aiTags: previewMetaCache?.aiTags?.map((tag) => tag.name),
+    };
+  }
+  return aiChatPinnedPreview;
+}
+
+/** 抽屉头部的上下文提示，让用户知道助手当前掌握哪些信息。 */
+function aiChatContextSummary(): string {
+  const bits: string[] = [];
+  const preview = aiChatActivePreview();
+  if (preview) bits.push(`预览 ${preview.displayName}`);
+  if (state.selectedIds.size) bits.push(`已选 ${state.selectedIds.size} 张`);
+  if (state.semanticSearch) bits.push(`语义「${state.semanticSearch}」`);
+  else if (hasAnyFilter()) bits.push("筛选中");
+  return bits.join(" · ");
+}
+
+function renderAiChatMessage(message: AiChatUiMessage, index: number): string {
+  if (message.role === "user") {
+    return `<div class="ai-chat-message is-user" data-chat-index="${index}"><div class="ai-chat-bubble">${escapeHtml(message.content)}</div></div>`;
+  }
+  const action = message.searchAction
+    ? `<button type="button" class="ai-chat-search-chip" data-chat-search="${escapeHtml(message.searchAction)}" title="用语义搜索在媒体库中查找">⌕ 执行语义搜索：${escapeHtml(message.searchAction)}</button>`
+    : "";
+  return `<div class="ai-chat-message is-assistant" data-chat-index="${index}"><div class="ai-chat-bubble">${escapeHtml(message.content)}${message.streaming ? `<span class="ai-chat-caret" aria-hidden="true"></span>` : ""}</div>${action}</div>`;
+}
+
+function renderAiChatDrawer(): string {
+  if (!state.aiChatOpen) return "";
+  const ready = aiChatReady();
+  const summary = aiChatContextSummary();
+  const body = !ready
+    ? `<div class="ai-chat-empty"><span class="ai-chat-empty-icon" aria-hidden="true">✬</span><p>AI 助手需要在设置中启用 AI 增强，并填写对话模型的 Base URL 与模型名称。</p><button class="primary-button" id="ai-chat-goto-settings" type="button">去设置</button></div>`
+    : state.aiChatMessages.length === 0
+      ? `<div class="ai-chat-empty"><span class="ai-chat-empty-icon" aria-hidden="true">✬</span><p>我是你的相册助手，可以试试：</p><ul><li>去年十月我拍了哪些照片？</li><li>帮我找海边的照片</li><li>这张照片里是什么？（预览时可用）</li></ul></div>`
+      : state.aiChatMessages.map((message, index) => renderAiChatMessage(message, index)).join("");
+  return `<aside class="ai-chat-drawer" id="ai-chat-drawer" role="dialog" aria-label="AI 助手" style="width:${aiChatWidth}px">
+    <div class="ai-chat-resize-handle" id="ai-chat-resize-handle" aria-hidden="true"></div>
+    <header class="ai-chat-head">
+      <div class="ai-chat-title"><span class="ai-chat-glyph" aria-hidden="true">✬</span><div><strong>AI 助手</strong><span>${summary ? escapeHtml(summary) : "基于当前媒体库回答"}</span></div></div>
+      <div class="ai-chat-head-actions">${state.aiChatMessages.length && !state.aiChatBusy ? `<button class="text-button" id="ai-chat-clear" type="button">清空</button>` : ""}<button class="icon-button" id="ai-chat-close" type="button" aria-label="关闭 AI 助手" title="关闭">×</button></div>
+    </header>
+    <div class="ai-chat-body" id="ai-chat-body">${body}</div>
+    <footer class="ai-chat-input-row">
+      <textarea id="ai-chat-input" rows="1" placeholder="${state.aiChatBusy ? "回复中…" : "输入问题，Enter 发送，Shift+Enter 换行"}" aria-label="AI 助手输入框" ${state.aiChatBusy || !ready ? "disabled" : ""}></textarea>
+      ${state.aiChatBusy
+        ? `<button class="outline-button ai-chat-send" id="ai-chat-stop" type="button" aria-label="停止生成" title="停止生成">■</button>`
+        : `<button class="primary-button ai-chat-send" id="ai-chat-send" type="button" aria-label="发送" title="发送" ${ready ? "" : "disabled"}>↑</button>`}
+    </footer>
+  </aside>`;
+}
+
+/** Stream 期间不整层 render，只 patch 当前气泡（防丢焦点/闪烁）。 */
+function appendAiChatDelta(text: string): void {
+  if (!state.aiChatMessages.length) return;
+  const body = app.querySelector<HTMLElement>("#ai-chat-body");
+  if (body) {
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+    const last = state.aiChatMessages[state.aiChatMessages.length - 1];
+    last.content += text;
+    const bubble = body.querySelector<HTMLElement>(".ai-chat-message:last-child .ai-chat-bubble");
+    if (bubble) {
+      bubble.textContent = last.content;
+      const caret = document.createElement("span");
+      caret.className = "ai-chat-caret";
+      caret.setAttribute("aria-hidden", "true");
+      bubble.appendChild(caret);
+    }
+    if (nearBottom) body.scrollTop = body.scrollHeight;
+    return;
+  }
+  // 抽屉不在 DOM（例如被浮层盖住后重建过）也要保住内容。
+  const last = state.aiChatMessages[state.aiChatMessages.length - 1];
+  last.content += text;
+}
+
+function scrollAiChatBody(force = false): void {
+  const body = app.querySelector<HTMLElement>("#ai-chat-body");
+  if (!body) return;
+  if (force || body.scrollHeight - body.scrollTop - body.clientHeight < 80) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+/** 解析回复末尾的 [搜索] 标记：从正文剥离，返回语义搜索词。 */
+function splitSearchMarker(content: string): { content: string; query: string | null } {
+  const match = content.match(/(?:^|\n)\s*\[搜索\][ \t]*(.+?)\s*$/);
+  if (!match) return { content: content.trim(), query: null };
+  return { content: content.slice(0, match.index ?? 0).trim(), query: match[1].trim() };
+}
+
+/** 打包当前筛选/预览/多选状态，作为助手回答的「你在这里」上下文。 */
+function collectAiChatContext(): AiChatContextDto {
+  const view: Record<string, unknown> = {};
+  if (state.search) view["文件名搜索"] = state.search;
+  if (state.semanticSearch) view["语义搜索"] = state.semanticSearch;
+  if (state.kind) view["类型"] = kindLabel(state.kind);
+  if (state.datePrefix) view["日期"] = state.datePrefix;
+  if (state.dateFrom) view["起始日期"] = state.dateFrom;
+  if (state.dateTo) view["结束日期"] = state.dateTo;
+  if (state.favoriteOnly) view["仅收藏"] = true;
+  if (state.burstOnly) view["仅连拍"] = true;
+  if (state.ratingEq !== null) view["评分等于"] = state.ratingEq;
+  if (state.ratingMin !== null) view["评分至少"] = state.ratingMin;
+  if (state.tagIds.size) {
+    const names = [...state.tagIds]
+      .map((id) => state.tags.find((tag) => tag.id === id)?.name)
+      .filter(Boolean);
+    if (names.length) view["标签"] = names;
+  }
+  const context: AiChatContextDto = { view };
+  const preview = aiChatActivePreview();
+  if (preview) context.preview = preview;
+  if (state.selectedIds.size > 0) {
+    const names = [...state.selectedIds]
+      .slice(0, 10)
+      .map((id) => state.page.items.find((item) => item.id === id)?.displayName ?? "")
+      .filter(Boolean);
+    context.selection = { count: state.selectedIds.size, names };
+  }
+  return context;
+}
+
+/** 发送当前草稿：占位气泡 → 流式 patch → 结束后一次性 render 挂搜索 chip。 */
+async function sendAiChatMessage(): Promise<void> {
+  if (state.aiChatBusy) return;
+  const draft = aiChatDraft.trim();
+  if (!draft || !state.library) return;
+  if (!aiChatReady()) {
+    void openSettings("ai");
+    return;
+  }
+  state.aiChatMessages.push({ role: "user", content: draft });
+  state.aiChatMessages.push({ role: "assistant", content: "", streaming: true });
+  aiChatDraft = "";
+  state.aiChatBusy = true;
+  render();
+  scrollAiChatBody(true);
+  // 发给模型的历史去掉流式占位，并截到最后 16 条。
+  const history: AiChatTurnDto[] = state.aiChatMessages
+    .slice(0, -1)
+    .slice(-16)
+    .map((message) => ({ role: message.role, content: message.content }));
+  try {
+    const result = await streamAiChat(
+      state.library.id,
+      history,
+      collectAiChatContext(),
+      (text) => appendAiChatDelta(text),
+    );
+    const reply = state.aiChatMessages[state.aiChatMessages.length - 1];
+    reply.streaming = false;
+    const parsed = splitSearchMarker(result.content);
+    reply.content = parsed.content;
+    reply.searchAction = parsed.query ?? undefined;
+  } catch (error) {
+    const reply = state.aiChatMessages[state.aiChatMessages.length - 1];
+    if (reply?.role === "assistant") {
+      if (reply.content.trim()) reply.streaming = false;
+      else state.aiChatMessages.pop();
+    }
+    showTransientNotice(toUserMessage(error), "error");
+  } finally {
+    state.aiChatBusy = false;
+    render();
+    scrollAiChatBody(true);
+    const input = app.querySelector<HTMLTextAreaElement>("#ai-chat-input");
+    input?.focus();
+    if (input) autoGrowAiChatInput(input);
+  }
+}
+
+function autoGrowAiChatInput(input: HTMLTextAreaElement): void {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+}
+
+function closeAiChatDrawer(): void {
+  state.aiChatOpen = false;
+  aiChatPinnedPreview = null;
+  render();
+}
+
+/**
+ * 打开抽屉。配置只在设置页 AI 分区时加载过；抽屉的就绪判断依赖它，
+ * 所以首次打开前按需拉取一次（失败则保持 null，抽屉渲染引导空态）。
+ */
+async function openAiChatDrawer(): Promise<void> {
+  if (!state.aiConfig) {
+    try {
+      state.aiConfig = await getAiConfig();
+    } catch {
+      // 网络级失败罕见（本地 SQLite），引导空态即可。
+    }
+  }
+  state.aiChatOpen = true;
+  render();
+  app.querySelector<HTMLTextAreaElement>("#ai-chat-input")?.focus();
+}
+
+/** 左缘拖拽调宽（会话内有效）；与对话框的 8 向缩放无关，避免破坏全高布局。 */
+function setupAiChatResize(): void {
+  const drawer = app.querySelector<HTMLElement>("#ai-chat-drawer");
+  const handle = app.querySelector<HTMLElement>("#ai-chat-resize-handle");
+  if (!drawer || !handle || drawer.dataset.chatResizeBound === "1") return;
+  drawer.dataset.chatResizeBound = "1";
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = drawer.getBoundingClientRect().width;
+    const onMove = (moveEvent: PointerEvent) => {
+      aiChatWidth = Math.min(560, Math.max(320, Math.round(startWidth + (startX - moveEvent.clientX))));
+      drawer.style.width = `${aiChatWidth}px`;
+    };
+    const stop = () => window.removeEventListener("pointermove", onMove);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop, { once: true });
+    window.addEventListener("pointercancel", stop, { once: true });
+  });
 }
 
 function render(): void {
@@ -3326,13 +3599,14 @@ function render(): void {
     <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}`;
+    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}${renderAiChatDrawer()}`;
   bindEvents();
   bindTagManagerEvents();
   bindMergeModalEvents();
   // Restore saved dialog geometry and mount resize handles for fresh dialogs.
   applyDialogSizes();
   setupDialogResizing();
+  setupAiChatResize();
   // A full render rebuilds the preview modal as a bare spinner placeholder, and
   // an in-flight loadModalAsset() writes into the discarded DOM. While the
   // viewer is still open (e.g. it sat behind the editor), re-fill it — every
@@ -3598,6 +3872,45 @@ function bindEvents(): void {
     // The sequential loop checks this flag before each photo.
     state.aiSingleBusy = false;
   });
+  // AI 助手抽屉。
+  app.querySelector<HTMLButtonElement>("#ai-chat-open")?.addEventListener("click", () => void openAiChatDrawer());
+  app.querySelector<HTMLButtonElement>("#ai-chat-close")?.addEventListener("click", () => closeAiChatDrawer());
+  app.querySelector<HTMLButtonElement>("#ai-chat-goto-settings")?.addEventListener("click", () => void openSettings("ai"));
+  app.querySelector<HTMLButtonElement>("#ai-chat-clear")?.addEventListener("click", () => {
+    if (state.aiChatBusy) return;
+    state.aiChatMessages = [];
+    render();
+  });
+  app.querySelector<HTMLButtonElement>("#ai-chat-send")?.addEventListener("click", () => void sendAiChatMessage());
+  app.querySelector<HTMLButtonElement>("#ai-chat-stop")?.addEventListener("click", () => {
+    // Rust 在下一个 delta 处停下，部分回复会随命令结果返回。
+    void cancelAiChat();
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-chat-search]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const query = (button.dataset.chatSearch || "").trim();
+      if (!query) return;
+      // 先让语义输入框渲染出查询词，commitSemanticSearch 才能取到。
+      semanticDraft = query;
+      state.filtersExpanded = true;
+      render();
+      commitSemanticSearch();
+    });
+  });
+  const chatInput = app.querySelector<HTMLTextAreaElement>("#ai-chat-input");
+  if (chatInput) {
+    chatInput.value = aiChatDraft;
+    chatInput.addEventListener("input", () => {
+      aiChatDraft = chatInput.value;
+      autoGrowAiChatInput(chatInput);
+    });
+    chatInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        void sendAiChatMessage();
+      }
+    });
+  }
   app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => {
     state.sort = (event.target as HTMLSelectElement).value as SortMode;
     void persistUiPrefs({ uiSort: state.sort });
@@ -4609,7 +4922,7 @@ function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto): strin
       ${tagAddControl}
     </div>
     ${item.kind !== "video" ? `<div class="meta-ai-block">
-      <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span><span class="meta-ai-tools">${(meta.aiCaption || (meta.aiTags && meta.aiTags.length)) ? `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>重新打标</button>` : `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>AI 打标</button>`}</span></div>
+      <div class="meta-tags-head"><h4>AI 描述</h4><span class="ai-badge" aria-hidden="true">AI</span><span class="meta-ai-tools"><button type="button" class="text-button" id="preview-ask-ai" title="关闭预览并打开 AI 助手，自动带上这张照片的上下文">问 AI 助手</button>${(meta.aiCaption || (meta.aiTags && meta.aiTags.length)) ? `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>重新打标</button>` : `<button type="button" class="text-button" id="preview-ai-tag" data-media-id="${escapeHtml(item.id)}" ${state.aiSingleBusy || state.aiJobId ? "disabled" : ""}>AI 打标</button>`}</span></div>
       ${meta.aiCaption ? `<p class="meta-ai-caption">${escapeHtml(meta.aiCaption)}</p>` : `<p class="meta-ai-caption meta-ai-empty">尚未生成。将发送该照片缩略图到你配置的 AI 服务。</p>`}
     </div>` : ""}
     <h4>关联文件</h4>
@@ -4699,6 +5012,22 @@ function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): void {
   panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.addEventListener("click", () => {
     const mediaId = panel.querySelector<HTMLButtonElement>("#preview-ai-tag")?.dataset.mediaId || item.id;
     void runAiTagging([mediaId]);
+  });
+  // 抽屉层级低于预览：先钉住这张照片的上下文，再走完整预览关闭清理
+  // （沉浸/全屏/实况状态），最后打开抽屉。
+  panel.querySelector<HTMLButtonElement>("#preview-ask-ai")?.addEventListener("click", () => {
+    aiChatPinnedPreview = {
+      mediaId: item.id,
+      displayName: item.displayName,
+      kind: item.kind,
+      captureDate: item.captureDate ?? undefined,
+      rating: item.rating || undefined,
+      favorite: item.favorite || undefined,
+      aiCaption: previewMetaCache?.aiCaption ?? undefined,
+      aiTags: previewMetaCache?.aiTags?.map((tag) => tag.name),
+    };
+    closePreview();
+    void openAiChatDrawer();
   });
 }
 
@@ -6801,6 +7130,12 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
       event.preventDefault();
       app.querySelector<HTMLInputElement>("#search-input")?.focus();
+    }
+    // AI 助手抽屉层级低于预览：仅当没有更高层浮层时才用 Esc 关它。
+    if (state.aiChatOpen && event.key === "Escape") {
+      event.preventDefault();
+      closeAiChatDrawer();
+      return;
     }
     return;
   }

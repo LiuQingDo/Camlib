@@ -11,7 +11,9 @@ mod scanner;
 mod system;
 mod video_merge;
 
-use ai::{AiConfig, AiJobManagerState, AiRunMode, AiTransport};
+use ai::{
+    AiChatContext, AiChatEvent, AiChatTurn, AiConfig, AiJobManagerState, AiRunMode, AiTransport,
+};
 use backup::{
     BackupManagerState, BackupPreviewDto, BackupPreviewRequest, BackupStartResponse,
     BackupVolumeDto,
@@ -27,6 +29,8 @@ use scanner::{ScanManagerState, ScanStartResponse};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -1652,6 +1656,109 @@ fn ai_process_cancel(job_id: String, jobs: State<'_, AiJobManagerState>) -> Resu
     jobs.cancel(&job_id)
 }
 
+/// Serializes the chat drawer: one in-flight stream at a time, plus a
+/// cooperative cancel flag the stream loop checks between deltas.
+#[derive(Default)]
+struct AiChatState {
+    busy: AtomicBool,
+    cancel: AtomicBool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiChatResultDto {
+    content: String,
+    cancelled: bool,
+}
+
+/// Streamed assistant reply for the chat drawer. Text chunks arrive on the
+/// Tauri channel while the command blocks until the provider finishes (or the
+/// user cancels). Context collection and streaming both run on the command's
+/// own thread with an independently opened repository, so the shared
+/// infrastructure lock is never held across network I/O.
+#[tauri::command]
+fn ai_chat(
+    library_id: String,
+    history: Vec<AiChatTurn>,
+    context: AiChatContext,
+    on_event: Channel<AiChatEvent>,
+    state: State<'_, InfrastructureState>,
+    chat: State<'_, AiChatState>,
+) -> Result<AiChatResultDto, AppError> {
+    let (database_path, root, cache_dir) = state.with_infrastructure(|infrastructure| {
+        ensure_library_ready(infrastructure, &library_id)?;
+        let library = infrastructure
+            .repository()
+            .get_library(&library_id)
+            .map_err(infrastructure::InfrastructureError::database)?
+            .ok_or_else(|| {
+                infrastructure::InfrastructureError::InvalidPath("媒体库不存在".to_owned())
+            })?;
+        let settings = infrastructure.settings()?;
+        Ok((
+            infrastructure.database_path(),
+            PathBuf::from(&library.root_path),
+            PathBuf::from(&settings.thumbnail_cache_dir),
+        ))
+    })?;
+    if chat.busy.swap(true, Ordering::SeqCst) {
+        return Err(AppError::invalid_argument(
+            "AI 助手正在回复中，请等当前回复结束",
+        ));
+    }
+    chat.cancel.store(false, Ordering::SeqCst);
+    let result = ai_chat_stream(
+        database_path, root, cache_dir, library_id, history, context, &chat, &on_event,
+    );
+    chat.busy.store(false, Ordering::SeqCst);
+    result
+}
+
+/// Body of `ai_chat` after the infrastructure lock is released: the network
+/// stream runs against an independently opened repository.
+fn ai_chat_stream(
+    database_path: PathBuf,
+    root: PathBuf,
+    cache_dir: PathBuf,
+    library_id: String,
+    history: Vec<AiChatTurn>,
+    context: AiChatContext,
+    chat: &AiChatState,
+    on_event: &Channel<AiChatEvent>,
+) -> Result<AiChatResultDto, AppError> {
+    let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
+    let config = ai::load_config(&repository)?;
+    let transport = ai::UreqTransport;
+    let outcome = ai::run_chat(
+        &repository,
+        &transport,
+        &config,
+        Some(&library_id),
+        &history,
+        &context,
+        Some(&root),
+        Some(&cache_dir),
+        &chat.cancel,
+        &mut |delta| {
+            let _ = on_event.send(AiChatEvent::Delta {
+                text: delta.to_owned(),
+            });
+        },
+    )?;
+    Ok(AiChatResultDto {
+        content: outcome.content,
+        cancelled: outcome.cancelled,
+    })
+}
+
+/// Ask the streaming loop to stop at the next delta; the partial reply is
+/// kept and returned as the command result.
+#[tauri::command]
+fn ai_chat_cancel(chat: State<'_, AiChatState>) -> Result<(), AppError> {
+    chat.cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AiProcessItemDto {
@@ -1818,6 +1925,7 @@ pub fn run() {
             app.manage(video_merge::VideoMergeManagerState::new());
             app.manage(PreviewJobManagerState::new());
             app.manage(AiJobManagerState::new());
+            app.manage(AiChatState::default());
             app.manage(streams.clone());
 
             if let Some(window) = app.get_webview_window("main") {
@@ -1901,7 +2009,9 @@ pub fn run() {
             ai_process_cancel,
             ai_process_item,
             ai_search,
-            ai_tag_detach
+            ai_tag_detach,
+            ai_chat,
+            ai_chat_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

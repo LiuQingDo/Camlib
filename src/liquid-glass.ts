@@ -69,6 +69,11 @@ const TARGETS: GlassTarget[] = [
     style: { strength: 0.42, band: 0.16, blur: 22, saturate: 1.4, contrast: 1.05, brightness: 1.04 },
   },
   {
+    key: "ai-chat-drawer",
+    selector: ".ai-chat-drawer",
+    style: { strength: 0.42, band: 0.14, blur: 22, saturate: 1.4, contrast: 1.05, brightness: 1.03 },
+  },
+  {
     key: "search-box",
     selector: ".search-box",
     style: { strength: 0.5, band: 0.28, blur: 18, saturate: 1.3, contrast: 1.04, brightness: 1.05 },
