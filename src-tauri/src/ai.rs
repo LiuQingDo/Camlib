@@ -414,14 +414,18 @@ impl AiTransport for UreqTransport {
         let mut full = String::new();
         use std::io::BufRead;
         for line in reader.lines() {
-            let line = line.map_err(|error| AppError::io(format!("对话模型流式读取失败: {error}")))?;
+            let line =
+                line.map_err(|error| AppError::io(format!("对话模型流式读取失败: {error}")))?;
             let trimmed = line.trim();
             // Empty lines separate SSE events; `:` lines are keep-alive
             // comments (e.g. OpenRouter's processing pings).
             if trimmed.is_empty() || trimmed.starts_with(':') {
                 continue;
             }
-            let data = trimmed.strip_prefix("data:").map(str::trim).unwrap_or(trimmed);
+            let data = trimmed
+                .strip_prefix("data:")
+                .map(str::trim)
+                .unwrap_or(trimmed);
             if data == "[DONE]" {
                 break;
             }
@@ -1549,7 +1553,8 @@ fn build_chat_system_prompt(
     context: &AiChatContext,
     today: &str,
 ) -> String {
-    let mut prompt = format!("你是 Camlib 个人相册的 AI 助手，帮用户了解和管理本地媒体库。今天是 {today}。\n");
+    let mut prompt =
+        format!("你是 Camlib 个人相册的 AI 助手，帮用户了解和管理本地媒体库。今天是 {today}。\n");
     match brief {
         Some(brief) => prompt.push_str(&format!(
             "\n【媒体库概况】（本地索引统计，回答数量、时间范围、容量等问题时以此为准）\n{}\n",
@@ -1665,14 +1670,15 @@ pub fn run_chat(
     }
 
     let mut interrupted = false;
-    let content = transport.chat_stream(config, &messages, image_jpeg.as_deref(), &mut |delta| {
-        if cancel.load(Ordering::Relaxed) {
-            interrupted = true;
-            return false;
-        }
-        on_delta(delta);
-        true
-    })?;
+    let content =
+        transport.chat_stream(config, &messages, image_jpeg.as_deref(), &mut |delta| {
+            if cancel.load(Ordering::Relaxed) {
+                interrupted = true;
+                return false;
+            }
+            on_delta(delta);
+            true
+        })?;
     let content = content.trim_end().to_owned();
     if interrupted {
         return Ok(AiChatOutcome {
@@ -2461,7 +2467,7 @@ mod tests {
             None,
             None,
             &cancel,
-            &mut |_| {}
+            &mut |_| {},
         )
         .unwrap();
         assert!(outcome.cancelled);
@@ -2479,7 +2485,7 @@ mod tests {
             None,
             None,
             &cancel,
-            &mut |_| {}
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(error.to_string().contains("消息内容为空"));

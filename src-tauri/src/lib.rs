@@ -28,8 +28,8 @@ use media::{MediaStreamRegistry, PreviewJobManagerState};
 use scanner::{ScanManagerState, ScanStartResponse};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -1708,7 +1708,14 @@ fn ai_chat(
     }
     chat.cancel.store(false, Ordering::SeqCst);
     let result = ai_chat_stream(
-        database_path, root, cache_dir, library_id, history, context, &chat, &on_event,
+        database_path,
+        root,
+        cache_dir,
+        library_id,
+        history,
+        context,
+        &chat,
+        &on_event,
     );
     chat.busy.store(false, Ordering::SeqCst);
     result
