@@ -13,10 +13,14 @@ SQLite schema version lives in `CURRENT_SCHEMA_VERSION` (`src-tauri/src/db/mod.r
 
 Release installers may bundle ffmpeg for video thumbnails; the **Git repository does not**. Uninstall does not delete the media library directory; index/settings live under `%APPDATA%\com.camera.media-library\`.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-02
+
+Assets: [GitHub Release v0.5.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.5.0) — `Camlib_0.5.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.5.0_x64_en-US.msi` (WiX)
 
 ### Added
 
+- AI 助手对话抽屉：侧边栏入口打开可伸缩的对话抽屉，多轮流式对话（逐段回传、可中途停止），系统提示词由 Rust 端注入媒体库概况与当前浏览/预览/多选上下文，前端不持有提示词；助手只读，回复末尾的 `[搜索] 关键词` 标记由前端渲染为一键语义搜索 chip
+- 侧边栏 AI 区块：提供单张/选中打标入口，与详情面板的 AI 打标结果共用同一套任务与统计
 - AI 增强（可选，默认关闭）：云端 API 自动打标与语义搜索，共用一条 OpenAI 兼容管线
   - 设置 → AI 增强：总开关（含隐私提示）、对话模型与 Embedding 两组独立配置、"测试连通性"按钮、已处理/待处理/失败统计
   - 自动打标：多模态对话模型对照片缩略图（~512px，复用现有缩略图管线，不上传原图）生成中文标签 + 一句话描述；标签写入现有标签体系但存于独立关联表 `media_ai_tags`，删除手打标签绝不误删 AI 标签，筛选区 AI 标签带徽标
