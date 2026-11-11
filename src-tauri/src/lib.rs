@@ -1489,17 +1489,31 @@ struct AiTestResultDto {
 
 /// Minimal reachability probe for one endpoint group. Works while AI is still
 /// disabled so users can validate credentials before turning the feature on.
+///
+/// The probe is a blocking HTTP round-trip, so the command itself only
+/// snapshots the config (the `State` borrow ends before the first `await`) and
+/// the network call runs on a blocking worker.
 #[tauri::command]
-fn ai_test_connection(
+async fn ai_test_connection(
     target: String,
     state: State<'_, InfrastructureState>,
 ) -> Result<AiTestResultDto, AppError> {
     let config = state.with_infrastructure(|infrastructure| {
         ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
     })?;
+    tauri::async_runtime::spawn_blocking(move || ai_test_connection_blocking(&target, &config))
+        .await
+        .map_err(|error| AppError::internal(format!("连接测试异常结束: {error}")))?
+}
+
+/// Body of `ai_test_connection` after the infrastructure lock is released.
+fn ai_test_connection_blocking(
+    target: &str,
+    config: &AiConfig,
+) -> Result<AiTestResultDto, AppError> {
     let transport = ai::UreqTransport;
     let started = std::time::Instant::now();
-    match target.as_str() {
+    match target {
         "chat" => {
             if !config.chat_ready() {
                 return Ok(AiTestResultDto {
@@ -1775,9 +1789,13 @@ struct AiProcessItemDto {
     message: Option<String>,
 }
 
-/// Run the full pipeline for one photo synchronously (single retry / testing).
+/// Run the full pipeline for one photo (single retry / testing).
+///
+/// Thumbnail rendering and the vision call take seconds to tens of seconds, so
+/// the blocking body is pushed off the command thread: the sync section only
+/// resolves the paths it needs and drops the `State` borrow before awaiting.
 #[tauri::command]
-fn ai_process_item(
+async fn ai_process_item(
     media_item_id: String,
     state: State<'_, InfrastructureState>,
 ) -> Result<AiProcessItemDto, AppError> {
@@ -1803,11 +1821,26 @@ fn ai_process_item(
             PathBuf::from(&settings.thumbnail_cache_dir),
         ))
     })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_process_item_blocking(&media_item_id, database_path, root, cache_dir)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("单张打标异常结束: {error}")))?
+}
+
+/// Body of `ai_process_item` after the infrastructure lock is released: the
+/// pipeline runs against an independently opened repository.
+fn ai_process_item_blocking(
+    media_item_id: &str,
+    database_path: PathBuf,
+    root: PathBuf,
+    cache_dir: PathBuf,
+) -> Result<AiProcessItemDto, AppError> {
     let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
     let config = ai::load_config(&repository)?;
     ai::validate_config_for_run(&config)?;
     let details = repository
-        .get_media_item_details(&media_item_id)
+        .get_media_item_details(media_item_id)
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::media_missing("媒体不存在"))?;
     let transport = ai::UreqTransport;
@@ -1821,7 +1854,7 @@ fn ai_process_item(
     )? {
         ai::AiItemOutcome::Tagged { .. } => {
             let row = repository
-                .get_media_ai(&media_item_id)
+                .get_media_ai(media_item_id)
                 .map_err(AppError::from)?
                 .ok_or_else(|| AppError::internal("AI 结果未写入"))?;
             Ok(AiProcessItemDto {
@@ -1845,23 +1878,40 @@ fn ai_process_item(
 }
 
 /// Natural-language semantic search over AI captions/embeddings.
+///
+/// Two network calls (query parsing + query embedding) sit behind this command,
+/// so it is async: the sync section grabs the config and database path, then the
+/// retrieval runs on a blocking worker against its own repository handle.
 #[tauri::command]
-fn ai_search(
+async fn ai_search(
     library_id: String,
     query: String,
     offset: Option<i64>,
     limit: Option<i64>,
     state: State<'_, InfrastructureState>,
 ) -> Result<ai::AiSearchResult, AppError> {
-    let config = state.with_infrastructure(|infrastructure| {
-        ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
+    let (config, database_path) = state.with_infrastructure(|infrastructure| {
+        let config =
+            ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)?;
+        Ok((config, infrastructure.database_path()))
     })?;
-    let repository = state.with_infrastructure(|infrastructure| {
-        let path = infrastructure.database_path();
-        db::Repository::open(path)
-            .map_err(AppError::from)
-            .map_err(InfrastructureError::App)
-    })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_search_blocking(database_path, config, library_id, query, offset, limit)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("搜索任务异常结束: {error}")))?
+}
+
+/// Body of `ai_search` after the infrastructure lock is released.
+fn ai_search_blocking(
+    database_path: PathBuf,
+    config: AiConfig,
+    library_id: String,
+    query: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Result<ai::AiSearchResult, AppError> {
+    let repository = db::Repository::open(&database_path).map_err(AppError::from)?;
     let transport = ai::UreqTransport;
     ai::search(
         &repository,

@@ -72,13 +72,17 @@ JSON 字段使用 camelCase（Rust 内部 snake_case，`serde` 负责映射）�
 | `ai_test_connection` | 连通性测试（target: `chat` / `embedding`，未启用也可测） |
 | `ai_stats` | 打标统计（已处理/待处理/失败） |
 | `ai_process_preview` / `ai_process_start` / `ai_process_cancel` | 批量打标预览/执行/取消；进度走 `ai-progress` 事件 |
-| `ai_process_item` | 单张同步打标 |
+| `ai_process_item` | 单张打标（异步命令；打标与网络 I/O 在 `spawn_blocking` 上执行，不占命令线程） |
 | `ai_search` | 语义搜索（vector / text / structured 三模式） |
 | `ai_tag_detach` | 移除单个 AI 标签关联 |
 | `ai_chat` | AI 助手流式对话；系统提示词由 Rust 端注入媒体库概况（`LibraryBrief`）+ 当前浏览/预览/多选上下文；文本 delta 走 Tauri `Channel` 逐段回传，命令结束时返回完整内容 |
 | `ai_chat_cancel` | 请求停止当前流式回复（部分内容随 `ai_chat` 结果返回） |
 
 前端不提交系统提示词；助手只读（唯一的"动作"是回复末尾 `[搜索] 关键词` 标记，由前端渲染为一键语义搜索 chip）。
+
+**线程模型**：凡是会做网络 I/O 的 AI 命令（`ai_test_connection` / `ai_process_item` / `ai_search`）都是 `async fn`，同步段只取 `database_path` / `root` / `cache_dir` / config，阻塞工作 move 进 `spawn_blocking`；`State` 引用不跨 `await`。失败重试的 `std::thread::sleep` 因此跑在阻塞线程上，不会冻结窗口。
+
+**网络预算**（`ai.rs` 顶部 `AI_*_TIMEOUT`）：connect 15s、整体 120s、读 60s。ureq 2.x 中整体 `.timeout()` 优先级高于 `.timeout_read()`（它自己按"距 deadline 剩余时间"设置 socket 超时），所以单次卡死的读取实际上界是整体 120s；60s 读超时在无整体 deadline 的流式路径上才真正生效。请求级不再覆写 `.timeout()`，否则上述预算全部失效。
 
 前端不提交任意物理路径数组；删除与打开文件夹均以 `mediaItemId` 为边界。
 

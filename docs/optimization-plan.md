@@ -89,8 +89,8 @@ S2 ──► S3a ──► S3b ──► S4 ──┘
 4. 确认 `chat_with_retry` 里的 `std::thread::sleep` 现在跑在阻塞线程上，而不是命令线程。
 
 **验收**
-- [ ] `cargo fmt --check`、`cargo check`、`cargo test`（112 个全绿）
-- [ ] `pnpm build` 通过（前端零改动）
+- [x] `cargo fmt --check`、`cargo check`、`cargo test`（112 个全绿）
+- [x] `pnpm build` 通过（前端零改动）
 - [ ] 手动：设置 → AI 增强 → 测试连通性，填一个不可达的 Base URL，**界面不冻结**，15s 内返回错误
 - [ ] 单张打标（`ai_process_item`）期间可以正常滚动、切换筛选
 

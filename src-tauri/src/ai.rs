@@ -53,6 +53,28 @@ const CHAT_MAX_TOKENS: u32 = 1200;
 /// renders a one-click chip. The assistant itself stays read-only.
 const CHAT_SEARCH_MARKER: &str = "[搜索]";
 
+/// Timeout budget for every blocking AI call. These three numbers are the only
+/// place the network budget is defined; commands never override them per call.
+///
+/// `ureq` 2.x semantics (see `AgentBuilder::timeout`): the overall `.timeout()`
+/// takes precedence over `.timeout_read()` / `.timeout_write()`, because ureq
+/// then drives the socket timeout itself — before every read it sets the
+/// socket timeout to "time left until the deadline". A fourth, independent
+/// idle-read timer is therefore impossible to combine with a deadline, so the
+/// values that actually govern a call are:
+/// * connect (incl. TLS handshake): 15 s — `.timeout_connect()`, which the
+///   deadline does not supersede;
+/// * whole request (DNS + connect + redirects + body): 120 s — `.timeout()`;
+/// * one read that never completes: bounded by the remaining part of that same
+///   120 s, so a provider that accepts the connection and then goes silent
+///   fails after at most 120 s instead of hanging forever. `.timeout_read(60)`
+///   is still applied as the bound for requests that deliberately run without
+///   an overall deadline (the streaming path in `chat_stream`), which is where
+///   the 60 s idle limit really bites.
+const AI_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const AI_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const AI_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+
 static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 
 // ── Configuration ───────────────────────────────────────────────────────────
@@ -264,13 +286,22 @@ pub trait AiTransport: Send + Sync {
 }
 
 /// Default `ureq` implementation; blocking by design (workers are OS threads).
+///
+/// Callers must run this on a blocking thread (`spawn_blocking` or a dedicated
+/// worker), never on the IPC/window thread: every method blocks for the whole
+/// HTTP round-trip, and `chat_with_retry` also parks the thread during backoff.
 #[derive(Debug, Default, Clone)]
 pub struct UreqTransport;
 
 impl UreqTransport {
+    /// Agent shared by the single-shot calls, carrying the full timeout budget
+    /// described on `AI_CONNECT_TIMEOUT`. Requests must not override it with a
+    /// per-request `.timeout()`, or the numbers here stop applying.
     fn agent() -> ureq::Agent {
         ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(15))
+            .timeout_connect(AI_CONNECT_TIMEOUT)
+            .timeout_read(AI_READ_TIMEOUT)
+            .timeout(AI_TOTAL_TIMEOUT)
             .build()
     }
 }
@@ -340,10 +371,10 @@ impl AiTransport for UreqTransport {
             "temperature": 0.2,
             "max_tokens": 800,
         });
+        // No per-request `.timeout()` here: it would replace the agent's
+        // overall 120 s cap (ureq lets the request value win).
         let agent = Self::agent();
-        let mut request = agent
-            .post(format!("{}/chat/completions", config.chat_base_url).as_str())
-            .timeout(Duration::from_secs(180));
+        let mut request = agent.post(format!("{}/chat/completions", config.chat_base_url).as_str());
         if let Some((name, value)) = authorization_header(&config.chat_api_key) {
             request = request.set(name, &value);
         }
@@ -396,10 +427,11 @@ impl AiTransport for UreqTransport {
         });
         // Per-read idle timeout instead of an overall deadline: long replies
         // must not hit a hard cap, but a stalled connection still errors out
-        // after one silent minute.
+        // after one silent minute. Here `.timeout_read()` does bite, because
+        // this request runs without the agent-level 120 s deadline.
         let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(15))
-            .timeout_read(Duration::from_secs(60))
+            .timeout_connect(AI_CONNECT_TIMEOUT)
+            .timeout_read(AI_READ_TIMEOUT)
             .build();
         let mut request = agent
             .post(format!("{}/chat/completions", config.chat_base_url).as_str())
@@ -449,9 +481,7 @@ impl AiTransport for UreqTransport {
             "input": [text],
         });
         let agent = Self::agent();
-        let mut request = agent
-            .post(format!("{}/embeddings", config.embedding_base_url).as_str())
-            .timeout(Duration::from_secs(60));
+        let mut request = agent.post(format!("{}/embeddings", config.embedding_base_url).as_str());
         if let Some((name, value)) = authorization_header(&config.embedding_api_key) {
             request = request.set(name, &value);
         }
@@ -768,6 +798,12 @@ fn embed_caption(
 }
 
 /// Chat with bounded exponential backoff on retryable failures.
+///
+/// The backoff below is `std::thread::sleep`, i.e. it parks the *calling*
+/// thread for up to 1 + 2 s across `MAX_CHAT_ATTEMPTS`. Callers must therefore
+/// be blocking contexts (`spawn_blocking` from a command, or one of the batch
+/// worker threads) — never the IPC/window thread, which would freeze the UI
+/// for the whole retry window.
 fn chat_with_retry(
     transport: &dyn AiTransport,
     config: &AiConfig,
