@@ -32,14 +32,19 @@ On first launch, pick a media library root (a local folder that holds camera bac
 
 ```powershell
 pnpm build
+pnpm test
+pnpm lint
 
 cd src-tauri
 cargo test
 cargo fmt --check
 cargo check
+cargo clippy --all-targets
 ```
 
 CI runs the same baseline on `windows-latest` for every push and pull request (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+Frontend lint is warn-first: `no-unused-vars` and `no-explicit-any` are errors, everything else is a warning (current baseline: 0 errors, 5 warnings). Prettier is configured (`.prettierrc.json`) but existing files are not reformatted yet — run `pnpm format` before touching a file if you want it normalized.
 
 Optional: place a Windows `ffmpeg.exe` under `src-tauri/resources/ffmpeg/` for local video thumbnails. **Do not commit the binary** — it is gitignored on purpose.
 
