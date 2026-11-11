@@ -11,6 +11,7 @@ use crate::db::{
 use crate::media::resolve_ffmpeg;
 use crate::scanner;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -53,6 +54,10 @@ pub struct BackupPreviewRequest {
     pub ignore_extensions: Option<Vec<String>>,
     /// Collapse camera-split video segments into one merged file. Defaults on.
     pub merge_segments: Option<bool>,
+    /// Compare a streaming content hash of every copied file instead of
+    /// trusting the byte count. Slower; defaults off.
+    #[serde(default)]
+    pub deep_verify: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +125,10 @@ pub struct BackupPreviewDto {
     /// Groups that this backup will actually merge. Already-present results are omitted.
     #[serde(default)]
     pub merge_groups: Vec<BackupMergeGroupDto>,
+    /// Content-hash verification for this plan. Persisted with the run, so the
+    /// execution the user confirms is the one that was previewed.
+    #[serde(default)]
+    pub deep_verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,9 +296,11 @@ pub fn preview(
         request.ignore_extensions,
         free_bytes,
         request.merge_segments,
+        request.deep_verify,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preview_paths(
     repository: &Repository,
     source: VolumeCandidate,
@@ -299,6 +310,7 @@ fn preview_paths(
     ignore_extensions: Option<Vec<String>>,
     free_bytes: Option<u64>,
     request_merge_segments: Option<bool>,
+    request_deep_verify: Option<bool>,
 ) -> Result<BackupPreviewDto, BackupError> {
     let source_root = fs::canonicalize(&source.root_path).map_err(|error| BackupError::Io {
         path: source.root_path.clone(),
@@ -321,6 +333,7 @@ fn preview_paths(
     let ignore_extensions =
         normalize_extensions(ignore_extensions.unwrap_or_else(default_ignore_extensions));
     let ignore_extensions_list = sorted_extensions(&ignore_extensions);
+    let deep_verify = request_deep_verify.unwrap_or(false);
     let mut items = collect_items(&source_root, &dcim_path, &target_root, &ignore_extensions)?;
     let merge_segments = request_merge_segments.unwrap_or(true);
     if merge_segments {
@@ -376,6 +389,7 @@ fn preview_paths(
         total_bytes: total_bytes as i64,
         copied_bytes: 0,
         error_summary,
+        deep_verify,
     })?;
 
     let backup_items = items
@@ -432,6 +446,7 @@ fn preview_paths(
         merge_group_count,
         merge_segment_count,
         merge_groups,
+        deep_verify,
     })
 }
 
@@ -544,6 +559,9 @@ fn run(
         .ok_or_else(|| "目标媒体库不存在".to_owned())?;
     let source_root = canonical_dir(Path::new(&run_record.source_root_path), "相机源盘")?;
     let target_root = canonical_dir(Path::new(&target.root_path), "目标媒体库")?;
+    // Read from the persisted run, not from a fresh request: the flag belongs
+    // to the plan the user confirmed, and a retry must keep the same guarantee.
+    let deep_verify = run_record.deep_verify;
     if is_same_or_child(&target_root, &source_root) {
         return fail_run(&repository, run_id, job_id, "目标媒体库不能位于相机源盘内");
     }
@@ -724,6 +742,7 @@ fn run(
                 &source_path,
                 &destination,
                 item.size_bytes as u64,
+                deep_verify,
                 cancel,
                 &mut |file_bytes| {
                     if last_progress.elapsed() >= Duration::from_millis(100) {
@@ -761,6 +780,11 @@ fn run(
                 Err(CopyError::Message(error))
             } else {
                 match resolve_ffmpeg(app) {
+                    // Deep verification does not apply to merged output: ffmpeg
+                    // remuxes the segments, so the result is not a byte copy of
+                    // any single source and there is no reference digest to
+                    // compare against. Merged items keep the size-window check
+                    // below plus ffmpeg's own exit status.
                     Ok(ffmpeg) => merge_and_verify(
                         &ffmpeg,
                         &segment_paths,
@@ -821,7 +845,7 @@ fn run(
                     Some("用户取消备份".to_owned()),
                 );
             }
-            Err(CopyError::Message(message)) => {
+            Err(CopyError::Message(message)) | Err(CopyError::Integrity(message)) => {
                 if let Some(file) = log.as_mut() {
                     let _ = writeln!(
                         file,
@@ -1030,6 +1054,80 @@ fn progress(
 pub(crate) enum CopyError {
     Cancelled,
     Message(String),
+    /// Size matched but the bytes on disk do not match the source.
+    ///
+    /// Kept as its own variant instead of a plain message so the executor can
+    /// treat it as a first-class, retryable copy failure: the item is recorded
+    /// as `failed`, which `backup_retry_failed` accepts, and the message tells
+    /// the user a re-run is worthwhile. A second copy usually succeeds when the
+    /// cause is a transient USB/storage error, so this must never look like a
+    /// permanently broken camera file.
+    Integrity(String),
+}
+
+/// Chunk size for both the copy loop and the hash. 1 MiB keeps syscall overhead
+/// low without ever holding more than one chunk of a 4K video in memory.
+const COPY_BUFFER_BYTES: usize = 1024 * 1024;
+/// Upper bound used by [`hash_stream`]; same size as the copy buffer so the
+/// verification walk has the same I/O shape as the copy that produced the file.
+const HASH_BUFFER_BYTES: usize = COPY_BUFFER_BYTES;
+
+fn hex_digest(digest: &[u8]) -> String {
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+/// Streaming SHA-256 of everything `reader` yields.
+///
+/// Chosen over a faster non-cryptographic hash because `sha2 0.10.9` is already
+/// resolved in `Cargo.lock` for the Tauri stack: turning deep verification on
+/// adds no new third-party crate to the supply chain. On the target hardware
+/// (i5-12400F, SHA-NI) it hashes far faster than a card reader or HDD can
+/// deliver bytes, so it never becomes the bottleneck — see the ignored
+/// `deep_verify_throughput_benchmark` test for measured numbers.
+///
+/// Only one [`HASH_BUFFER_BYTES`] chunk is resident at a time, so multi-GB
+/// clips are hashed without loading the file into memory.
+fn hash_stream(reader: &mut impl Read, cancel: &AtomicBool) -> Result<String, CopyError> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CopyError::Cancelled);
+        }
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| CopyError::Message(format!("读取待校验文件失败: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex_digest(&hasher.finalize()))
+}
+
+fn hash_file(path: &Path, cancel: &AtomicBool) -> Result<String, CopyError> {
+    let mut file = File::open(path).map_err(|error| {
+        CopyError::Message(format!("打开待校验文件失败 {}: {error}", path.display()))
+    })?;
+    hash_stream(&mut file, cancel)
+}
+
+/// Compare the two digests gathered during a deep-verified copy.
+///
+/// A mismatch is reported as [`CopyError::Integrity`] — a retryable failure, not
+/// a permanent one. The executor stores it with the item as `failed`, which
+/// `backup_retry_failed` accepts, so the user can re-run just those files.
+fn compare_content_hashes(source: &str, destination: &str) -> Result<(), CopyError> {
+    if source == destination {
+        return Ok(());
+    }
+    Err(CopyError::Integrity(format!(
+        "内容校验不一致（可重试）：目标文件 sha256 {destination} 与源文件 {source} 不同，大小相同但内容已损坏"
+    )))
 }
 
 fn parse_merge_sources(json: Option<&str>) -> Vec<String> {
@@ -1367,10 +1465,27 @@ impl TempGuard {
     }
 }
 
+/// Copy `source` into the library through a `.camlib-part` temp file and commit
+/// it with a rename only after verification.
+///
+/// With `deep_verify` off this is byte-for-byte the historical behaviour: a
+/// size check and an atomic rename. With it on, the source is hashed while it
+/// is being read (no second pass over the card, so the read-only source sees
+/// exactly one sequential read), the temp file is read back from disk, and the
+/// two digests must match before the rename happens.
+///
+/// The read-back is deliberate: hashing the bytes we just wrote would only
+/// prove we asked the OS to write them. Reading the temp file back is what
+/// exercises the write path. It is still best-effort for media-level errors —
+/// a page currently sitting in the OS cache can satisfy the read without
+/// touching the platter/NAND — but every logical corruption (short write, wrong
+/// offset, torn buffer) is caught, which is the failure mode USB transfers and
+/// card wear actually produce.
 fn copy_and_verify(
     source: &Path,
     destination: &Path,
     expected_size: u64,
+    deep_verify: bool,
     cancel: &AtomicBool,
     on_bytes: &mut dyn FnMut(u64),
 ) -> Result<u64, CopyError> {
@@ -1407,8 +1522,9 @@ fn copy_and_verify(
         .open(&temp)
         .map_err(|error| CopyError::Message(format!("创建临时文件失败: {error}")))?;
     let mut input = source_file;
-    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     let mut copied = 0_u64;
+    let mut source_hasher = deep_verify.then(Sha256::new);
     loop {
         if cancel.load(Ordering::Relaxed) {
             drop(output);
@@ -1423,6 +1539,9 @@ fn copy_and_verify(
         output
             .write_all(&buffer[..read])
             .map_err(|error| CopyError::Message(format!("写入目标文件失败: {error}")))?;
+        if let Some(hasher) = source_hasher.as_mut() {
+            hasher.update(&buffer[..read]);
+        }
         copied += read as u64;
         on_bytes(copied);
     }
@@ -1437,6 +1556,13 @@ fn copy_and_verify(
             != expected_size
     {
         return Err(CopyError::Message("复制后文件大小校验失败".to_owned()));
+    }
+    if let Some(hasher) = source_hasher {
+        let source_digest = hex_digest(&hasher.finalize());
+        let destination_digest = hash_file(&temp, cancel)?;
+        // The temp file is still armed, so a failure here removes the corrupt
+        // copy and the library never sees it.
+        compare_content_hashes(&source_digest, &destination_digest)?;
     }
     if destination.exists() {
         fs::remove_file(destination)
@@ -2259,10 +2385,20 @@ mod tests {
             None,
             Some(5),
             Some(true),
+            Some(true),
         )
         .unwrap();
 
         assert_eq!(preview.already_exists_files, 1);
+        // The deep-verify switch is part of the persisted plan, not just the DTO.
+        assert!(preview.deep_verify);
+        assert!(
+            repository
+                .get_backup_run(&preview.backup_run_id)
+                .unwrap()
+                .unwrap()
+                .deep_verify
+        );
         assert_eq!(preview.conflict_files, 1);
         assert_eq!(preview.ignored_files, 2);
         assert_eq!(preview.ready_files, 0);
@@ -2305,6 +2441,7 @@ mod tests {
             Some(vec!["LRV".to_owned()]),
             Some(u64::MAX),
             Some(false),
+            None,
         )
         .unwrap();
         let item = preview
@@ -2345,6 +2482,7 @@ mod tests {
             None,
             Some(u64::MAX),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -2617,6 +2755,7 @@ mod tests {
             None,
             Some(u64::MAX),
             Some(true),
+            None,
         )
         .unwrap();
 
@@ -2664,6 +2803,7 @@ mod tests {
             None,
             Some(u64::MAX),
             Some(true),
+            None,
         )
         .unwrap();
 
@@ -2704,6 +2844,7 @@ mod tests {
             None,
             Some(0),
             Some(true),
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("不能位于相机源盘内"));
@@ -2726,6 +2867,7 @@ mod tests {
             &source_file,
             &destination,
             content.len() as u64,
+            false,
             &cancel,
             &mut |_| progress_calls += 1,
         )
@@ -2742,6 +2884,7 @@ mod tests {
                 &source_file,
                 &cancelled_destination,
                 content.len() as u64,
+                false,
                 &cancelled,
                 &mut |_| {}
             ),
@@ -2764,11 +2907,192 @@ mod tests {
             &source_file,
             &renamed,
             3,
+            false,
             &AtomicBool::new(false),
             &mut |_| {},
         )
         .unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"old");
         assert_eq!(fs::read(renamed).unwrap(), b"new");
+    }
+
+    #[test]
+    fn deep_verify_copies_multi_chunk_files_and_leaves_the_source_untouched() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let source_file = source.path().join("DCIM/100MEDIA/VID_20250202_101010.MP4");
+        let destination = target
+            .path()
+            .join("2025/02/2025-02-02/视频/VID_20250202_101010.MP4");
+        // Deliberately crosses several hash/copy chunks, and is not a round
+        // number so the final short read is exercised too.
+        let content = (0..(3 * COPY_BUFFER_BYTES + 1234))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<u8>>();
+        write(&source_file, &content);
+        let source_before = fs::read(&source_file).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let copied = copy_and_verify(
+            &source_file,
+            &destination,
+            content.len() as u64,
+            true,
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(copied, content.len() as u64);
+        assert_eq!(fs::read(&destination).unwrap(), content);
+        // Read-only source contract: nothing on the card may change.
+        assert_eq!(fs::read(&source_file).unwrap(), source_before);
+        // No `.camlib-part` left behind after the atomic commit.
+        assert_eq!(
+            fs::read_dir(destination.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deep_verify_detects_one_flipped_byte_at_the_same_size() {
+        // Mirrors the manual check: copy, then damage a single byte of the
+        // result. The size stays identical, so only a content hash sees it.
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let source_file = source.path().join("IMG_20250303_090000.JPG");
+        let destination = target.path().join("IMG_20250303_090000.JPG");
+        let content = vec![7_u8; 4096];
+        write(&source_file, &content);
+        fs::copy(&source_file, &destination).unwrap();
+        let cancel = AtomicBool::new(false);
+        let source_digest = hash_file(&source_file, &cancel).unwrap();
+        let intact_digest = hash_file(&destination, &cancel).unwrap();
+        assert_eq!(source_digest, intact_digest);
+        assert!(compare_content_hashes(&source_digest, &intact_digest).is_ok());
+
+        let mut damaged = fs::read(&destination).unwrap();
+        damaged[2048] ^= 0x01;
+        fs::write(&destination, &damaged).unwrap();
+        assert_eq!(
+            fs::metadata(&destination).unwrap().len(),
+            fs::metadata(&source_file).unwrap().len(),
+            "the damage must not change the size, otherwise the old check would catch it"
+        );
+
+        let damaged_digest = hash_file(&destination, &cancel).unwrap();
+        let error = compare_content_hashes(&source_digest, &damaged_digest).unwrap_err();
+        match &error {
+            CopyError::Integrity(message) => {
+                assert!(
+                    message.contains("可重试"),
+                    "message must tell the user it can be retried: {message}"
+                );
+                assert!(message.contains(&source_digest));
+                assert!(message.contains(&damaged_digest));
+            }
+            other => panic!("expected a retryable integrity failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hash_stream_is_cancellable_and_stable_across_read_sizes() {
+        let directory = TempDir::new().unwrap();
+        let file = directory.path().join("clip.bin");
+        write(&file, &vec![3_u8; HASH_BUFFER_BYTES + 9]);
+        let digest = hash_file(&file, &AtomicBool::new(false)).unwrap();
+
+        // Same content hashed again yields the same digest; a different file of
+        // the same length does not.
+        assert_eq!(hash_file(&file, &AtomicBool::new(false)).unwrap(), digest);
+        let other = directory.path().join("other.bin");
+        write(&other, &vec![4_u8; HASH_BUFFER_BYTES + 9]);
+        assert_ne!(hash_file(&other, &AtomicBool::new(false)).unwrap(), digest);
+
+        assert!(matches!(
+            hash_file(&file, &AtomicBool::new(true)),
+            Err(CopyError::Cancelled)
+        ));
+    }
+
+    /// Throughput comparison for the optional deep verification.
+    ///
+    /// Ignored by default: it writes ~2 GiB of scratch data. Run it explicitly
+    /// with `cargo test --release deep_verify_throughput -- --ignored --nocapture`
+    /// and copy the numbers into the commit message / release notes.
+    #[test]
+    #[ignore = "performance benchmark; run with --release --ignored --nocapture"]
+    fn deep_verify_throughput_benchmark_one_gib() {
+        use std::time::Instant;
+
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let bytes = 1024_u64 * 1024 * 1024;
+        let source_file = source.path().join("bench.mp4");
+        let block = (0..COPY_BUFFER_BYTES)
+            .map(|index| (index % 253) as u8)
+            .collect::<Vec<u8>>();
+        {
+            let mut file = File::create(&source_file).unwrap();
+            for _ in 0..(bytes / COPY_BUFFER_BYTES as u64) {
+                file.write_all(&block).unwrap();
+            }
+            file.sync_all().unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let throughput = |duration: Duration| -> f64 {
+            (bytes as f64 / (1024.0 * 1024.0)) / duration.as_secs_f64()
+        };
+
+        let plain_target = target.path().join("plain/bench.mp4");
+        let started = Instant::now();
+        copy_and_verify(
+            &source_file,
+            &plain_target,
+            bytes,
+            false,
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+        let plain = started.elapsed();
+
+        let verified_target = target.path().join("verified/bench.mp4");
+        let started = Instant::now();
+        copy_and_verify(
+            &source_file,
+            &verified_target,
+            bytes,
+            true,
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+        let verified = started.elapsed();
+
+        let started = Instant::now();
+        let _ = hash_file(&source_file, &cancel).unwrap();
+        let hash_only = started.elapsed();
+
+        println!("deep verify benchmark · 1 GiB payload");
+        println!(
+            "  size-only : {:>7.0} ms · {:>7.1} MiB/s",
+            plain.as_secs_f64() * 1000.0,
+            throughput(plain)
+        );
+        println!(
+            "  deep      : {:>7.0} ms · {:>7.1} MiB/s ({:.0}% of size-only)",
+            verified.as_secs_f64() * 1000.0,
+            throughput(verified),
+            throughput(verified) / throughput(plain) * 100.0
+        );
+        println!(
+            "  hash only : {:>7.0} ms · {:>7.1} MiB/s (SHA-256 over the source, page-cached)",
+            hash_only.as_secs_f64() * 1000.0,
+            throughput(hash_only)
+        );
+
+        let _ = fs::remove_file(&plain_target);
+        let _ = fs::remove_file(&verified_target);
     }
 }

@@ -37,6 +37,10 @@ exif = { package = "kamadak-exif", version = "0.6" }
 # Optional AI enhancement: OpenAI-compatible chat + embeddings over HTTPS.
 ureq = { version = "2", features = ["json"] }
 base64 = "0.22"
+# Optional deep backup verification (content hash). `sha2 0.10.9` is already
+# resolved in Cargo.lock for the Tauri stack, so enabling it adds no new
+# third-party code; see the rationale in backup.rs next to the hashing helpers.
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell"] }

@@ -20,6 +20,7 @@ mod migrations {
     pub const MEDIA_RATINGS: &str = include_str!("migrations/0005_media_ratings.sql");
     pub const BACKUP_MERGE: &str = include_str!("migrations/0006_backup_merge.sql");
     pub const AI_TAGS: &str = include_str!("migrations/0007_ai_tags.sql");
+    pub const BACKUP_DEEP_VERIFY: &str = include_str!("migrations/0008_backup_deep_verify.sql");
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -29,7 +30,7 @@ use std::path::{Component, Path};
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -1305,8 +1306,9 @@ impl Repository {
             "INSERT INTO backup_runs
              (id, job_id, source_volume_id, source_root_path, target_library_id, status,
               conflict_policy, ignore_extensions, started_at, finished_at, total_files,
-              copied_files, skipped_files, failed_files, total_bytes, copied_bytes, error_summary)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              copied_files, skipped_files, failed_files, total_bytes, copied_bytes, error_summary,
+              deep_verify)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 input.id,
                 input.job_id,
@@ -1325,6 +1327,7 @@ impl Repository {
                 input.total_bytes,
                 input.copied_bytes,
                 input.error_summary,
+                input.deep_verify,
             ],
         )?;
         self.get_backup_run(&id)?
@@ -1339,7 +1342,7 @@ impl Repository {
             "SELECT id, job_id, source_volume_id, source_root_path, target_library_id,
                     status, conflict_policy, ignore_extensions, started_at, finished_at,
                     total_files, copied_files, skipped_files, failed_files, total_bytes,
-                    copied_bytes, error_summary
+                    copied_bytes, error_summary, deep_verify
              FROM backup_runs
              WHERE status != 'preview'
              ORDER BY CAST(REPLACE(started_at, 'unix-ms:', '') AS INTEGER) DESC, id DESC
@@ -1368,7 +1371,7 @@ impl Repository {
                 "SELECT id, job_id, source_volume_id, source_root_path, target_library_id,
                         status, conflict_policy, ignore_extensions, started_at, finished_at,
                         total_files, copied_files, skipped_files, failed_files, total_bytes,
-                        copied_bytes, error_summary
+                        copied_bytes, error_summary, deep_verify
                  FROM backup_runs WHERE id = ?1",
                 [id],
                 map_backup_run,
@@ -1962,6 +1965,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         )?;
         transaction.commit()?;
     }
+    if max_version < 8 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::BACKUP_DEEP_VERIFY)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [8_i64],
+        )?;
+        transaction.commit()?;
+    }
     Ok(())
 }
 
@@ -2402,6 +2414,10 @@ pub struct BackupRun {
     pub total_bytes: i64,
     pub copied_bytes: i64,
     pub error_summary: Option<String>,
+    /// Content-hash verification of every copied file. Off by default; the
+    /// value is fixed at preview time so the execution matches what the user
+    /// confirmed and a retry keeps the same guarantee.
+    pub deep_verify: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -2423,6 +2439,7 @@ pub struct NewBackupRun {
     pub total_bytes: i64,
     pub copied_bytes: i64,
     pub error_summary: Option<String>,
+    pub deep_verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2854,6 +2871,7 @@ fn map_backup_run(row: &Row<'_>) -> rusqlite::Result<BackupRun> {
         total_bytes: row.get(14)?,
         copied_bytes: row.get(15)?,
         error_summary: row.get(16)?,
+        deep_verify: row.get(17)?,
     })
 }
 
@@ -2991,7 +3009,7 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 7);
+        assert_eq!(repository.schema_version().unwrap(), 8);
         apply_migrations(&mut repository.connection).unwrap();
         let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','media_ratings','backup_runs','backup_items','app_settings','deletion_logs','media_ai','media_ai_tags')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 13);
@@ -3013,6 +3031,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_merge_column, 1);
+        let has_deep_verify_column: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('backup_runs') WHERE name = 'deep_verify'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_deep_verify_column, 1);
     }
 
     #[test]
@@ -3753,6 +3780,7 @@ mod tests {
                     total_bytes: 10,
                     copied_bytes: 5,
                     error_summary: None,
+                    deep_verify: false,
                 })
                 .unwrap();
         };
@@ -3764,6 +3792,38 @@ mod tests {
         let ids = runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids, ["newer-run", "older-run"]);
         assert_eq!(runs[0].failed_files, 0);
+    }
+
+    #[test]
+    fn backup_run_persists_the_deep_verify_switch() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+        let run = repository
+            .create_backup_run(NewBackupRun {
+                id: "run-deep".into(),
+                job_id: "job-deep".into(),
+                source_volume_id: None,
+                source_root_path: "E:\\".into(),
+                target_library_id: "library-1".into(),
+                status: BackupStatus::Preview,
+                conflict_policy: ConflictPolicy::SkipSame,
+                ignore_extensions: "[]".into(),
+                started_at: "unix-ms:100".into(),
+                finished_at: None,
+                total_files: 1,
+                copied_files: 0,
+                skipped_files: 0,
+                failed_files: 0,
+                total_bytes: 4,
+                copied_bytes: 0,
+                error_summary: None,
+                deep_verify: true,
+            })
+            .unwrap();
+        assert!(run.deep_verify);
+        // The flag survives the round trip so retry keeps the same guarantee.
+        let reloaded = repository.get_backup_run("run-deep").unwrap().unwrap();
+        assert!(reloaded.deep_verify);
     }
 
     #[test]
@@ -3829,6 +3889,7 @@ mod tests {
                 total_bytes: 0,
                 copied_bytes: 0,
                 error_summary: None,
+                deep_verify: false,
             })
             .unwrap();
 

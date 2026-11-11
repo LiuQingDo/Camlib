@@ -13,6 +13,12 @@ SQLite schema version lives in `CURRENT_SCHEMA_VERSION` (`src-tauri/src/db/mod.r
 
 Release installers may bundle ffmpeg for video thumbnails; the **Git repository does not**. Uninstall does not delete the media library directory; index/settings live under `%APPDATA%\com.camera.media-library\`.
 
+## [Unreleased]
+
+### Added
+
+- 备份可选深度校验（默认关闭）：复制时边读边算源文件 SHA-256，落盘后回读目标文件比对，能发现"大小不变但内容已损坏"的静默损坏（USB 传输错码、存储卡位翻转）；不一致的文件不会提交到媒体库，记为可重试的失败项，可直接用「重试失败文件」重跑。开关在备份预览面板第 1 步，随预览计划持久化（新增 migration 0008，schema 版本 8），重试沿用同一设置。分段合并生成的视频不做内容比对（ffmpeg 重新封装，字节不同，仍按大小窗口校验）
+
 ## [0.5.0] - 2026-11-02
 
 Assets: [GitHub Release v0.5.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.5.0) — `Camlib_0.5.0_x64-setup.exe` (NSIS, recommended), `Camlib_0.5.0_x64_en-US.msi` (WiX)

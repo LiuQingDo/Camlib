@@ -253,6 +253,8 @@ export interface BackupRunDto {
   totalBytes: number;
   copiedBytes: number;
   errorSummary: string | null;
+  /** Content-hash verification of every copied file. */
+  deepVerify: boolean;
 }
 
 export interface BackupVolumeDto {
@@ -304,6 +306,8 @@ export interface BackupPreviewDto {
   mergeGroupCount: number;
   mergeSegmentCount: number;
   mergeGroups: BackupMergeGroupDto[];
+  /** Compare a content hash per file instead of the byte count. Slower. */
+  deepVerify: boolean;
 }
 
 export interface BackupMergeGroupDto {
@@ -318,6 +322,8 @@ export interface BackupPreviewInput {
   conflictPolicy?: ConflictPolicy;
   ignoreExtensions?: string[];
   mergeSegments?: boolean;
+  /** Stream a content hash of source and destination. Defaults to false. */
+  deepVerify?: boolean;
 }
 
 export interface BackupStartDto {

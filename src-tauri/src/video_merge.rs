@@ -409,7 +409,9 @@ fn run(
             match result {
                 Ok(_) => {}
                 Err(CopyError::Cancelled) => return Err("合并已取消".to_owned()),
-                Err(CopyError::Message(message)) => return Err(message),
+                Err(CopyError::Message(message)) | Err(CopyError::Integrity(message)) => {
+                    return Err(message)
+                }
             }
         }
         VideoMergeMode::Reencode => {

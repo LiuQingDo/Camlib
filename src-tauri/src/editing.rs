@@ -1246,7 +1246,9 @@ fn cut_merged_copy(
     match result {
         Ok(_) => {}
         Err(CopyError::Cancelled) => return Err("剪辑已取消".to_owned()),
-        Err(CopyError::Message(message)) => return Err(format!("片段合并失败: {message}")),
+        Err(CopyError::Message(message)) | Err(CopyError::Integrity(message)) => {
+            return Err(format!("片段合并失败: {message}"))
+        }
     }
     let metadata =
         fs::metadata(&destination).map_err(|error| format!("读取输出信息失败: {error}"))?;

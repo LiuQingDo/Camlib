@@ -405,7 +405,7 @@ fn run(
                 cancelled = true;
                 break;
             }
-            Err(CopyError::Message(message)) => {
+            Err(CopyError::Message(message)) | Err(CopyError::Integrity(message)) => {
                 failed_groups += 1;
                 errors.push(format!("{display}: {message}"));
                 bytes_processed += group.size_bytes;

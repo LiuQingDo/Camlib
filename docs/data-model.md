@@ -24,6 +24,7 @@
 | 5 | `0005_media_ratings.sql` | media_ratings（1–5 星评分） |
 | 6 | `0006_backup_merge.sql` | backup_items.merge_sources_json（相机分段合并源列表） |
 | 7 | `0007_ai_tags.sql` | media_ai、media_ai_tags（AI 自动打标 + 语义搜索，可选增强） |
+| 8 | `0008_backup_deep_verify.sql` | backup_runs.deep_verify（可选的内容哈希深度校验，默认 0） |
 
 ## 3. 表结构（与迁移对齐）
 
@@ -124,7 +125,9 @@ CREATE TABLE backup_runs (
   failed_files       INTEGER NOT NULL DEFAULT 0,
   total_bytes        INTEGER NOT NULL DEFAULT 0,
   copied_bytes       INTEGER NOT NULL DEFAULT 0,
-  error_summary      TEXT
+  error_summary      TEXT,
+  -- v8：1 = 每个文件复制后回读并比对内容哈希（默认 0，只比大小）
+  deep_verify        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE app_settings (

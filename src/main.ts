@@ -249,6 +249,8 @@ interface AppState {
   backupTargetId: string | null;
   backupIgnoreExtensions: string;
   backupMergeSegments: boolean;
+  /** 深度校验：按内容哈希比对源文件与目标文件，默认关闭。 */
+  backupDeepVerify: boolean;
   backupHistory: BackupRunDto[];
   backupFailedItems: BackupItemDto[];
   backupHistoryItems: BackupItemDto[];
@@ -417,6 +419,7 @@ const state: AppState = {
   backupTargetId: null,
   backupIgnoreExtensions: ".dng, .lrv",
   backupMergeSegments: true,
+  backupDeepVerify: false,
   backupHistory: [],
   backupFailedItems: [],
   backupHistoryItems: [],
@@ -2173,13 +2176,18 @@ function renderBackupPanel(): string {
           ${preview.mergeGroupCount > 0
             ? `<span>分段合并 <strong>${formatCount(preview.mergeGroupCount)}</strong> 组（${formatCount(preview.mergeSegmentCount)} 个分段）</span>`
             : ""}
+          <span>深度校验 <strong>${preview.deepVerify ? "开启" : "关闭"}</strong></span>
         </div>
         ${preview.mergeGroups.length ? `<div class="backup-failed-list">${preview.mergeGroups.slice(0, 8).map((group) => `<div class="backup-failed-item"><span>${escapeHtml(group.segments.join(" + "))}</span><span>→ ${escapeHtml(group.fileName)} · ${formatSize(group.sizeBytes)}</span></div>`).join("")}${preview.mergeGroups.length > 8 ? `<div class="backup-failed-item"><span>…</span><span>共 ${formatCount(preview.mergeGroups.length)} 组</span></div>` : ""}</div>` : ""}
         <div class="backup-note${spaceOk ? "" : " is-danger"}">${!spaceOk
           ? `目标盘空间不足：还需约 ${formatSize(Math.max(0, preview.requiredBytes - (preview.freeBytes ?? 0)))}。请更换目标盘或释放空间后再开始；预览已保存但不会执行复制。`
           : preview.mergeGroupCount > 0
             ? `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。同一 VID_日期_时间 且序号连续的分段会合并成完整视频；时间不同的相邻序号保持分开。源盘只读，合并用 ffmpeg 无损拼接。复制完成后会自动扫描入库。`
-            : `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。相机源盘始终只读，复制完成后会自动扫描入库。`}</div>
+            : `冲突策略「${conflictPolicyLabel(preview.conflictPolicy)}」：${conflictNote}。相机源盘始终只读，复制完成后会自动扫描入库。`}${preview.deepVerify
+          ? preview.mergeGroupCount > 0
+            ? "深度校验已开启：逐个文件比对内容哈希，仅分段合并生成的视频例外（ffmpeg 重新封装，字节不同，仍按大小窗口校验）。"
+            : "深度校验已开启：每个文件复制后都会回读目标文件并比对内容哈希，较慢，但能发现大小不变的内容损坏。"
+          : ""}</div>
         <div class="backup-actions">
           <button class="primary-button" id="backup-start-button" type="button" ${running || state.backupLoading || !spaceOk || willCopy === 0 ? "disabled" : ""}>${willCopy === 0 ? "没有需要复制的文件" : spaceOk ? "确认并开始备份" : "空间不足，无法开始"}</button>
         </div>
@@ -2268,8 +2276,13 @@ function renderBackupPanel(): string {
         <label><span>冲突策略</span><select id="backup-conflict" ${formDisabled ? "disabled" : ""}><option value="skip_same" ${state.backupConflictPolicy === "skip_same" ? "selected" : ""}>跳过冲突</option><option value="rename" ${state.backupConflictPolicy === "rename" ? "selected" : ""}>自动重命名</option><option value="overwrite" ${state.backupConflictPolicy === "overwrite" ? "selected" : ""}>覆盖目标</option></select></label>
         <label><span>合并分段</span><select id="backup-merge" ${formDisabled ? "disabled" : ""}><option value="on" ${state.backupMergeSegments ? "selected" : ""}>合并为完整视频</option><option value="off" ${state.backupMergeSegments ? "" : "selected"}>保留原分段</option></select></label>
         <label><span>忽略扩展名</span><input id="backup-ignore" value="${escapeHtml(state.backupIgnoreExtensions)}" aria-label="忽略扩展名" ${formDisabled ? "disabled" : ""} /></label>
+        <label class="backup-check" title="按文件内容比对源文件与目标文件；较慢，但能发现传输损坏">
+          <input id="backup-deep-verify" type="checkbox" ${state.backupDeepVerify ? "checked" : ""} ${formDisabled ? "disabled" : ""} />
+          <span>深度校验</span>
+        </label>
         <button class="primary-button" id="backup-preview-button" type="button" ${canPreview ? "" : "disabled"}>${state.backupLoading ? "生成预览中…" : preview ? "刷新预览" : "生成预览"}</button>
       </div>
+      <div class="backup-note">深度校验：较慢，但能发现传输损坏。开启后会按文件内容逐块比对源文件与写入后的目标文件，速度会低于仅比对大小（默认关闭）。</div>
       ${!state.backupSources.length ? `<div class="backup-note">未检测到包含 DCIM 的可移动盘。请插入相机存储卡或 U 盘后重新打开。</div>` : ""}
     </div>
     ${previewBlock}
@@ -4654,6 +4667,13 @@ function bindStatusEvents(): void {
   });
   bind(app.querySelector("#backup-conflict"), "change", (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy));
   bind(app.querySelector("#backup-merge"), "change", (event) => void saveBackupMerge((event.target as HTMLSelectElement).value === "on"));
+  bind(app.querySelector("#backup-deep-verify"), "change", (event) => {
+    state.backupDeepVerify = (event.target as HTMLInputElement).checked;
+    // The switch is persisted with the preview plan, so an existing summary
+    // would otherwise keep advertising the previous setting.
+    if (state.backupPreview) void createBackupPreview();
+    else patchToolbar();
+  });
   bind(app.querySelector("#backup-start-button"), "click", () => void startConfirmedBackup());
   bind(app.querySelector("#backup-cancel-button"), "click", () => void cancelCurrentBackup());
   bind(app.querySelector("#backup-retry-button"), "click", () => void retryCurrentBackup());
@@ -7507,10 +7527,12 @@ async function createBackupPreview(): Promise<void> {
   const targetSelect = app.querySelector<HTMLSelectElement>("#backup-target");
   const ignoreInput = app.querySelector<HTMLInputElement>("#backup-ignore");
   const mergeSelect = app.querySelector<HTMLSelectElement>("#backup-merge");
+  const deepVerifyInput = app.querySelector<HTMLInputElement>("#backup-deep-verify");
   if (sourceSelect?.value) state.backupSourceId = sourceSelect.value;
   if (targetSelect?.value) state.backupTargetId = targetSelect.value;
   if (ignoreInput) state.backupIgnoreExtensions = ignoreInput.value;
   if (mergeSelect) state.backupMergeSegments = mergeSelect.value === "on";
+  if (deepVerifyInput) state.backupDeepVerify = deepVerifyInput.checked;
   const source = state.backupSourceId;
   const target = state.backupTargetId;
   if (!source || !target) return;
@@ -7528,6 +7550,7 @@ async function createBackupPreview(): Promise<void> {
       conflictPolicy: state.backupConflictPolicy,
       ignoreExtensions: ignore,
       mergeSegments: state.backupMergeSegments,
+      deepVerify: state.backupDeepVerify,
     });
   } catch (error) {
     state.error = toUserMessage(error, "生成备份预览失败");
@@ -7567,7 +7590,10 @@ async function startConfirmedBackup(): Promise<void> {
     patchToolbar();
     return;
   }
-  const confirmed = window.confirm(`将按预览复制 ${formatCount(willCopyCount(preview))} 个文件（${formatSize(preview.requiredBytes)}）。\n\n相机源文件不会被删除、移动或修改。是否开始备份？`);
+  const deepVerifyNote = preview.deepVerify
+    ? "\n\n已开启深度校验：每个文件复制后会回读并比对内容哈希，速度会慢一些。"
+    : "";
+  const confirmed = window.confirm(`将按预览复制 ${formatCount(willCopyCount(preview))} 个文件（${formatSize(preview.requiredBytes)}）。${deepVerifyNote}\n\n相机源文件不会被删除、移动或修改。是否开始备份？`);
   if (!confirmed) return;
   state.backupLoading = true; state.error = null;
   state.backupLastRunId = preview.backupRunId;
