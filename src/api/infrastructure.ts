@@ -198,3 +198,12 @@ export function getThumbnailCacheStats(): Promise<ThumbnailCacheStatsDto> {
 export function openAppDirectory(which: AppDirectoryKind): Promise<void> {
   return invoke<void>("open_app_directory", { which });
 }
+
+/**
+ * Whether the backend can resolve an ffmpeg binary (bundled resource, PATH, or
+ * a WinGet install). Only video thumbnails / editing need it, so the caller
+ * should treat `false` as a hint, not an error.
+ */
+export function ffmpegAvailable(): Promise<boolean> {
+  return invoke<boolean>("ffmpeg_available");
+}

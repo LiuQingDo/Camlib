@@ -39,6 +39,14 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// ffmpeg 是视频缩略图与剪辑的可选依赖，缺失不应让启动失败。
+/// 前端在首帧之后调用一次，只用来决定是否显示一行安装引导。
+/// `async` 是有意的：探测要起一个 `ffmpeg -version` 子进程，不能占着主线程。
+#[tauri::command]
+async fn ffmpeg_available(app: AppHandle) -> bool {
+    media::resolve_ffmpeg(&app).is_ok()
+}
+
 /// Return the persisted application settings and the current library status.
 #[tauri::command]
 fn get_app_settings(state: State<'_, InfrastructureState>) -> Result<AppSettings, AppError> {
@@ -1997,6 +2005,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            ffmpeg_available,
             get_app_settings,
             set_library_root,
             set_thumbnail_cache_dir,

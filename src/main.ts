@@ -88,6 +88,7 @@ import {
   getAppAbout,
   getThumbnailCacheStats,
   openAppDirectory,
+  ffmpegAvailable,
   type AppAboutDto,
   type CloseBehavior,
   type DialogSize,
@@ -281,6 +282,10 @@ interface AppState {
   closeBehavior: CloseBehavior;
   /** Dismissible note about the newest interrupted/failed run after restart. */
   recentTaskNotice: string | null;
+  /** 首帧之后再探测：只有确认缺失 ffmpeg 时才为 true（用于一行安装引导）。 */
+  ffmpegMissing: boolean;
+  /** 用户点过「知道了」就本次运行不再提示；下次启动重新判断。 */
+  ffmpegHintDismissed: boolean;
   /** Sticky toolbar secondary filters (tags/date/rating) expanded state. */
   filtersExpanded: boolean;
   /** Load-more failure message; sticky in the sentinel until retry (not the top banner). */
@@ -449,6 +454,8 @@ const state: AppState = {
   notificationsEnabled: true,
   closeBehavior: "minimize_to_tray",
   recentTaskNotice: null,
+  ffmpegMissing: false,
+  ffmpegHintDismissed: false,
   filtersExpanded: false,
   loadMoreError: null,
   libraryMergePreview: null,
@@ -2104,6 +2111,7 @@ function renderStatusBannerBase(): string {
   if (state.availability === "invalid") return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>当前卷与记录的媒体库不一致。请在设置中重新选择可访问的媒体库目录。</span></div><button class="text-button" id="open-settings-from-banner" type="button">打开设置</button></div>`;
   if (state.error) return `<div class="notice-banner is-error" role="alert"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span><button class="text-button" id="dismiss-state-error" type="button">关闭</button></div>`;
   if (state.recentTaskNotice) return `<div class="notice-banner is-info"><span class="notice-icon">i</span><div><strong>最近任务</strong><span>${escapeHtml(state.recentTaskNotice)}</span></div><button class="text-button" id="dismiss-recent-task" type="button">知道了</button></div>`;
+  if (state.ffmpegMissing && !state.ffmpegHintDismissed) return `<div class="notice-banner is-info" id="ffmpeg-hint" role="status"><span class="notice-icon">i</span><div><strong>缺少 ffmpeg</strong><span>视频缩略图与部分预览需要 ffmpeg：在终端运行 winget install ffmpeg 即可，装完重启 Camlib 生效。已安装则忽略这行提示。</span></div><button class="text-button" id="dismiss-ffmpeg-hint" type="button">知道了</button></div>`;
   return "";
 }
 
@@ -3232,7 +3240,7 @@ function renderSettingsAboutSection(): string {
         ${about.ffmpeg.path ? `<span class="mono" title="${escapeHtml(about.ffmpeg.path)}">${escapeHtml(truncatePath(about.ffmpeg.path))}</span>` : ""}
         ${about.ffmpeg.message ? `<span class="settings-note">${escapeHtml(about.ffmpeg.message)}</span>` : ""}
       </div>
-      <div class="settings-note">缺失 ffmpeg 时，视频缩略图与部分预览会失败。开发环境可安装到 PATH，打包环境请提供 resources/ffmpeg/ffmpeg.exe。</div>
+      <div class="settings-note">缺失 ffmpeg 时，视频缩略图与部分预览会失败。开发环境可安装到 PATH（winget install ffmpeg），打包环境请提供 resources/ffmpeg/ffmpeg.exe。</div>
     </div>
   </div>`;
 }
@@ -4634,6 +4642,10 @@ function bindStatusEvents(): void {
   bind(app.querySelector("#rescan-button"), "click", () => void bootstrap());
   bind(app.querySelector("#open-settings-from-banner"), "click", () => void openSettings("library"));
   bind(app.querySelector("#exit-semantic-search"), "click", () => exitSemanticSearch());
+  bind(app.querySelector("#dismiss-ffmpeg-hint"), "click", () => {
+    state.ffmpegHintDismissed = true;
+    patchToolbar();
+  });
   bind(app.querySelector("#dismiss-recent-task"), "click", () => {
     state.recentTaskNotice = null;
     patchToolbar();
@@ -7786,6 +7798,28 @@ async function cancelLibraryMergeJob(): Promise<void> {
   }
 }
 
+/**
+ * ffmpeg 只影响视频缩略图与剪辑，缺失不该挡住首屏，也不该每次启动都弹窗。
+ * 首帧之后在空闲时探测一次（后端依次看 CAMLIB_FFMPEG_PATH、打包资源、PATH、
+ * WinGet 安装目录），仅当确实找不到时才落一条状态横幅提示。
+ */
+function probeFfmpeg(): void {
+  const run = () => {
+    void ffmpegAvailable()
+      .then((available) => {
+        if (available) return;
+        state.ffmpegMissing = true;
+        patchToolbar();
+      })
+      .catch(() => {
+        // 探测本身失败时按「未知」处理：不打扰用户，真正用到 ffmpeg 时那条
+        // 路径仍有自己的错误提示。
+      });
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 3000 });
+  else setTimeout(run, 1200);
+}
+
 async function bootstrap(): Promise<void> {
   state.loading = true; state.error = null; renderSettingsAware();
   try {
@@ -8368,6 +8402,7 @@ void onVideoMergeProgress((progress) => {
 });
 initLiquidGlass();
 initTitlebar();
+probeFfmpeg();
 void bootstrap();
 
 // Backend volume watcher: apply disconnect/reconnect without a manual refresh.
