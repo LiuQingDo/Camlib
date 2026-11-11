@@ -388,9 +388,40 @@ function scheduleSync(): void {
   requestAnimationFrame(() => syncLiquidGlass());
 }
 
+/** Union of every glass selector, used to spot freshly inserted surfaces. */
+const GLASS_SELECTOR = TARGETS.map((target) => target.selector).join(", ");
+
+let surfaceObserver: MutationObserver | null = null;
+
+/**
+ * Watch for glass surfaces appearing in the DOM.
+ *
+ * The view patches each region in place, so a frozen `.sidebar` or
+ * `.sticky-controls` keeps its inline backdrop-filter and never needs
+ * re-measuring. Only when a glass surface is *created* (shell bootstrap, a
+ * dialog opening, a banner appearing) does the map have to be rebuilt — and
+ * that is exactly what this observer reports. Call sites no longer have to
+ * remember to call syncLiquidGlass() after touching the DOM.
+ */
+function watchGlassSurfaces(): void {
+  if (surfaceObserver) return;
+  surfaceObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches(GLASS_SELECTOR) || node.querySelector(GLASS_SELECTOR)) {
+          scheduleSync();
+          return;
+        }
+      }
+    }
+  });
+  surfaceObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 /**
  * Enable liquid-glass refraction across known UI panels.
- * Safe to call repeatedly — e.g. after every full `render()`.
+ * Safe to call repeatedly; newly inserted surfaces are picked up automatically.
  */
 export function initLiquidGlass(): void {
   if (!supported) {
@@ -403,6 +434,7 @@ export function initLiquidGlass(): void {
     resizeBound = true;
     window.addEventListener("resize", scheduleSync, { passive: true });
   }
+  watchGlassSurfaces();
   scheduleSync();
 }
 

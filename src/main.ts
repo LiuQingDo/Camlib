@@ -153,6 +153,7 @@ import {
   secondaryFilterParts,
 } from "./lib/filters";
 import { collectRangeIds } from "./lib/selection";
+import { groupItemsByDay, UNKNOWN_DAY } from "./lib/grid";
 
 type SortMode = UiSortMode;
 type Density = 1 | 2 | 3 | 4 | 5;
@@ -866,9 +867,6 @@ let previewTagPickerOpen = false;
 let previewTagPickerQuery = "";
 let tagPopoverOpen = false;
 let tagPopoverQuery = "";
-// Scroll offset of the toolbar tag popover list, kept across the full re-render
-// that follows a filter toggle so the list does not jump back to the top.
-let tagPopoverScroll = 0;
 // Photo viewer zoom/pan. Scale 1 means fit-contain; >1 is a transform zoom.
 type PhotoZoomState = { scale: number; x: number; y: number; dragging: boolean; lastX: number; lastY: number };
 let photoZoom: PhotoZoomState = { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 };
@@ -1222,7 +1220,7 @@ function starsHtml(rating: number, options: { interactive?: boolean; mediaId?: s
 
 function cardRatingHtml(rating: number): string {
   if (rating <= 0) return "";
-  return `<span class="card-rating" title="评分 ${rating} 星" aria-label="评分 ${rating} 星">${Array.from({ length: rating }, () => starSvg(true)).join("")}</span>`;
+  return `<span class="card-rating" data-rating="${rating}" title="评分 ${rating} 星" aria-label="评分 ${rating} 星">${Array.from({ length: rating }, () => starSvg(true)).join("")}</span>`;
 }
 
 function formatDimensions(meta: PreviewMetaDto): string {
@@ -1357,7 +1355,6 @@ function toggleToolbarTagPopover(): void {
     return;
   }
   tagPopoverOpen = true;
-  tagPopoverScroll = 0;
   mountTagPopover(true);
 }
 
@@ -1369,7 +1366,7 @@ function toggleAdvancedFilters(): void {
     tagPopoverOpen = false;
     unmountTagPopover();
   }
-  render();
+  patchToolbar();
 }
 
 function applyRatingFilter(value: string): void {
@@ -1528,18 +1525,11 @@ function applySelectionChrome(): void {
     if (!button) return;
     button.classList.toggle("is-checked", selected);
     button.setAttribute("aria-pressed", String(selected));
-    button.setAttribute("aria-label", selected ? "取消选择" : "选择");
+    const item = state.page.items.find((entry) => entry.id === id);
+    button.setAttribute("aria-label", `${selected ? "取消选择" : "选择"}${item?.displayName ?? ""}`);
   });
-  const sticky = app.querySelector<HTMLElement>(".sticky-controls");
-  if (!sticky) return;
-  const nextHtml = renderSelectionToolbar();
-  const existing = sticky.querySelector<HTMLElement>(".selection-toolbar");
-  if (!nextHtml) {
-    existing?.remove();
-    return;
-  }
-  if (existing) existing.outerHTML = nextHtml;
-  else sticky.insertAdjacentHTML("beforeend", nextHtml);
+  // 选择工具栏有独立挂载点，内容不变就不碰 DOM（Shift 连选时这里会被高频调用）。
+  setRegionHtml(region("selection"), renderSelectionToolbar());
 }
 
 function updateFavoriteButton(id: string): void {
@@ -1555,12 +1545,16 @@ function updateFavoriteButton(id: string): void {
   button.setAttribute("aria-busy", String(pending));
 }
 
-/** 卡片点击：打开预览。委托层的 open-media 动作与焦点回车都走这里。 */
+/**
+ * 卡片点击：打开预览。委托层的 open-media 动作与焦点回车都走这里。
+ * 预览弹窗尚未增量化：容器按签名重建一次，内容由 renderOverlays 装载。
+ */
 function openMediaCard(card: HTMLElement): void {
   state.previewIndex = Number(card.dataset.index);
   previewImmersiveOpen = state.previewMode === "immersive";
+  // 预览容器重建后由 renderOverlays 装载内容，这里不再额外重放一次
+  // （两次装载会把已经画出来的 <img> 再换一遍，等于重新解码）。
   render();
-  void loadModalAsset();
 }
 
 /** 卡片选择按钮：Shift 走区间连线，否则单张切换。 */
@@ -1602,7 +1596,8 @@ async function toggleFavorite(id: string): Promise<void> {
         state.page.items = state.page.items.filter((item) => item.id !== id);
         state.page.total = Math.max(0, state.page.total - 1);
         state.selectedIds.delete(id);
-        render();
+        patchGrid();
+        patchToolbar();
         return;
       }
     } else {
@@ -1611,7 +1606,7 @@ async function toggleFavorite(id: string): Promise<void> {
     updateFavoriteButton(id);
   } catch (error) {
     state.error = toUserMessage(error, "更新收藏失败");
-    render();
+    patchToolbar();
   } finally {
     state.favoritePendingIds.delete(id);
     updateFavoriteButton(id);
@@ -1648,7 +1643,8 @@ async function applyBatchFavorite(favorite: boolean): Promise<void> {
   } finally {
     state.favoritesBusy = false;
     if ((!favorite && state.favoriteOnly) || state.error) {
-      render();
+      patchGrid();
+      patchToolbar();
       return;
     }
     applySelectionChrome();
@@ -1698,7 +1694,7 @@ async function applyBatchTag(attach: boolean): Promise<void> {
   const tagId = select?.value.trim();
   if (!tagId) {
     state.error = "请先选择标签";
-    render();
+    patchToolbar();
     return;
   }
   const ids = [...state.selectedIds];
@@ -1719,7 +1715,8 @@ async function applyBatchTag(attach: boolean): Promise<void> {
   } finally {
     state.tagsBusy = false;
     if (state.error || (state.tagIds.has(tagId) && !attach)) {
-      render();
+      patchGrid();
+      patchToolbar();
       return;
     }
     applySelectionChrome();
@@ -1734,13 +1731,13 @@ async function applyBatchRating(): Promise<void> {
   const raw = select?.value.trim();
   if (raw === "" || raw === undefined) {
     state.error = "请先选择评分";
-    render();
+    patchToolbar();
     return;
   }
   const rating = Number(raw);
   if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
     state.error = "评分必须是 0–5";
-    render();
+    patchToolbar();
     return;
   }
   const ids = [...state.selectedIds];
@@ -1764,7 +1761,8 @@ async function applyBatchRating(): Promise<void> {
   } finally {
     state.tagsBusy = false;
     if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
-      render();
+      patchGrid();
+      patchToolbar();
       return;
     }
     applySelectionChrome();
@@ -1845,21 +1843,11 @@ function renderCard(item: MediaItemDto, index: number): string {
       : `<span class="preview-skeleton" aria-hidden="true"></span>`;
   return `<article class="media-card ${selected ? "is-selected" : ""}" data-action="open-media" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
     <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-action="toggle-select" data-id="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-action="toggle-favorite" data-id="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
-    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
+    <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span data-meta="date">${formatDate(item.captureDate)}</span><span data-meta="size">${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
   </article>`;
 }
 
-function renderMediaGrid(): string {
-  const groups = new Map<string, MediaItemDto[]>();
-  for (const item of state.page.items) {
-    const key = item.captureDate ?? "unknown";
-    groups.set(key, [...(groups.get(key) ?? []), item]);
-  }
-  let index = 0;
-  return [...groups.entries()].map(([date, items]) => `<section class="media-day-group"><header class="day-heading"><h2>${date === "unknown" ? "日期未知" : formatDate(date)}</h2><span>${items.length} 个项目</span></header><div class="media-grid">${items.map((item) => renderCard(item, index++)).join("")}</div></section>`).join("");
-}
-
-/** Bottom sentinel: idle / loading / error+retry / all-loaded states. */
+/** 底部加载哨兵：idle / loading / error+retry / all-loaded 四态。 */
 function renderLoadMoreFooter(): string {
   const shown = state.page.items.length;
   const total = state.page.total;
@@ -1874,12 +1862,6 @@ function renderLoadMoreFooter(): string {
     return `<div class="load-more-sentinel is-loading" id="load-more-sentinel" role="status"><span class="spinner"></span><span>正在加载更多…</span></div>`;
   }
   return `<div class="load-more-sentinel" id="load-more-sentinel"><button class="load-more" id="load-more" data-action="load-more" type="button">加载更多 · 已显示 ${formatCount(shown)} / ${formatCount(total)}</button></div>`;
-}
-
-function renderMediaAreaInner(): string {
-  return state.page.items.length
-    ? `${renderMediaGrid()}${renderLoadMoreFooter()}`
-    : renderLibraryEmpty();
 }
 
 function renderPrimaryFilters(): string {
@@ -1946,14 +1928,12 @@ function bindTagPopover(scope: HTMLElement): void {
     row.addEventListener("click", () => {
       const tagId = row.dataset.tagPopoverRow;
       if (!tagId) return;
-      tagPopoverScroll = scope.querySelector<HTMLElement>("#tag-popover-list")?.scrollTop ?? 0;
+      // 弹层不再随整页重建而卸载，列表滚动位置由 DOM 自己保留。
       if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
       else state.tagIds.add(tagId);
       void refreshMedia();
     });
   });
-  const list = scope.querySelector<HTMLElement>("#tag-popover-list");
-  if (list) list.scrollTop = tagPopoverScroll;
 }
 
 /** Mount the toolbar tag popover inside .sticky-controls, anchored below the
@@ -1977,7 +1957,6 @@ function mountTagPopover(focusSearch: boolean): void {
 
 /** Remove the popover DOM and reset the toggle button chrome. */
 function unmountTagPopover(): void {
-  tagPopoverScroll = 0;
   app.querySelector("#tag-filter-popover")?.remove();
   const toggle = app.querySelector<HTMLButtonElement>("#toggle-tag-popover");
   if (toggle) {
@@ -1986,7 +1965,8 @@ function unmountTagPopover(): void {
   }
 }
 
-function renderAdvancedFilters(): string {
+/** 高级筛选的内容体；外层 #advanced-filters 容器由 patchToolbar 原地维护。 */
+function renderAdvancedFiltersInner(): string {
   let tagBlock: string;
   if (!state.tags.length) {
     tagBlock = `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">标签管理</button></div>`;
@@ -2002,7 +1982,7 @@ function renderAdvancedFilters(): string {
       : "";
     tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">管理</button></div>`;
   }
-  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}><div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}</div>`;
+  return `<div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
 }
 
 function renderRatingFilter(): string {
@@ -2088,7 +2068,8 @@ function updateScanProgressView(): void {
   const progress = state.scanProgress;
   const banner = app.querySelector<HTMLElement>("#scan-progress-banner");
   if (!progress || !banner) {
-    render();
+    // 横幅还没渲染出来（例如刚进入扫描态），补一次横幅区即可。
+    patchToolbar();
     return;
   }
   banner.querySelector<HTMLElement>("[data-scan-phase]")!.textContent = scanStatusLabel(progress);
@@ -2353,6 +2334,7 @@ let mergeDrag: { pointerId: number } | null = null;
  * selected beyond the loaded pages — e.g. after 全选当前结果 — are fetched so
  * they can be ordered too.
  */
+/** 合并视频弹窗尚未增量化：改动即整块重建（footer 已单独 patch）。 */
 async function openMergeModal(): Promise<void> {
   if (!state.library || state.mergeModalOpen) return;
   const selected = new Set(state.selectedIds);
@@ -2425,6 +2407,7 @@ function closeMergeModal(): void {
 }
 
 function renderMergeModal(): string {
+  if (!state.mergeModalOpen) return "";
   return `<div class="modal-backdrop merge-backdrop" id="merge-videos-modal" role="presentation">${renderMergeDialog()}</div>`;
 }
 
@@ -2501,6 +2484,9 @@ function renderMergeFooterInner(): string {
 
 function bindMergeModalEvents(): void {
   if (!state.mergeModalOpen) return;
+  const host = app.querySelector<HTMLElement>("#merge-videos-modal");
+  if (host?.dataset.boundRegion === "1") return;
+  if (host) host.dataset.boundRegion = "1";
   app.querySelector<HTMLButtonElement>("#close-merge-modal")?.addEventListener("click", closeMergeModal);
   app.querySelector<HTMLDivElement>("#merge-videos-modal")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) closeMergeModal();
@@ -2544,6 +2530,9 @@ function updateMergeModal(): void {
   const dialog = app.querySelector<HTMLElement>("#merge-videos-modal .merge-modal");
   if (!dialog) return;
   dialog.outerHTML = renderMergeDialog();
+  // dialog 是新的，但 backdrop 还是原来那个——清掉容器级标记让 binder 重跑。
+  const backdrop = app.querySelector<HTMLElement>("#merge-videos-modal");
+  if (backdrop) delete backdrop.dataset.boundRegion;
   bindMergeModalEvents();
   // The replaced dialog lost its inline geometry and resize handles.
   applyDialogSizes();
@@ -2688,6 +2677,7 @@ function renderLibraryEmpty(): string {
   return "";
 }
 
+/** 标签管理弹窗尚未增量化：改动即整块重建。 */
 function openTagManager(): void {
   state.tagsManagerOpen = true;
   state.tagsManagerError = null;
@@ -2744,6 +2734,10 @@ function renderTagManager(): string {
 
 function bindTagManagerEvents(): void {
   if (!state.tagsManagerOpen) return;
+  // 容器没重建时整块跳过，避免重复挂监听器（弹窗区任一处变化都会重跑 binder）。
+  const host = app.querySelector<HTMLElement>("#tag-manager-backdrop");
+  if (host?.dataset.boundRegion === "1") return;
+  if (host) host.dataset.boundRegion = "1";
   app.querySelector<HTMLButtonElement>("#close-tag-manager")?.addEventListener("click", closeTagManager);
   app.querySelector<HTMLButtonElement>("#close-tag-manager-footer")?.addEventListener("click", closeTagManager);
   app.querySelector<HTMLDivElement>("#tag-manager-backdrop")?.addEventListener("click", (event) => {
@@ -3537,6 +3531,7 @@ function collectAiChatContext(): AiChatContextDto {
 }
 
 /** 发送当前草稿：占位气泡 → 流式 patch → 结束后一次性 render 挂搜索 chip。 */
+/** AI 助手抽屉尚未增量化：消息数 / 忙碌态变化即重建（流式增量除外）。 */
 async function sendAiChatMessage(): Promise<void> {
   if (state.aiChatBusy) return;
   const draft = aiChatDraft.trim();
@@ -3590,6 +3585,7 @@ function autoGrowAiChatInput(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
 }
 
+/** AI 助手抽屉尚未增量化。 */
 function closeAiChatDrawer(): void {
   state.aiChatOpen = false;
   aiChatPinnedPreview = null;
@@ -3634,50 +3630,470 @@ function setupAiChatResize(): void {
   });
 }
 
-function render(): void {
-  // Full innerHTML rebuild resets the scroller. Keep the user's place unless a
-  // caller explicitly scrolls away (refreshMedia → scrollToContentTop).
-  const previousContent = app.querySelector<HTMLElement>(".content");
-  const previousScrollTop = previousContent?.scrollTop ?? 0;
-  const previousScrollLeft = previousContent?.scrollLeft ?? 0;
-  const hasItems = state.page.items.length > 0;
-  app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
-  app.innerHTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
+// ---------------------------------------------------------------------------
+// 分区增量渲染（S3b）
+//
+// 改造前 render() 用 app.innerHTML 重建整个界面，再整套重跑 bindEvents /
+// applyDialogSizes / setupDialogResizing / syncLiquidGlass，于是散落了一批
+// “重建后补偿”代码（手存滚动位置、重放预览、恢复标签弹层滚动、重挂玻璃）。
+// 现在骨架只建一次，之后按区域 patch：
+//
+//   renderShell()    —— 启动 / 切换媒体库时建骨架，产出稳定的挂载点。
+//   patchSidebar()   —— 侧栏四块各自整块 patch（无图片，整块可接受）。
+//   patchToolbar()   —— 标题 / 状态横幅 / 筛选行 / 选择工具栏；排序与密度滑块
+//                       只同步值，绝不替换节点（否则拖动会断）。
+//   patchGrid()      —— 卡片按 data-id keyed 复用，只改变化字段，<img> 不重建。
+//   renderOverlays() —— 每个弹窗独立容器，互不牵连；预览按签名复用。
+//
+// 骨架不重建 ⇒ 滚动位置自然保持、搜索框不丢焦点、缩略图不重新解码、已挂上的
+// inline backdrop-filter 也不会被冲掉（新出现的玻璃表面见 liquid-glass 观察器）。
+// ---------------------------------------------------------------------------
+
+/** 区域容器 → 上次写入的 HTML；相同就跳过，避免无意义的 DOM 重建。 */
+const regionHtmlCache = new WeakMap<HTMLElement, string>();
+/** 网格区走节点级 reconcile，不用 HTML 缓存；占位值永不等于真实 HTML。 */
+const GRID_REGION = "::grid::";
+
+/** 按 data-region 取稳定挂载点。 */
+function region(name: string): HTMLElement | null {
+  return app.querySelector<HTMLElement>(`[data-region="${name}"]`);
+}
+
+/**
+ * 区域级写入：渲染结果没变就不动 DOM。
+ * 返回 true 表示这块真的被重建了，调用方据此决定是否重绑事件。
+ */
+function setRegionHtml(element: HTMLElement | null, html: string): boolean {
+  if (!element) return false;
+  if (regionHtmlCache.get(element) === html) return false;
+  regionHtmlCache.set(element, html);
+  element.innerHTML = html;
+  return true;
+}
+
+/** 只写不一样的文本节点——为了改一个数字重设整段 innerHTML 才是傻的。 */
+function setText(element: Element | null | undefined, text: string): void {
+  if (element && element.textContent !== text) element.textContent = text;
+}
+
+/** 渲染片段 → 元素。<template> 内容不会提前解码其中的 <img>。 */
+function fragmentElement(html: string): HTMLElement | null {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  return template.content.firstElementChild as HTMLElement | null;
+}
+
+/** 幂等绑定：同节点同事件只挂一次，区域 patch 后可以放心整块重跑 binder。 */
+function bind(element: Element | null | undefined, type: string, handler: EventListener): void {
+  if (!(element instanceof HTMLElement)) return;
+  const key = `bound${type}`;
+  if (element.dataset[key] === "1") return;
+  element.dataset[key] = "1";
+  element.addEventListener(type, handler);
+}
+
+/** 在 app 范围内按选择器幂等绑定。 */
+function bindAll(selector: string, type: string, handler: EventListener): void {
+  app.querySelectorAll(selector).forEach((element) => bind(element, type, handler));
+}
+
+/**
+ * 骨架。只在应用启动、切换媒体库时重建；其余时候它只是 patch 的挂载点。
+ * 主题切换不在此列：配色走 CSS 变量，侧栏那个按钮由 syncThemeToggle 原地改，
+ * 重建骨架对配色没有任何帮助，只会白白丢掉焦点与滚动位置。
+ */
+const SHELL_HTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
     <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/camlib-icon.png" alt="" width="37" height="37" /></span><div><strong>Camlib</strong><span>媒体库</span></div><button class="icon-button brand-settings" type="button" id="settings-button-top" title="设置" aria-label="打开设置">⚙</button></div>
-    <div class="sidebar-section library-section"><div class="section-label"><span>媒体库</span>${state.library ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>` : ""}</div>${state.library ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(state.library.volumeLabel || state.library.driveLetter ? `${state.library.volumeLabel ?? "本地磁盘"} ${state.library.driveLetter ? `(${state.library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}` : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`}</div>
-    <nav class="sidebar-section date-section" aria-label="按日期浏览"><div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}</nav>
-    ${renderAiSidebarSection()}
-    <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button theme-toggle" type="button" title="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" id="theme-toggle" aria-label="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
+    <div class="sidebar-section library-section" data-region="sidebar-library"></div>
+    <nav class="sidebar-section date-section" aria-label="按日期浏览" data-region="sidebar-dates"></nav>
+    <div data-region="sidebar-ai"></div>
+    <div class="sidebar-footer" data-region="sidebar-footer"></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter(state) ? `<button class="text-button clear-all-filters" id="clear-all-filters" data-action="clear-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
-    ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
-    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" data-action="sort-change" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" data-action="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
-    <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}${renderAiChatDrawer()}`;
-  bindEvents();
-  bindTagManagerEvents();
-  bindMergeModalEvents();
-  // Restore saved dialog geometry and mount resize handles for fresh dialogs.
+    <header class="topbar"><div class="title-block" data-region="topbar-title"></div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button"></button></div></header>
+    <div data-region="status"></div>
+    <div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row" data-region="filter-row"></div><div class="advanced-filters" id="advanced-filters" data-region="advanced" hidden></div></div><div class="toolbar-right" data-region="toolbar-right"></div></div><div data-region="selection"></div></div>
+    <section class="media-area" aria-live="polite" data-region="media"></section></main></div>
+<div id="overlay-host"><div data-overlay="preview"></div><div data-overlay="confirm"></div><div data-overlay="tag-manager"></div><div data-overlay="editor"></div><div data-overlay="merge"></div><div data-overlay="settings"></div><div data-overlay="ai-chat"></div></div>`;
+
+function renderShell(force = false): void {
+  if (!force && app.querySelector(".shell")) return;
+  app.innerHTML = SHELL_HTML;
+  bindShellEvents();
+}
+
+function sidebarLibraryHtml(): string {
+  const library = state.library;
+  const actions = library
+    ? `<span class="section-actions"><button class="icon-button" id="change-library-button" title="更换媒体库" aria-label="更换媒体库">⇄</button><button class="icon-button" id="refresh-button" title="刷新状态" aria-label="刷新状态">↻</button></span>`
+    : "";
+  const entry = library
+    ? `<div class="library-entry ${state.availability !== "available" ? "is-offline" : ""}"><span class="drive-icon">▣</span><div><strong>${escapeHtml(library.volumeLabel || library.driveLetter ? `${library.volumeLabel ?? "本地磁盘"} ${library.driveLetter ? `(${library.driveLetter}:)` : ""}` : "已连接媒体库")}</strong><span>${state.availability === "available" ? `${formatCount(facetTotal())} 个媒体` : "暂时不可用"}</span></div><span class="status-dot"></span></div>${renderLibrarySwitcher()}`
+    : `<div class="library-entry is-empty"><span class="drive-icon">＋</span><div><strong>添加媒体库</strong><span>选择一个目录开始</span></div></div>`;
+  return `<div class="section-label"><span>媒体库</span>${actions}</div>${entry}`;
+}
+
+function sidebarFooterHtml(): string {
+  const status = state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备";
+  const scanDisabled = state.availability !== "available" ? "disabled" : "";
+  const themeLabel = state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式";
+  return `<span class="footer-dot"></span><span>${status}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${scanDisabled}>⟳</button><button class="icon-button theme-toggle" type="button" title="${themeLabel}" id="theme-toggle" aria-label="${themeLabel}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button>`;
+}
+
+function patchSidebar(): void {
+  let changed = setRegionHtml(region("sidebar-library"), sidebarLibraryHtml());
+  changed = setRegionHtml(region("sidebar-dates"), `<div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}`) || changed;
+  changed = setRegionHtml(region("sidebar-ai"), renderAiSidebarSection()) || changed;
+  changed = setRegionHtml(region("sidebar-footer"), sidebarFooterHtml()) || changed;
+  if (changed) bindSidebarEvents();
+}
+
+function titleBlockHtml(): string {
+  const label = primaryDateLabel();
+  const clear = hasAnyFilter(state) ? `<button class="text-button clear-all-filters" id="clear-all-filters" data-action="clear-filters" type="button">清除筛选</button>` : "";
+  return `<div class="eyebrow">${label ? `筛选 · ${label}` : "媒体总览"}</div><h1>${label || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${clear}`;
+}
+
+/** 顶栏下方的横幅区：新导入提示 / 状态横幅 / 删除反馈 / 备份面板。 */
+function statusRegionHtml(): string {
+  const firstSeen = state.firstSeenFrom
+    ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>`
+    : "";
+  return `${firstSeen}${renderStatusBanner()}${renderDeleteFeedback()}`;
+}
+
+function toolbarRightHtml(): string {
+  const option = (value: SortMode, label: string) => `<option value="${value}" ${state.sort === value ? "selected" : ""}>${label}</option>`;
+  return `<label class="select-wrap"><span>排序</span><select id="sort-select" data-action="sort-change" aria-label="排序">${option("newest", "最新")}${option("oldest", "最早")}${option("name", "文件名")}${option("rating-desc", "评分高→低")}${option("rating-asc", "评分低→高")}${option("size-desc", "文件大→小")}${option("size-asc", "文件小→大")}</select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" data-action="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label>`;
+}
+
+/**
+ * 排序 / 密度控件只建一次，之后原地同步值。
+ * 密度滑块正在被拖动时替换节点会断开 pointer drag，所以这里连重建都不做。
+ */
+function syncToolbarRight(): void {
+  const host = region("toolbar-right");
+  if (!host) return;
+  if (!host.firstElementChild) host.innerHTML = toolbarRightHtml();
+  const sort = host.querySelector<HTMLSelectElement>("#sort-select");
+  if (sort && sort.value !== state.sort) sort.value = state.sort;
+  const density = host.querySelector<HTMLInputElement>("#density-input");
+  if (density && density.value !== String(state.density)) density.value = String(state.density);
+}
+
+function syncAdvancedFiltersVisibility(): void {
+  const advanced = region("advanced");
+  if (!advanced) return;
+  const hidden = !state.filtersExpanded;
+  if (advanced.hidden !== hidden) advanced.hidden = hidden;
+  advanced.closest(".toolbar")?.classList.toggle("is-filters-expanded", state.filtersExpanded);
+}
+
+function patchToolbar(): void {
+  setRegionHtml(region("topbar-title"), titleBlockHtml());
+  if (setRegionHtml(region("status"), statusRegionHtml())) bindStatusEvents();
+  setRegionHtml(region("filter-row"), renderPrimaryFilters());
+  if (setRegionHtml(region("advanced"), renderAdvancedFiltersInner())) bindToolbarEvents();
+  syncAdvancedFiltersVisibility();
+  syncToolbarRight();
+  syncSearchInput();
+  setRegionHtml(region("selection"), renderSelectionToolbar());
+  const scanTop = app.querySelector<HTMLButtonElement>("#scan-top-button");
+  if (scanTop) {
+    const disabled = state.availability !== "available";
+    if (scanTop.disabled !== disabled) scanTop.disabled = disabled;
+    setText(scanTop, state.scanning ? "扫描中…" : "扫描媒体库");
+  }
+  patchTagPopover();
+}
+
+/**
+ * 标签弹层：不再随整页重建而卸载重挂，因此列表滚动位置天然保留。
+ * 这里只做两件事——该消失时卸载、选中态原地同步。
+ */
+function patchTagPopover(): void {
+  if (!tagPopoverOpen) return;
+  const toggle = app.querySelector<HTMLElement>("#toggle-tag-popover");
+  if (!toggle || state.previewIndex !== null || !state.filtersExpanded) {
+    tagPopoverOpen = false;
+    unmountTagPopover();
+    return;
+  }
+  toggle.classList.add("is-active");
+  toggle.setAttribute("aria-expanded", "true");
+  app.querySelectorAll<HTMLElement>("#tag-popover-list [data-tag-popover-row]").forEach((row) => {
+    const tagId = row.dataset.tagPopoverRow;
+    if (tagId) row.classList.toggle("is-active", state.tagIds.has(tagId));
+  });
+}
+
+function createDayGroup(date: string): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "media-day-group";
+  section.dataset.day = date;
+  section.innerHTML = `<header class="day-heading"><h2></h2><span></span></header><div class="media-grid"></div>`;
+  return section;
+}
+
+function patchDayGroupHeader(section: HTMLElement, date: string, count: number): void {
+  setText(section.querySelector(".day-heading h2"), date === UNKNOWN_DAY ? "日期未知" : formatDate(date));
+  setText(section.querySelector(".day-heading span"), `${count} 个项目`);
+}
+
+/**
+ * 卡片字段级 patch：只改这一个 id 真正变化的字段。
+ * 缩略图 <img> 一律不动——节点留着，浏览器就不会重新解码。
+ */
+function patchCardNode(card: HTMLElement, item: MediaItemDto, index: number): void {
+  if (card.dataset.index !== String(index)) card.dataset.index = String(index);
+  const selected = state.selectedIds.has(item.id);
+  card.classList.toggle("is-selected", selected);
+  const select = card.querySelector<HTMLButtonElement>(".card-select");
+  if (select) {
+    select.classList.toggle("is-checked", selected);
+    select.setAttribute("aria-pressed", String(selected));
+    select.setAttribute("aria-label", `${selected ? "取消选择" : "选择"}${item.displayName}`);
+  }
+  const favorite = state.favorites.has(item.id);
+  const pending = state.favoritePendingIds.has(item.id);
+  const favoriteButton = card.querySelector<HTMLButtonElement>('[data-action="toggle-favorite"]');
+  if (favoriteButton) {
+    favoriteButton.classList.toggle("is-favorite", favorite);
+    favoriteButton.classList.toggle("is-pending", pending);
+    if (favoriteButton.disabled !== pending) favoriteButton.disabled = pending;
+    favoriteButton.setAttribute("aria-pressed", String(favorite));
+    favoriteButton.setAttribute("aria-busy", String(pending));
+    favoriteButton.setAttribute("aria-label", `${favorite ? "取消收藏" : "收藏"}${item.displayName}`);
+  }
+  const title = card.querySelector<HTMLElement>(".card-title");
+  setText(title, item.displayName);
+  if (title && title.getAttribute("title") !== item.displayName) title.setAttribute("title", item.displayName);
+  setText(card.querySelector('[data-meta="date"]'), formatDate(item.captureDate));
+  setText(card.querySelector('[data-meta="size"]'), formatSize(item.totalSizeBytes));
+  patchCardRating(card, item.rating);
+  patchCardBadges(card, item);
+}
+
+function patchCardRating(card: HTMLElement, rating: number): void {
+  const meta = card.querySelector<HTMLElement>(".card-meta");
+  if (!meta) return;
+  const current = meta.querySelector<HTMLElement>(".card-rating");
+  if (rating <= 0) {
+    current?.remove();
+    return;
+  }
+  if (!current) {
+    meta.insertAdjacentHTML("beforeend", cardRatingHtml(rating));
+    return;
+  }
+  if (current.dataset.rating === String(rating)) return;
+  current.dataset.rating = String(rating);
+  current.innerHTML = Array.from({ length: rating }, () => starSvg(true)).join("");
+  current.title = `评分 ${rating} 星`;
+  current.setAttribute("aria-label", `评分 ${rating} 星`);
+}
+
+/** 角标：类型 / 离线状态 / 连拍 / 时长。只在字段真的变了时增删。 */
+function patchCardBadges(card: HTMLElement, item: MediaItemDto): void {
+  const preview = card.querySelector<HTMLElement>(".card-preview");
+  if (!preview) return;
+  const kind = preview.querySelector<HTMLElement>(".kind-badge");
+  if (kind) {
+    setText(kind, kindLabel(item.kind));
+    kind.className = `kind-badge kind-${item.kind}`;
+  }
+  const stateBadge = preview.querySelector<HTMLElement>(".state-badge");
+  if (item.scanState !== "present") {
+    const label = item.scanState === "missing" ? "离线" : "需检查";
+    if (stateBadge) setText(stateBadge, label);
+    else preview.insertAdjacentHTML("beforeend", `<span class="state-badge">${label}</span>`);
+  } else stateBadge?.remove();
+
+  const burstBadge = preview.querySelector<HTMLElement>(".burst-badge");
+  if (item.burstGroup) {
+    if (!burstBadge) preview.insertAdjacentHTML("beforeend", `<span class="burst-badge">连拍</span>`);
+  } else burstBadge?.remove();
+
+  const durationMs = item.durationMs != null && item.durationMs > 0 ? item.durationMs : null;
+  const durationBadge = preview.querySelector<HTMLElement>(".duration-badge");
+  if (durationMs != null) {
+    if (durationBadge) setText(durationBadge, formatDuration(durationMs));
+    else preview.insertAdjacentHTML("beforeend", `<span class="duration-badge">${formatDuration(durationMs)}</span>`);
+  } else durationBadge?.remove();
+}
+
+/** 单日卡片列表 keyed reconcile；返回新建卡片数量。 */
+function patchCardList(grid: HTMLElement, items: MediaItemDto[], startIndex: number): number {
+  const existing = new Map<string, HTMLElement>();
+  grid.querySelectorAll<HTMLElement>(":scope > .media-card").forEach((card) => {
+    const id = card.dataset.id;
+    if (id) existing.set(id, card);
+    else card.remove();
+  });
+  let created = 0;
+  let index = startIndex;
+  let cursor: Element | null = grid.firstElementChild;
+  for (const item of items) {
+    let card = existing.get(item.id);
+    if (card) {
+      existing.delete(item.id);
+      patchCardNode(card, item, index);
+    } else {
+      const fresh = fragmentElement(renderCard(item, index));
+      if (!fresh) {
+        index += 1;
+        continue;
+      }
+      card = fresh;
+      created += 1;
+    }
+    if (card === cursor) cursor = cursor.nextElementSibling;
+    else grid.insertBefore(card, cursor);
+    index += 1;
+  }
+  // 剩下的都是已经不在结果集里的节点。
+  for (const stale of existing.values()) stale.remove();
+  return created;
+}
+
+/**
+ * 网格区 reconcile。分区结构：.media-day-group[data-day] > .media-grid > .media-card[data-id]。
+ * 分组按天 keyed 复用，卡片按 id keyed 复用——筛选变化时留住的卡片连 <img> 都不换。
+ */
+function patchGrid(): void {
+  const area = region("media");
+  if (!area) return;
+  app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
+  const items = state.page.items;
+  if (!items.length) {
+    if (setRegionHtml(area, renderLibraryEmpty())) bindEmptyStateEvents();
+    return;
+  }
+  // 从空态切回网格：清掉占位节点，缓存标记成永不命中的网格态。
+  area.querySelector(":scope > .empty-state")?.remove();
+  regionHtmlCache.set(area, GRID_REGION);
+
+  const groups = groupItemsByDay(items);
+  const existingGroups = new Map<string, HTMLElement>();
+  area.querySelectorAll<HTMLElement>(":scope > .media-day-group").forEach((group) => {
+    const day = group.dataset.day;
+    if (day === undefined) group.remove();
+    else existingGroups.set(day, group);
+  });
+
+  let created = 0;
+  let index = 0;
+  let cursor: Element | null = area.firstElementChild;
+  for (const group of groups) {
+    let section = existingGroups.get(group.date);
+    if (section) existingGroups.delete(group.date);
+    else section = createDayGroup(group.date);
+    patchDayGroupHeader(section, group.date, group.items.length);
+    const grid = section.querySelector<HTMLElement>(".media-grid");
+    if (grid) created += patchCardList(grid, group.items, index);
+    index += group.items.length;
+    if (section === cursor) cursor = cursor.nextElementSibling;
+    else area.insertBefore(section, cursor);
+  }
+  for (const stale of existingGroups.values()) stale.remove();
+
+  updateLoadMoreFooter();
+  // 只有真的插入了新卡片才需要重新排队取缩略图；复用卡片自带 dataset.loaded。
+  if (created) observePreviews();
+}
+
+type OverlayId = "preview" | "confirm" | "tag-manager" | "editor" | "merge" | "settings" | "ai-chat";
+
+/** 弹窗容器 → 上次构建它的签名。签名没变就完全不碰 DOM。 */
+const overlaySignatures = new WeakMap<HTMLElement, string>();
+
+/**
+ * 弹窗容器 patch。每个弹窗独占一个容器，所以「编辑器压着预览打开」这类场景
+ * 不会再顺手把预览的 DOM 一起冲掉——这正是旧代码要重放 loadModalAsset 的根因。
+ */
+function patchOverlay(id: OverlayId, signature: string, produce: () => string): boolean {
+  const host = app.querySelector<HTMLElement>(`[data-overlay="${id}"]`);
+  if (!host) return false;
+  if (overlaySignatures.get(host) === signature) return false;
+  overlaySignatures.set(host, signature);
+  // 空容器写空内容不算变化（首帧所有弹窗都是关闭态，没必要触发一次绑定）。
+  if (!host.firstChild && signature === "closed") return false;
+  host.innerHTML = produce();
+  return true;
+}
+
+/** 预览弹窗的结构签名：打开 / 换图 / 结果集长度变化才需要重建。 */
+function previewSignature(): string {
+  if (state.previewIndex === null) return "closed";
+  const item = state.page.items[state.previewIndex];
+  return `${state.previewIndex}:${item?.id ?? ""}:${state.page.items.length}`;
+}
+
+function renderOverlays(): void {
+  let changed = false;
+  const previewChanged = patchOverlay("preview", previewSignature(), renderPreview);
+  changed = previewChanged || changed;
+  changed = patchOverlay("confirm", JSON.stringify(state.deleteConfirm?.ids ?? []), renderDeleteConfirm) || changed;
+  changed = patchOverlay(
+    "tag-manager",
+    state.tagsManagerOpen
+      ? `${state.tagsManagerBusy}:${state.tagsManagerError ?? ""}:${state.tagDeleteConfirmId ?? ""}:${state.tags.map((tag) => `${tag.id}/${tag.name}/${tag.mediaCount ?? 0}`).join("|")}`
+      : "closed",
+    renderTagManager,
+  ) || changed;
+  changed = patchOverlay(
+    "editor",
+    state.editorOpen
+      ? `${state.editorItem?.id ?? ""}:${state.editorKind}:${state.editorLoading}:${state.editorBusy}:${state.editorError ?? ""}:${state.editorNotice ?? ""}:${state.editorSourceUrl}`
+      : "closed",
+    renderEditor,
+  ) || changed;
+  changed = patchOverlay(
+    "merge",
+    state.mergeModalOpen ? `${state.mergeItems.map((item) => item.id).join(",")}:${state.mergeMode}:${state.mergeRecycleSources}` : "closed",
+    renderMergeModal,
+  ) || changed;
+  // 设置面板只建一次壳，内容由 updateSettingsPanel 单独 patch。
+  changed = patchOverlay("settings", state.settingsOpen ? "open" : "closed", renderSettingsPanel) || changed;
+  changed = patchOverlay(
+    "ai-chat",
+    state.aiChatOpen
+      ? `${aiChatReady()}:${state.aiChatBusy}:${state.aiChatMessages.length}:${state.aiChatMessages[state.aiChatMessages.length - 1]?.streaming ? 1 : 0}`
+      : "closed",
+    renderAiChatDrawer,
+  ) || changed;
+  if (!changed) return;
+  bindOverlayEvents();
+  // 新弹窗需要恢复保存的几何尺寸并补上拖拽手柄（两者都自带幂等判断）。
   applyDialogSizes();
   setupDialogResizing();
   setupAiChatResize();
-  // A full render rebuilds the preview modal as a bare spinner placeholder, and
-  // an in-flight loadModalAsset() writes into the discarded DOM. While the
-  // viewer is still open (e.g. it sat behind the editor), re-fill it — every
-  // asset request is promise-cached, so this replays from cache.
-  if (state.previewIndex !== null) void loadModalAsset();
-  if (hasItems) observePreviews();
-  observeLoadMore();
-  const nextContent = app.querySelector<HTMLElement>(".content");
-  if (nextContent) {
-    nextContent.scrollTop = previousScrollTop;
-    nextContent.scrollLeft = previousScrollLeft;
-  }
-  // Full rebuild drops inline backdrop-filter styles — reattach liquid glass.
-  syncLiquidGlass();
+  // 预览容器刚重建时里面只有一个占位骨架，由这里补一次装载。
+  // 注意：只有「容器真的重建」才会走到这，纯粹的 patch 不会重放。
+  if (previewChanged && state.previewIndex !== null) void loadModalAsset();
+}
+
+/**
+ * 全量 reconcile：骨架 + 各分区 patch + 弹窗。
+ * 语义上等价于旧的 render()，但只改真正变化的那部分 DOM。
+ *
+ * 仍未增量化（继续走整块重建，语义与改造前一致）：
+ *   - 设置面板的内容区：已有 updateSettingsPanel() 单独 patch，面板壳只建一次。
+ *   - 媒体预览弹窗：按签名（打开 / 换图 / 结果集长度）复用，换图时整块重建。
+ *   - 编辑器、合并视频、标签管理、删除确认、AI 助手抽屉：整块重建。
+ * 这些区域都不参与“快速连续交互”路径，重建不会造成缩略图闪烁；等它们也
+ * 变成高频交互点（例如编辑器内实时预览）时再引入同样的分区 patch。
+ */
+function render(): void {
+  renderShell();
+  patchSidebar();
+  patchToolbar();
+  patchGrid();
+  renderOverlays();
 }
 
 function renderPreview(): string {
-  const item = state.page.items[state.previewIndex ?? 0];
+  if (state.previewIndex === null) return "";
+  const item = state.page.items[state.previewIndex];
   if (!item) return "";
   const position = (state.previewIndex ?? 0) + 1;
   const immersiveClass = previewImmersiveOpen ? " is-immersive" : "";
@@ -3704,137 +4120,90 @@ function renderPreview(): string {
   </div></div>`;
 }
 
-/** Per-render binding for the regions that still use element-level listeners
- *  (sidebar, topbar, dialogs, settings, AI drawer). The media grid and the
- *  sticky toolbar are handled once by the delegated layer at the end of this file. */
-function bindEvents(): void {
-  const themeToggle = app.querySelector<HTMLButtonElement>("#theme-toggle");
-  if (themeToggle && !themeToggle.dataset.bound) {
-    themeToggle.dataset.bound = "1";
-    themeToggle.addEventListener("click", () => void toggleTheme());
+// ---------------------------------------------------------------------------
+// 分区事件绑定
+//
+// 骨架只建一次、区域按 patch 重建，所以绑定也按区域拆开。每个 binder 内部用
+// bind() 做幂等保护：区域重建出来的新节点没有标记，会正常挂上监听器；没被
+// 替换的节点直接跳过，不会重复叠加。卡片区与工具栏的 data-action 仍走文件
+// 末尾的委托层，这里不重复绑定。
+// ---------------------------------------------------------------------------
+
+/** 搜索框草稿回填：只在没有焦点时写，输入期间绝不覆盖用户正在打的字。 */
+function syncSearchInput(): void {
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  if (!input || document.activeElement === input) return;
+  if (input.value !== searchDraft) input.value = searchDraft;
+}
+
+/** 骨架里的静态节点（搜索框、顶栏扫描按钮）：终身只绑一次。 */
+function bindShellEvents(): void {
+  const searchInput = app.querySelector<HTMLInputElement>("#search-input");
+  if (searchInput) {
+    bind(searchInput, "input", () => { searchDraft = searchInput.value; });
+    bind(searchInput, "keydown", (event) => {
+      if ((event as KeyboardEvent).key !== "Enter") return;
+      event.preventDefault();
+      state.search = searchDraft.trim();
+      void refreshMedia();
+    });
   }
-  app.querySelectorAll<HTMLButtonElement>("[data-prefix]").forEach((button) => button.addEventListener("click", () => {
-    const prefix = button.dataset.prefix || undefined;
+  bind(app.querySelector("#search-button"), "click", () => {
+    state.search = searchDraft.trim();
+    void refreshMedia();
+  });
+  bind(app.querySelector("#scan-top-button"), "click", () => void scanLibrary());
+}
+
+/** 侧栏：媒体库块 / 日期树 / AI 块 / 页脚。 */
+function bindSidebarEvents(): void {
+  bind(app.querySelector("#theme-toggle"), "click", () => void toggleTheme());
+  bindAll("#settings-button, #settings-button-top", "click", () => void openSettings());
+  bindAll("[data-prefix]", "click", (event) => {
+    const prefix = (event.currentTarget as HTMLElement).dataset.prefix || undefined;
     state.datePrefix = prefix;
     // Prefix and range are exclusive in the UI so the title stays unambiguous.
     state.dateFrom = undefined;
     state.dateTo = undefined;
     if (prefix) {
-      const year = prefix.slice(0, 4);
-      state.expandedYears.add(year);
+      state.expandedYears.add(prefix.slice(0, 4));
       if (prefix.length >= 7) state.expandedMonths.add(prefix.slice(0, 7));
     } else {
       resetSidebarExpansionForSelection();
     }
+    patchSidebar();
     void refreshMedia();
-  }));
-  app.querySelectorAll<HTMLButtonElement>("[data-year-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const year = button.dataset.yearToggle!;
+  });
+  bindAll("[data-year-toggle]", "click", (event) => {
+    const year = (event.currentTarget as HTMLElement).dataset.yearToggle!;
     if (state.expandedYears.has(year)) state.expandedYears.delete(year);
     else state.expandedYears.add(year);
-    render();
-  }));
-  app.querySelectorAll<HTMLButtonElement>("[data-month-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const month = button.dataset.monthToggle!;
+    patchSidebar();
+  });
+  bindAll("[data-month-toggle]", "click", (event) => {
+    const month = (event.currentTarget as HTMLElement).dataset.monthToggle!;
     if (state.expandedMonths.has(month)) state.expandedMonths.delete(month);
     else state.expandedMonths.add(month);
-    render();
-  }));
-  // Re-mount the popover after a full render (filter toggles re-render the app
-  // while the popover stays open) and restore its scroll/search state. Only
-  // while the toolbar is visible: advanced row expanded and no preview modal
-  // (the preview hides .sticky-controls entirely).
-  if (tagPopoverOpen && state.filtersExpanded && state.previewIndex === null) {
-    const toggle = app.querySelector("#toggle-tag-popover");
-    if (toggle) {
-      mountTagPopover(false);
-      toggle.setAttribute("aria-expanded", "true");
-      toggle.classList.add("is-active");
-    } else {
-      tagPopoverOpen = false;
-      tagPopoverQuery = "";
-      tagPopoverScroll = 0;
-    }
-  } else if (tagPopoverOpen) {
-    tagPopoverOpen = false;
-    tagPopoverQuery = "";
-    tagPopoverScroll = 0;
-  }
-  const searchInput = app.querySelector<HTMLInputElement>("#search-input");
-  searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
-  searchInput?.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
+    patchSidebar();
+  });
+  bind(app.querySelector("#scan-button"), "click", () => void scanLibrary());
+  bind(app.querySelector("#refresh-button"), "click", () => void bootstrap());
+  bind(app.querySelector("#change-library-button"), "click", () => {
+    state.libraryFormOpen = !state.libraryFormOpen;
+    patchSidebar();
+  });
+  bind(app.querySelector("#library-cancel-button"), "click", () => {
+    state.libraryFormOpen = false;
+    patchSidebar();
+  });
+  const libraryPanel = region("sidebar-library");
+  bind(libraryPanel?.querySelector("#choose-folder-button"), "click", () => void chooseLibraryFolder());
+  bind(libraryPanel?.querySelector("#library-form"), "submit", (event) => {
     event.preventDefault();
-    state.search = searchDraft.trim();
-    void refreshMedia();
+    const input = libraryPanel?.querySelector<HTMLInputElement>("#library-path");
+    if (input?.value.trim()) void connectLibrary(input.value.trim());
   });
-  app.querySelector<HTMLButtonElement>("#search-button")?.addEventListener("click", () => {
-    state.search = searchDraft.trim();
-    void refreshMedia();
-  });
-  const semanticInput = app.querySelector<HTMLInputElement>("#semantic-search-input");
-  semanticInput?.addEventListener("input", () => { semanticDraft = semanticInput.value; });
-  semanticInput?.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitSemanticSearch();
-  });
-  app.querySelector<HTMLButtonElement>("#semantic-search-button")?.addEventListener("click", () => commitSemanticSearch());
-  app.querySelector<HTMLButtonElement>("#exit-semantic-search")?.addEventListener("click", () => exitSemanticSearch());
-  // Sidebar AI section entries.
-  app.querySelector<HTMLButtonElement>("#ai-open-settings")?.addEventListener("click", () => void openSettings("ai"));
-  app.querySelector<HTMLButtonElement>("#ai-open-batch")?.addEventListener("click", () => void openSettings("ai"));
-  app.querySelector<HTMLButtonElement>("#ai-semantic-focus")?.addEventListener("click", () => {
-    state.filtersExpanded = true;
-    render();
-    app.querySelector<HTMLInputElement>("#semantic-search-input")?.focus();
-  });
-  app.querySelector<HTMLButtonElement>("#ai-single-cancel")?.addEventListener("click", () => {
-    // The sequential loop checks this flag before each photo.
-    state.aiSingleBusy = false;
-  });
-  // AI 助手抽屉。
-  app.querySelector<HTMLButtonElement>("#ai-chat-open")?.addEventListener("click", () => void openAiChatDrawer());
-  app.querySelector<HTMLButtonElement>("#ai-chat-close")?.addEventListener("click", () => closeAiChatDrawer());
-  app.querySelector<HTMLButtonElement>("#ai-chat-goto-settings")?.addEventListener("click", () => void openSettings("ai"));
-  app.querySelector<HTMLButtonElement>("#ai-chat-clear")?.addEventListener("click", () => {
-    if (state.aiChatBusy) return;
-    state.aiChatMessages = [];
-    render();
-  });
-  app.querySelector<HTMLButtonElement>("#ai-chat-send")?.addEventListener("click", () => void sendAiChatMessage());
-  app.querySelector<HTMLButtonElement>("#ai-chat-stop")?.addEventListener("click", () => {
-    // Rust 在下一个 delta 处停下，部分回复会随命令结果返回。
-    void cancelAiChat();
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-chat-search]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const query = (button.dataset.chatSearch || "").trim();
-      if (!query) return;
-      // 先让语义输入框渲染出查询词，commitSemanticSearch 才能取到。
-      semanticDraft = query;
-      state.filtersExpanded = true;
-      render();
-      commitSemanticSearch();
-    });
-  });
-  const chatInput = app.querySelector<HTMLTextAreaElement>("#ai-chat-input");
-  if (chatInput) {
-    chatInput.value = aiChatDraft;
-    chatInput.addEventListener("input", () => {
-      aiChatDraft = chatInput.value;
-      autoGrowAiChatInput(chatInput);
-    });
-    chatInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        void sendAiChatMessage();
-      }
-    });
-  }
-  app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
-  app.querySelector<HTMLButtonElement>("#scan-top-button")?.addEventListener("click", () => void scanLibrary());
-  app.querySelector<HTMLInputElement>("#auto-scan-toggle")?.addEventListener("change", (event) => {
+  bind(app.querySelector("#auto-scan-toggle"), "change", (event) => {
     const enabled = (event.target as HTMLInputElement).checked;
     void (async () => {
       try {
@@ -3842,105 +4211,190 @@ function bindEvents(): void {
         state.autoScanOnStartup = settings.auto_scan_on_startup;
       } catch (error) {
         state.error = toUserMessage(error, "保存启动扫描设置失败");
-        render();
+        patchToolbar();
       }
     })();
   });
-  app.querySelector<HTMLButtonElement>("#scan-cancel-button")?.addEventListener("click", () => void cancelCurrentScan());
-  app.querySelector<HTMLButtonElement>("#backup-open-button")?.addEventListener("click", () => void openBackupPanel());
-  app.querySelector<HTMLButtonElement>("#close-backup")?.addEventListener("click", () => { state.backupOpen = false; render(); });
-  app.querySelector<HTMLButtonElement>("#backup-preview-button")?.addEventListener("click", () => void createBackupPreview());
-  app.querySelector<HTMLSelectElement>("#backup-source")?.addEventListener("change", (event) => {
+  bind(app.querySelector("#ai-open-settings"), "click", () => void openSettings("ai"));
+  bind(app.querySelector("#ai-open-batch"), "click", () => void openSettings("ai"));
+  bind(app.querySelector("#ai-chat-open"), "click", () => void openAiChatDrawer());
+  bind(app.querySelector("#ai-single-cancel"), "click", () => {
+    // The sequential loop checks this flag before each photo.
+    state.aiSingleBusy = false;
+  });
+  bind(app.querySelector("#ai-semantic-focus"), "click", () => {
+    state.filtersExpanded = true;
+    patchToolbar();
+    app.querySelector<HTMLInputElement>("#semantic-search-input")?.focus();
+  });
+}
+
+/** 状态横幅区：扫描/删除横幅、备份面板、语义搜索提示。 */
+function bindStatusEvents(): void {
+  bind(app.querySelector("#scan-cancel-button"), "click", () => void cancelCurrentScan());
+  bind(app.querySelector("#rescan-button"), "click", () => void bootstrap());
+  bind(app.querySelector("#open-settings-from-banner"), "click", () => void openSettings("library"));
+  bind(app.querySelector("#exit-semantic-search"), "click", () => exitSemanticSearch());
+  bind(app.querySelector("#dismiss-recent-task"), "click", () => {
+    state.recentTaskNotice = null;
+    patchToolbar();
+  });
+  bind(app.querySelector("#dismiss-state-error"), "click", () => {
+    state.error = null;
+    patchToolbar();
+  });
+  bind(app.querySelector("#dismiss-delete-result"), "click", () => {
+    state.deleteResult = null;
+    patchToolbar();
+  });
+  bind(app.querySelector("#dismiss-delete-notice"), "click", () => {
+    state.deleteNotice = null;
+    patchToolbar();
+  });
+  bind(app.querySelector("#backup-open-button"), "click", () => void openBackupPanel());
+  bind(app.querySelector("#close-backup"), "click", () => {
+    state.backupOpen = false;
+    patchToolbar();
+  });
+  bind(app.querySelector("#backup-preview-button"), "click", () => void createBackupPreview());
+  bind(app.querySelector("#backup-source"), "change", (event) => {
     state.backupSourceId = (event.target as HTMLSelectElement).value || null;
   });
-  app.querySelector<HTMLSelectElement>("#backup-target")?.addEventListener("change", (event) => {
+  bind(app.querySelector("#backup-target"), "change", (event) => {
     state.backupTargetId = (event.target as HTMLSelectElement).value || null;
   });
-  app.querySelector<HTMLInputElement>("#backup-ignore")?.addEventListener("change", (event) => {
+  bind(app.querySelector("#backup-ignore"), "change", (event) => {
     state.backupIgnoreExtensions = (event.target as HTMLInputElement).value;
   });
-  app.querySelector<HTMLSelectElement>("#backup-conflict")?.addEventListener("change", (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy));
-  app.querySelector<HTMLSelectElement>("#backup-merge")?.addEventListener("change", (event) => void saveBackupMerge((event.target as HTMLSelectElement).value === "on"));
-  app.querySelector<HTMLButtonElement>("#backup-start-button")?.addEventListener("click", () => void startConfirmedBackup());
-  app.querySelector<HTMLButtonElement>("#backup-cancel-button")?.addEventListener("click", () => void cancelCurrentBackup());
-  app.querySelector<HTMLButtonElement>("#backup-retry-button")?.addEventListener("click", () => void retryCurrentBackup());
-  app.querySelector<HTMLButtonElement>("#backup-view-new")?.addEventListener("click", () => void viewNewImports());
-  app.querySelector<HTMLButtonElement>("#backup-view-new-later")?.addEventListener("click", () => {
+  bind(app.querySelector("#backup-conflict"), "change", (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy));
+  bind(app.querySelector("#backup-merge"), "change", (event) => void saveBackupMerge((event.target as HTMLSelectElement).value === "on"));
+  bind(app.querySelector("#backup-start-button"), "click", () => void startConfirmedBackup());
+  bind(app.querySelector("#backup-cancel-button"), "click", () => void cancelCurrentBackup());
+  bind(app.querySelector("#backup-retry-button"), "click", () => void retryCurrentBackup());
+  bind(app.querySelector("#backup-view-new"), "click", () => void viewNewImports());
+  bind(app.querySelector("#backup-view-new-later"), "click", () => {
     state.backupProgress = state.backupProgress ? { ...state.backupProgress, state: "completed" } : null;
-    render();
+    patchToolbar();
   });
-  app.querySelectorAll<HTMLButtonElement>("[data-backup-run]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const runId = button.dataset.backupRun;
-      if (!runId) return;
-      state.backupExpandedRunId = state.backupExpandedRunId === runId ? null : runId;
-      if (state.backupExpandedRunId) {
-        void listBackupRunItems(runId, true).then((items) => {
-          state.backupHistoryItems = items;
-          render();
-        }).catch((error) => {
-          state.error = toUserMessage(error, "读取备份明细失败");
-          render();
-        });
-      } else {
-        state.backupHistoryItems = [];
-      }
-      render();
+  bindAll("[data-backup-run]", "click", (event) => {
+    const runId = (event.currentTarget as HTMLElement).dataset.backupRun;
+    if (!runId) return;
+    state.backupExpandedRunId = state.backupExpandedRunId === runId ? null : runId;
+    if (state.backupExpandedRunId) {
+      void listBackupRunItems(runId, true).then((items) => {
+        state.backupHistoryItems = items;
+        patchToolbar();
+      }).catch((error) => {
+        state.error = toUserMessage(error, "读取备份明细失败");
+        patchToolbar();
+      });
+    } else {
+      state.backupHistoryItems = [];
+    }
+    patchToolbar();
+  });
+}
+
+/** 工具栏展开区（高级筛选）里需要逐个绑定的输入框。 */
+function bindToolbarEvents(): void {
+  const semanticInput = app.querySelector<HTMLInputElement>("#semantic-search-input");
+  if (semanticInput) {
+    bind(semanticInput, "input", () => { semanticDraft = semanticInput.value; });
+    bind(semanticInput, "keydown", (event) => {
+      if ((event as KeyboardEvent).key !== "Enter") return;
+      event.preventDefault();
+      commitSemanticSearch();
     });
+  }
+  bind(app.querySelector("#semantic-search-button"), "click", () => commitSemanticSearch());
+}
+
+/** 网格空态里的「选择文件夹 / 手动输入路径」表单。 */
+function bindEmptyStateEvents(): void {
+  const area = region("media");
+  if (!area) return;
+  bind(area.querySelector("#choose-folder-button"), "click", () => void chooseLibraryFolder());
+  bind(area.querySelector("#library-form"), "submit", (event) => {
+    event.preventDefault();
+    const input = area.querySelector<HTMLInputElement>("#library-path");
+    if (input?.value.trim()) void connectLibrary(input.value.trim());
   });
-  app.querySelector<HTMLButtonElement>("#refresh-button")?.addEventListener("click", () => void bootstrap());
-  app.querySelector<HTMLButtonElement>("#change-library-button")?.addEventListener("click", () => { state.libraryFormOpen = !state.libraryFormOpen; render(); });
-  app.querySelector<HTMLButtonElement>("#choose-folder-button")?.addEventListener("click", () => void chooseLibraryFolder());
-  app.querySelector<HTMLButtonElement>("#library-cancel-button")?.addEventListener("click", () => { state.libraryFormOpen = false; render(); });
-  app.querySelector<HTMLButtonElement>("#rescan-button")?.addEventListener("click", () => void bootstrap());
-  app.querySelector<HTMLButtonElement>("#open-settings-from-banner")?.addEventListener("click", () => void openSettings("library"));
-  app.querySelector<HTMLButtonElement>("#dismiss-recent-task")?.addEventListener("click", () => {
-    state.recentTaskNotice = null;
-    render();
-  });
-  app.querySelector<HTMLButtonElement>("#dismiss-state-error")?.addEventListener("click", () => {
-    state.error = null;
-    render();
-  });
-  app.querySelector<HTMLButtonElement>("#cancel-delete-confirm")?.addEventListener("click", cancelDeleteConfirm);
-  app.querySelector<HTMLButtonElement>("#cancel-delete-confirm-footer")?.addEventListener("click", cancelDeleteConfirm);
-  app.querySelector<HTMLButtonElement>("#confirm-delete")?.addEventListener("click", () => void runConfirmedDelete());
-  app.querySelector<HTMLElement>("#delete-confirm-modal")?.addEventListener("click", (event) => {
-    if (event.target === event.currentTarget) cancelDeleteConfirm();
-  });
-  app.querySelector<HTMLButtonElement>("#dismiss-delete-result")?.addEventListener("click", () => {
-    state.deleteResult = null;
-    render();
-  });
-  app.querySelector<HTMLButtonElement>("#dismiss-delete-notice")?.addEventListener("click", () => {
-    state.deleteNotice = null;
-    render();
-  });
-  app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
-  app.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach((button) => button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void openFolderForItem(button.dataset.openFolder!);
-  }));
-  app.querySelector<HTMLButtonElement>("#close-preview")?.addEventListener("click", closePreview);
+}
+
+/** 弹窗区：预览 / 删除确认 / AI 抽屉 / 编辑器 / 合并 / 标签管理 / 设置。 */
+function bindOverlayEvents(): void {
+  bind(app.querySelector("#close-preview"), "click", closePreview);
   // 实况默认展示静帧：优先取视频帧尺寸（未就绪时内部等待元数据），否则取静帧图片。
-  app.querySelector<HTMLButtonElement>("#preview-fit")?.addEventListener("click", () => {
+  bind(app.querySelector("#preview-fit"), "click", () => {
     const media = app.querySelector<HTMLElement>("#modal-media");
     const video = media?.querySelector<HTMLVideoElement>("video:not([hidden])");
     adaptDialogToMedia("preview", video ?? media?.querySelector<HTMLImageElement>("img") ?? null);
   });
-  app.querySelector<HTMLElement>("#preview-modal")?.addEventListener("click", (event) => { if (event.target === event.currentTarget) closePreview(); });
-  app.querySelector<HTMLButtonElement>("#preview-prev")?.addEventListener("click", () => movePreview(-1));
-  app.querySelector<HTMLButtonElement>("#preview-next")?.addEventListener("click", () => movePreview(1));
-  app.querySelector<HTMLButtonElement>("#preview-edit")?.addEventListener("click", () => {
+  bind(app.querySelector("#preview-modal"), "click", (event) => {
+    if (event.target === event.currentTarget) closePreview();
+  });
+  bind(app.querySelector("#preview-prev"), "click", () => movePreview(-1));
+  bind(app.querySelector("#preview-next"), "click", () => movePreview(1));
+  bind(app.querySelector("#preview-edit"), "click", () => {
     const item = state.previewIndex === null ? undefined : state.page.items[state.previewIndex];
     if (item) void openEditor(item);
   });
-  app.querySelector<HTMLButtonElement>("#preview-info-toggle")?.addEventListener("click", () => togglePreviewInfo());
-  app.querySelector<HTMLButtonElement>("#preview-fullscreen")?.addEventListener("click", () => togglePreviewFullscreen());
-  app.querySelector<HTMLButtonElement>("#preview-immersive")?.addEventListener("click", () => togglePreviewImmersive());
+  bind(app.querySelector("#preview-info-toggle"), "click", () => togglePreviewInfo());
+  bind(app.querySelector("#preview-fullscreen"), "click", () => togglePreviewFullscreen());
+  bind(app.querySelector("#preview-immersive"), "click", () => togglePreviewImmersive());
   // Immersive exit is a leave-viewer action: return to the grid, not the framed modal.
-  app.querySelector<HTMLButtonElement>("#preview-immersive-exit")?.addEventListener("click", () => closePreview());
+  bind(app.querySelector("#preview-immersive-exit"), "click", () => closePreview());
+  bind(app.querySelector("#cancel-delete-confirm"), "click", cancelDeleteConfirm);
+  bind(app.querySelector("#cancel-delete-confirm-footer"), "click", cancelDeleteConfirm);
+  bind(app.querySelector("#confirm-delete"), "click", () => void runConfirmedDelete());
+  bind(app.querySelector("#delete-confirm-modal"), "click", (event) => {
+    if (event.target === event.currentTarget) cancelDeleteConfirm();
+  });
+  bindAll("[data-open-folder]", "click", (event) => {
+    event.stopPropagation();
+    const folder = (event.currentTarget as HTMLElement).dataset.openFolder;
+    if (folder) void openFolderForItem(folder);
+  });
+  // AI 助手抽屉。
+  bind(app.querySelector("#ai-chat-close"), "click", () => closeAiChatDrawer());
+  bind(app.querySelector("#ai-chat-goto-settings"), "click", () => void openSettings("ai"));
+  bind(app.querySelector("#ai-chat-clear"), "click", () => {
+    if (state.aiChatBusy) return;
+    state.aiChatMessages = [];
+    render();
+  });
+  bind(app.querySelector("#ai-chat-send"), "click", () => void sendAiChatMessage());
+  bind(app.querySelector("#ai-chat-stop"), "click", () => {
+    // Rust 在下一个 delta 处停下，部分回复会随命令结果返回。
+    void cancelAiChat();
+  });
+  bindAll("[data-chat-search]", "click", (event) => {
+    const query = ((event.currentTarget as HTMLElement).dataset.chatSearch || "").trim();
+    if (!query) return;
+    // 先让语义输入框渲染出查询词，commitSemanticSearch 才能取到。
+    semanticDraft = query;
+    state.filtersExpanded = true;
+    patchToolbar();
+    commitSemanticSearch();
+  });
+  const chatInput = app.querySelector<HTMLTextAreaElement>("#ai-chat-input");
+  if (chatInput) {
+    chatInput.value = aiChatDraft;
+    bind(chatInput, "input", () => {
+      aiChatDraft = chatInput.value;
+      autoGrowAiChatInput(chatInput);
+    });
+    bind(chatInput, "keydown", (event) => {
+      const keyEvent = event as KeyboardEvent;
+      if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
+        event.preventDefault();
+        void sendAiChatMessage();
+      }
+    });
+  }
   if (state.editorOpen) bindEditorEvents();
+  bindMergeModalEvents();
+  bindTagManagerEvents();
   bindSettingsEvents();
 }
 
@@ -3950,8 +4404,8 @@ function bindSettingsEvents(): void {
     element.dataset.bound = "1";
     element.addEventListener("click", handler);
   };
-  once(app.querySelector<HTMLElement>("#settings-button"), () => void openSettings());
-  once(app.querySelector<HTMLElement>("#settings-button-top"), () => void openSettings());
+  // #settings-button / #settings-button-top 属于侧栏与骨架，由 bindSidebarEvents
+  // 负责（侧栏页脚会被 patchSidebar 重建，不能只在这里绑一次）。
   once(app.querySelector<HTMLElement>("#settings-close"), () => closeSettings());
   const backdrop = app.querySelector<HTMLElement>("#settings-backdrop");
   if (backdrop && !backdrop.dataset.bound) {
@@ -4148,6 +4602,7 @@ function bindSettingsBodyEvents(): void {
   });
 }
 
+/** 设置弹窗：壳建一次，内容由 updateSettingsPanel 单独 patch。 */
 async function openSettings(section?: SettingsSection): Promise<void> {
   if (section) state.settingsSection = section;
   if (state.settingsOpen) return;
@@ -4524,7 +4979,7 @@ async function runAiTagging(ids: string[]): Promise<void> {
   state.aiSingleFailed = 0;
   state.aiSingleCurrent = null;
   state.aiSingleNotice = null;
-  render();
+  patchSidebar();
   const names = new Map(state.page.items.map((entry) => [entry.id, entry.displayName]));
   for (const id of ids) {
     if (!state.aiSingleBusy) break;
@@ -4699,7 +5154,7 @@ async function openFolderForItem(mediaItemId: string): Promise<void> {
     state.error = null;
   } catch (error) {
     state.error = toUserMessage(error, "打开所在文件夹失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -4741,6 +5196,8 @@ function markThumbnailRetryable(id: string): void {
   }
 }
 
+let previewObserver: IntersectionObserver | null = null;
+
 function observePreviews(): void {
   const cards = [...app.querySelectorAll<HTMLElement>("[data-preview]")];
   const load = (card: HTMLElement, highPriority = false) => {
@@ -4759,8 +5216,11 @@ function observePreviews(): void {
     return rect.bottom >= 0 && rect.top <= window.innerHeight;
   }).reverse().forEach((card) => load(card, true));
   if ("IntersectionObserver" in window) {
+    // 分区 patch 会反复调用这里：旧观察器先断开，只为还没装载的卡片重建。
+    previewObserver?.disconnect();
     const observer = new IntersectionObserver((entries) => entries.forEach((entry) => { if (entry.isIntersecting) { load(entry.target as HTMLElement, entry.intersectionRatio > 0); observer.unobserve(entry.target); } }), { rootMargin: "320px" });
-    cards.forEach((card) => observer.observe(card));
+    previewObserver = observer;
+    cards.filter((card) => card.dataset.loaded !== "true").forEach((card) => observer.observe(card));
   } else cards.slice(0, 24).forEach((card) => load(card));
 }
 
@@ -4954,7 +5414,7 @@ async function applyPreviewRating(
     }
   } catch (error) {
     state.error = toUserMessage(error, "更新评分失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -5014,7 +5474,7 @@ async function applyPreviewTag(
     }
   } catch (error) {
     state.error = toUserMessage(error, "更新标签失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -5057,7 +5517,7 @@ async function applyPreviewAiTagDetach(
     }
   } catch (error) {
     state.error = toUserMessage(error, "移除 AI 标签失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -5305,6 +5765,7 @@ function resetEditorImageOps(): void {
   state.editorSaturation = 1;
 }
 
+/** 编辑器弹窗尚未增量化：打开 / 载入源 / 出错各重建一次容器。 */
 async function openEditor(item: MediaItemDto): Promise<void> {
   // The editor stacks on top of the preview viewer; stop the media behind it.
   pausePreviewPlayback();
@@ -5533,6 +5994,8 @@ function renderEditorFooter(): string {
 function bindEditorEvents(): void {
   const modal = app.querySelector<HTMLElement>("#editor-modal");
   if (!modal) return;
+  if (modal.dataset.boundRegion === "1") return;
+  modal.dataset.boundRegion = "1";
   modal.querySelectorAll<HTMLButtonElement>(".editor-close-button").forEach((button) => {
     button.addEventListener("click", closeEditor);
   });
@@ -6244,6 +6707,7 @@ function handleMergeCompleted(result: VideoMergeResultDto): void {
   window.setTimeout(() => void refreshMedia(), 2500);
 }
 
+/** 预览弹窗尚未增量化：关闭时容器整体清空。 */
 function closePreview(): void {
   state.previewIndex = null;
   livePlaying = false;
@@ -6277,8 +6741,8 @@ function movePreview(delta: number): void {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
   }
+  // 换图会让预览容器按签名重建，重建钩子负责装载新图。
   render();
-  void loadModalAsset();
 }
 
 /**
@@ -6362,26 +6826,27 @@ function observeLoadMore(): void {
 }
 
 /** Patch only the media area so appended pages keep scroll + existing thumbs. */
-function updateMediaArea(): void {
-  const area = app.querySelector<HTMLElement>(".media-area");
-  if (!area) {
-    render();
-    return;
-  }
-  area.innerHTML = renderMediaAreaInner();
-  if (state.page.items.length) observePreviews();
-  observeLoadMore();
-}
+/** 上一次写入的哨兵 HTML：内容没变就不替换节点，以免白白重建观察目标。 */
+let loadMoreFooterHtml = "";
 
 function updateLoadMoreFooter(): void {
-  const existing = app.querySelector<HTMLElement>("#load-more-sentinel");
   const html = renderLoadMoreFooter();
-  if (existing) {
-    if (!html) existing.remove();
-    else existing.outerHTML = html;
-  } else if (html) {
-    app.querySelector<HTMLElement>(".media-area")?.insertAdjacentHTML("beforeend", html);
+  const existing = app.querySelector<HTMLElement>("#load-more-sentinel");
+  if (!html) {
+    existing?.remove();
+    loadMoreFooterHtml = "";
+    disconnectLoadMoreObserver();
+    return;
   }
+  if (!existing) {
+    region("media")?.insertAdjacentHTML("beforeend", html);
+    loadMoreFooterHtml = html;
+  } else if (html !== loadMoreFooterHtml) {
+    existing.outerHTML = html;
+    loadMoreFooterHtml = html;
+  }
+  // 哨兵内容没变也要重挂观察器：refreshMedia 上一次已经把它断开了，
+  // 这里早退会让“滚动加载”静默失效。
   observeLoadMore();
 }
 
@@ -6410,7 +6875,8 @@ async function loadMore(): Promise<void> {
   finally {
     if (token === mediaQueryToken) {
       loadMoreInFlight = false;
-      updateMediaArea();
+      // 只把新追加的卡片插进去；已渲染的卡片连 <img> 都不动。
+      patchGrid();
     }
   }
 }
@@ -6446,7 +6912,7 @@ async function selectCurrentResults(): Promise<void> {
     applySelectionChrome();
   } catch (error) {
     if (token !== mediaQueryToken) return;
-    state.error = toUserMessage(error, "选择当前结果失败"); render();
+    state.error = toUserMessage(error, "选择当前结果失败"); patchToolbar();
   }
 }
 
@@ -6488,7 +6954,7 @@ async function requestDeleteSelected(): Promise<void> {
   if (!state.library || !state.selectedIds.size || state.deleting || state.deleteConfirm) return;
   if (state.availability !== "available") {
     state.error = state.libraryStatusReason || "媒体库不可用，无法删除媒体";
-    render();
+    patchToolbar();
     return;
   }
   const ids = [...state.selectedIds];
@@ -6496,7 +6962,7 @@ async function requestDeleteSelected(): Promise<void> {
   state.deleteResult = null;
   state.deleteNotice = null;
   state.error = null;
-  render();
+  patchToolbar();
   try {
     const preview = await previewDelete(state.library.id, ids);
     state.deleteConfirm = { preview, ids };
@@ -6521,7 +6987,7 @@ async function runConfirmedDelete(): Promise<void> {
     state: "running",
   };
   state.error = null;
-  render();
+  patchToolbar();
   try {
     const result = await deleteMediaItems(state.library.id, confirm.ids);
     state.deleteResult = result;
@@ -6535,7 +7001,10 @@ async function runConfirmedDelete(): Promise<void> {
   } finally {
     state.deleting = false;
     state.lastSelectIndex = null;
-    render();
+    // 网格按 id 摘掉已删除的卡片（其余卡片连同缩略图原样留着），再补横幅
+    // 与选择工具栏。
+    patchGrid();
+    patchToolbar();
   }
 }
 
@@ -6546,6 +7015,9 @@ async function connectLibrary(path: string): Promise<void> {
     state.libraryFormOpen = false;
     // A newly registered root should get one automatic incremental scan.
     startupAutoScanStarted = false;
+    // 切换媒体库是骨架级别的变化：旧库的日期树展开态 / 网格 / 弹窗都作废，
+    // 直接重建一次骨架，再由 bootstrap 填内容。
+    renderShell(true);
     await bootstrap();
   }
   catch (error) { state.error = toUserMessage(error, "连接媒体库失败"); state.loading = false; render(); }
@@ -6563,7 +7035,7 @@ async function chooseLibraryFolder(): Promise<void> {
     }
   } catch (error) {
     state.error = toUserMessage(error, "打开文件夹选择器失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -6614,7 +7086,7 @@ async function openBackupPanel(): Promise<void> {
   state.backupOpen = true;
   state.backupPreview = null;
   state.backupLoading = true;
-  render();
+  patchToolbar();
   try {
     const [sources] = await Promise.all([discoverBackupSources(), loadBackupHistory()]);
     state.backupSources = sources;
@@ -6628,7 +7100,7 @@ async function openBackupPanel(): Promise<void> {
     state.error = toUserMessage(error, "发现相机盘失败");
   } finally {
     state.backupLoading = false;
-    render();
+    patchToolbar();
   }
 }
 
@@ -6650,7 +7122,7 @@ async function createBackupPreview(): Promise<void> {
     .filter(Boolean);
   state.backupLoading = true;
   state.error = null;
-  render();
+  patchToolbar();
   try {
     state.backupPreview = await previewBackup({
       sourceVolumeId: source,
@@ -6663,7 +7135,7 @@ async function createBackupPreview(): Promise<void> {
     state.error = toUserMessage(error, "生成备份预览失败");
   } finally {
     state.backupLoading = false;
-    render();
+    patchToolbar();
   }
 }
 
@@ -6671,10 +7143,10 @@ async function saveBackupConflict(policy: ConflictPolicy): Promise<void> {
   try {
     const settings = await setBackupConflictPolicy(policy);
     state.backupConflictPolicy = settings.backup_conflict_policy;
-    render();
+    patchToolbar();
   } catch (error) {
     state.error = toUserMessage(error, "保存冲突策略失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -6682,10 +7154,10 @@ async function saveBackupMerge(enabled: boolean): Promise<void> {
   try {
     const settings = await setBackupMergeSegments(enabled);
     state.backupMergeSegments = settings.backup_merge_segments;
-    render();
+    patchToolbar();
   } catch (error) {
     state.error = toUserMessage(error, "保存分段合并设置失败");
-    render();
+    patchToolbar();
   }
 }
 
@@ -6694,7 +7166,7 @@ async function startConfirmedBackup(): Promise<void> {
   if (!preview || state.backupJobId) return;
   if (preview.spaceSufficient === false) {
     state.error = "目标盘空间不足，无法开始备份";
-    render();
+    patchToolbar();
     return;
   }
   const confirmed = window.confirm(`将按预览复制 ${formatCount(willCopyCount(preview))} 个文件（${formatSize(preview.requiredBytes)}）。\n\n相机源文件不会被删除、移动或修改。是否开始备份？`);
@@ -6703,19 +7175,19 @@ async function startConfirmedBackup(): Promise<void> {
   state.backupLastRunId = preview.backupRunId;
   state.backupProgress = null;
   state.backupFailedItems = [];
-  render();
+  patchToolbar();
   try {
     const start = await startBackup(preview.backupRunId, preview.id);
     state.backupJobId = start.jobId;
     state.backupLastRunId = start.backupRunId;
   } catch (error) {
     state.error = toUserMessage(error, "无法开始备份");
-  } finally { state.backupLoading = false; render(); }
+  } finally { state.backupLoading = false; patchToolbar(); }
 }
 
 async function cancelCurrentBackup(): Promise<void> {
   if (!state.backupJobId) return;
-  try { await cancelBackup(state.backupJobId); } catch (error) { state.error = toUserMessage(error, "无法取消备份"); render(); }
+  try { await cancelBackup(state.backupJobId); } catch (error) { state.error = toUserMessage(error, "无法取消备份"); patchToolbar(); }
 }
 
 async function retryCurrentBackup(): Promise<void> {
@@ -6723,7 +7195,7 @@ async function retryCurrentBackup(): Promise<void> {
   if (!runId || state.backupJobId || state.backupRetrying) return;
   state.backupRetrying = true;
   state.error = null;
-  render();
+  patchToolbar();
   try {
     const start = await retryFailedBackup(runId);
     state.backupJobId = start.jobId;
@@ -6734,7 +7206,7 @@ async function retryCurrentBackup(): Promise<void> {
     state.error = toUserMessage(error, "重试备份失败");
   } finally {
     state.backupRetrying = false;
-    render();
+    patchToolbar();
   }
 }
 
@@ -7334,13 +7806,14 @@ void onPreviewProgress((progress) => {
           ? `缩略图重建失败：${progress.error}`
           : "缩略图重建结束";
   if (state.settingsOpen) void loadSettingsSectionData().then(() => updateSettingsPanel());
-  else render();
+  else patchToolbar();
 });
 void onDeleteProgress((progress) => {
   if (!state.deleting) return;
   state.deleteProgress = progress;
   if (progress.state === "completed") return;
-  render();
+  // 进度条在状态区；网格一张卡都不用动。
+  patchToolbar();
 });
 void onBackupProgress((progress) => {
   // Accept a terminal event that raced with startBackup's response, but never
@@ -7349,18 +7822,19 @@ void onBackupProgress((progress) => {
   if (!state.backupJobId && progress.state === "running") return;
   state.backupProgress = progress;
   if (progress.state === "running") {
-    render();
+    // running 态只改状态区里的进度面板。
+    patchToolbar();
     return;
   }
   state.backupJobId = null;
   if (progress.state === "failed") state.error = progress.error ?? "备份失败";
-  void loadBackupHistory().then(() => render());
+  void loadBackupHistory().then(() => patchToolbar());
   if (state.backupLastRunId) {
     void listBackupRunItems(state.backupLastRunId, true)
-      .then((items) => { state.backupFailedItems = items; render(); })
-      .catch(() => { state.backupFailedItems = []; render(); });
+      .then((items) => { state.backupFailedItems = items; patchToolbar(); })
+      .catch(() => { state.backupFailedItems = []; patchToolbar(); });
   }
-  render();
+  patchToolbar();
 });
 void onLibraryMergeProgress((progress) => {
   if (state.libraryMergeJobId && progress.jobId !== state.libraryMergeJobId && progress.state === "running") return;
