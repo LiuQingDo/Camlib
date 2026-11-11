@@ -1316,6 +1316,133 @@ function clearAllFilters(): void {
   void refreshMedia();
 }
 
+/**
+ * 工具栏命令。原先是 bindEvents 里的内联回调；改成事件委托后由派发表按
+ * data-action 调用，state 变更顺序与原实现逐条一致。
+ */
+function setKindFilter(kind: string): void {
+  // Type tabs replace the whole filter set rather than stacking with 收藏/连拍.
+  // Without resetting these flags, switching away kept querying only the
+  // secondary subset and made the other tabs appear unresponsive.
+  state.kind = (kind || undefined) as MediaKind | undefined;
+  state.favoriteOnly = false;
+  state.burstOnly = false;
+  void refreshMedia();
+}
+
+function toggleFavoriteOnlyFilter(): void {
+  // 收藏 / 连拍 are exclusive secondary tabs: selecting one clears the other.
+  if (state.favoriteOnly) state.favoriteOnly = false;
+  else { state.favoriteOnly = true; state.burstOnly = false; }
+  void refreshMedia();
+}
+
+function toggleBurstOnlyFilter(): void {
+  if (state.burstOnly) state.burstOnly = false;
+  else { state.burstOnly = true; state.favoriteOnly = false; }
+  void refreshMedia();
+}
+
+function toggleTagFilter(tagId: string): void {
+  if (!tagId) return;
+  if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
+  else state.tagIds.add(tagId);
+  void refreshMedia();
+}
+
+function toggleToolbarTagPopover(): void {
+  if (tagPopoverOpen) {
+    tagPopoverOpen = false;
+    unmountTagPopover();
+    return;
+  }
+  tagPopoverOpen = true;
+  tagPopoverScroll = 0;
+  mountTagPopover(true);
+}
+
+function toggleAdvancedFilters(): void {
+  state.filtersExpanded = !state.filtersExpanded;
+  // Collapsing the toolbar hides the popover's anchor; dismiss it first so
+  // it cannot float orphaned over the grid.
+  if (!state.filtersExpanded && tagPopoverOpen) {
+    tagPopoverOpen = false;
+    unmountTagPopover();
+  }
+  render();
+}
+
+function applyRatingFilter(value: string): void {
+  state.ratingEq = null;
+  state.ratingMin = null;
+  if (value.startsWith("eq:")) state.ratingEq = Number(value.slice(3));
+  else if (value.startsWith("min:")) state.ratingMin = Number(value.slice(4));
+  void refreshMedia();
+}
+
+/** 日期区间输入框（from / to 任一变更都重算整段区间）。 */
+function applyDateRangeInputs(): void {
+  const from = app.querySelector<HTMLInputElement>("#date-from")?.value.trim();
+  const to = app.querySelector<HTMLInputElement>("#date-to")?.value.trim();
+  state.dateFrom = from || undefined;
+  state.dateTo = to || undefined;
+  if (state.dateFrom || state.dateTo) {
+    // Range wins over sidebar prefix so the two cannot fight in the title.
+    state.datePrefix = undefined;
+  }
+  void refreshMedia();
+}
+
+function clearDateRange(): void {
+  state.dateFrom = undefined;
+  state.dateTo = undefined;
+  void refreshMedia();
+}
+
+function applyDateRangePreset(preset: string | undefined): void {
+  const today = new Date();
+  const toIso = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+  if (preset === "month") {
+    state.dateFrom = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+    state.dateTo = toIso(today);
+  } else if (preset === "year") {
+    state.dateFrom = `${today.getFullYear()}-01-01`;
+    state.dateTo = toIso(today);
+  } else if (preset === "days30") {
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    state.dateFrom = toIso(start);
+    state.dateTo = toIso(today);
+  } else {
+    return;
+  }
+  state.datePrefix = undefined;
+  void refreshMedia();
+}
+
+function changeSortMode(value: string): void {
+  state.sort = value as SortMode;
+  void persistUiPrefs({ uiSort: state.sort });
+  void refreshMedia();
+}
+
+// Keep density live while dragging; persist only on release so the settings
+// file is not rewritten on every slider tick.
+function previewDensity(value: string): void {
+  state.density = Number(value) as Density;
+  app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
+}
+
+function commitDensity(value: string): void {
+  state.density = Number(value) as Density;
+  void persistUiPrefs({ uiDensity: state.density });
+}
+
 /** Exit semantic search and return to the normal filter pipeline. */
 function exitSemanticSearch(): void {
   state.semanticSearch = null;
@@ -1390,26 +1517,6 @@ function scrollToContentTop(): void {
   window.scrollTo?.(0, 0);
 }
 
-function bindSelectionToolbarEvents(): void {
-  app.querySelector<HTMLButtonElement>("#select-current")?.addEventListener("click", () => void selectCurrentResults());
-  app.querySelector<HTMLButtonElement>("#clear-selection")?.addEventListener("click", () => {
-    state.selectedIds.clear();
-    state.lastSelectIndex = null;
-    applySelectionChrome();
-  });
-  app.querySelector<HTMLButtonElement>("#delete-selected")?.addEventListener("click", () => void requestDeleteSelected());
-  app.querySelector<HTMLButtonElement>("#favorite-selected")?.addEventListener("click", () => void applyBatchFavorite(true));
-  app.querySelector<HTMLButtonElement>("#unfavorite-selected")?.addEventListener("click", () => void applyBatchFavorite(false));
-  app.querySelector<HTMLButtonElement>("#batch-tag-attach")?.addEventListener("click", () => void applyBatchTag(true));
-  app.querySelector<HTMLButtonElement>("#batch-ai-tag")?.addEventListener("click", () => {
-    const ids = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video").map((item) => item.id);
-    void runAiTagging(ids);
-  });
-  app.querySelector<HTMLButtonElement>("#batch-tag-detach")?.addEventListener("click", () => void applyBatchTag(false));
-  app.querySelector<HTMLButtonElement>("#batch-rating-apply")?.addEventListener("click", () => void applyBatchRating());
-  app.querySelector<HTMLButtonElement>("#merge-selected")?.addEventListener("click", () => void openMergeModal());
-}
-
 /** Patch selection UI without rebuilding the grid (avoids thumbnail flicker). */
 function applySelectionChrome(): void {
   app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
@@ -1433,20 +1540,34 @@ function applySelectionChrome(): void {
   }
   if (existing) existing.outerHTML = nextHtml;
   else sticky.insertAdjacentHTML("beforeend", nextHtml);
-  bindSelectionToolbarEvents();
 }
 
 function updateFavoriteButton(id: string): void {
   const favorite = state.favorites.has(id);
   const pending = state.favoritePendingIds.has(id);
-  const button = [...app.querySelectorAll<HTMLButtonElement>("[data-favorite]")]
-    .find((entry) => entry.dataset.favorite === id);
+  const button = [...app.querySelectorAll<HTMLButtonElement>('[data-action="toggle-favorite"]')]
+    .find((entry) => entry.dataset.id === id);
   if (!button) return;
   button.classList.toggle("is-favorite", favorite);
   button.classList.toggle("is-pending", pending);
   button.disabled = pending;
   button.setAttribute("aria-pressed", String(favorite));
   button.setAttribute("aria-busy", String(pending));
+}
+
+/** 卡片点击：打开预览。委托层的 open-media 动作与焦点回车都走这里。 */
+function openMediaCard(card: HTMLElement): void {
+  state.previewIndex = Number(card.dataset.index);
+  previewImmersiveOpen = state.previewMode === "immersive";
+  render();
+  void loadModalAsset();
+}
+
+/** 卡片选择按钮：Shift 走区间连线，否则单张切换。 */
+function toggleCardSelection(button: HTMLElement, event: MouseEvent): void {
+  const card = button.closest<HTMLElement>(".media-card");
+  const index = Number(card?.dataset.index ?? 0);
+  toggleSelection(button.dataset.id!, index, event.shiftKey);
 }
 
 function toggleSelection(id: string, index: number, range = false): void {
@@ -1722,8 +1843,8 @@ function renderCard(item: MediaItemDto, index: number): string {
     : isVideo
       ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>`
       : `<span class="preview-skeleton" aria-hidden="true"></span>`;
-  return `<article class="media-card ${selected ? "is-selected" : ""}" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-select="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-favorite="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
+  return `<article class="media-card ${selected ? "is-selected" : ""}" data-action="open-media" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
+    <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-action="toggle-select" data-id="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-action="toggle-favorite" data-id="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span>${formatDate(item.captureDate)}</span><span>${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
   </article>`;
 }
@@ -1747,12 +1868,12 @@ function renderLoadMoreFooter(): string {
     return `<div class="load-more-sentinel is-done" id="load-more-sentinel"><span>已显示全部 ${formatCount(total)} 项</span></div>`;
   }
   if (state.loadMoreError) {
-    return `<div class="load-more-sentinel is-error" id="load-more-sentinel" role="alert"><span>${escapeHtml(state.loadMoreError)}</span><button class="load-more" id="load-more-retry" type="button">重试</button></div>`;
+    return `<div class="load-more-sentinel is-error" id="load-more-sentinel" role="alert"><span>${escapeHtml(state.loadMoreError)}</span><button class="load-more" id="load-more-retry" data-action="retry-load-more" type="button">重试</button></div>`;
   }
   if (loadMoreInFlight) {
     return `<div class="load-more-sentinel is-loading" id="load-more-sentinel" role="status"><span class="spinner"></span><span>正在加载更多…</span></div>`;
   }
-  return `<div class="load-more-sentinel" id="load-more-sentinel"><button class="load-more" id="load-more" type="button">加载更多 · 已显示 ${formatCount(shown)} / ${formatCount(total)}</button></div>`;
+  return `<div class="load-more-sentinel" id="load-more-sentinel"><button class="load-more" id="load-more" data-action="load-more" type="button">加载更多 · 已显示 ${formatCount(shown)} / ${formatCount(total)}</button></div>`;
 }
 
 function renderMediaAreaInner(): string {
@@ -1765,8 +1886,8 @@ function renderPrimaryFilters(): string {
   // Type tabs are exclusive with 收藏/连拍 secondary filters, matching the
   // original 收藏 rule so switching tabs always replaces the whole filter set.
   const secondaryActive = state.favoriteOnly || state.burstOnly;
-  const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
-  const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
+  const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-action="filter-kind" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
+  const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter" data-action="filter-favorites">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter" data-action="filter-burst">连拍</button>`;
   const secondaryParts = secondaryFilterParts(state);
   const hasSecondary = secondaryParts.length > 0;
   const expanded = state.filtersExpanded;
@@ -1774,9 +1895,9 @@ function renderPrimaryFilters(): string {
     ? `筛选 (${secondaryParts.length})`
     : expanded ? "筛选" : "筛选";
   const summary = hasSecondary && !expanded
-    ? `<span class="filter-summary">${escapeHtml(secondaryParts.join(" · "))}</span><button class="text-button clear-summary-filters" type="button">清除</button>`
+    ? `<span class="filter-summary">${escapeHtml(secondaryParts.join(" · "))}</span><button class="text-button clear-summary-filters" data-action="clear-filters" type="button">清除</button>`
     : "";
-  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><button class="filter-chip filter-toggle ${hasSecondary ? "has-active" : ""}" type="button" id="toggle-advanced-filters" aria-expanded="${expanded}" aria-controls="advanced-filters">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${expanded ? "▴" : "▾"}</span></button>${summary}`;
+  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><button class="filter-chip filter-toggle ${hasSecondary ? "has-active" : ""}" type="button" id="toggle-advanced-filters" data-action="toggle-advanced-filters" aria-expanded="${expanded}" aria-controls="advanced-filters">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${expanded ? "▴" : "▾"}</span></button>${summary}`;
 }
 
 /** Inline toolbar chips: selected tags first, then hot tags by media count. */
@@ -1868,20 +1989,20 @@ function unmountTagPopover(): void {
 function renderAdvancedFilters(): string {
   let tagBlock: string;
   if (!state.tags.length) {
-    tagBlock = `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">标签管理</button></div>`;
+    tagBlock = `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">标签管理</button></div>`;
   } else {
     const inline = toolbarTagChips();
-    const chips = inline.map((tag) => `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`).join("");
+    const chips = inline.map((tag) => `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-action="filter-tag" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`).join("");
     // Everything beyond the inline chips stays reachable through the
     // searchable popover instead of a flat (truncated) chip row. The popover
     // itself mounts into .sticky-controls (see mountTagPopover), not here —
     // this container clips overflow.
     const moreButton = state.tags.length > inline.length
-      ? `<button class="filter-chip filter-chip-more ${tagPopoverOpen ? "is-active" : ""}" type="button" id="toggle-tag-popover" aria-expanded="${tagPopoverOpen}" aria-haspopup="true">更多标签 <span class="filter-toggle-caret" aria-hidden="true">${tagPopoverOpen ? "▴" : "▾"}</span></button>`
+      ? `<button class="filter-chip filter-chip-more ${tagPopoverOpen ? "is-active" : ""}" type="button" id="toggle-tag-popover" data-action="toggle-tag-popover" aria-expanded="${tagPopoverOpen}" aria-haspopup="true">更多标签 <span class="filter-toggle-caret" aria-hidden="true">${tagPopoverOpen ? "▴" : "▾"}</span></button>`
       : "";
-    tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager">管理</button></div>`;
+    tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">管理</button></div>`;
   }
-  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}><div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" type="button">清除筛选</button>` : ""}</div>`;
+  return `<div class="advanced-filters" id="advanced-filters" ${state.filtersExpanded ? "" : "hidden"}><div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(semanticDraft)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}</div>`;
 }
 
 function renderRatingFilter(): string {
@@ -1900,7 +2021,7 @@ function renderRatingFilter(): string {
   let selected = "";
   if (state.ratingEq !== null) selected = `eq:${state.ratingEq}`;
   else if (state.ratingMin !== null) selected = `min:${state.ratingMin}`;
-  return `<label class="select-wrap rating-filter${selected ? " is-active" : ""}"><span>评分</span><select id="rating-filter" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
+  return `<label class="select-wrap rating-filter${selected ? " is-active" : ""}"><span>评分</span><select id="rating-filter" data-action="filter-rating" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
 }
 
 function renderDateRangeControls(): string {
@@ -1910,10 +2031,10 @@ function renderDateRangeControls(): string {
     { id: "days30", label: "最近30天" },
   ];
   return `<div class="date-range" aria-label="日期区间">
-    <label><span>从</span><input type="date" id="date-from" value="${escapeHtml(state.dateFrom ?? "")}" aria-label="开始日期" /></label>
-    <label><span>到</span><input type="date" id="date-to" value="${escapeHtml(state.dateTo ?? "")}" aria-label="结束日期" /></label>
-    ${presets.map((preset) => `<button class="filter-chip range-preset" type="button" data-range-preset="${preset.id}">${preset.label}</button>`).join("")}
-    ${(state.dateFrom || state.dateTo) ? `<button class="filter-chip" type="button" id="clear-date-range">清除区间</button>` : ""}
+    <label><span>从</span><input type="date" id="date-from" data-action="apply-date-range" value="${escapeHtml(state.dateFrom ?? "")}" aria-label="开始日期" /></label>
+    <label><span>到</span><input type="date" id="date-to" data-action="apply-date-range" value="${escapeHtml(state.dateTo ?? "")}" aria-label="结束日期" /></label>
+    ${presets.map((preset) => `<button class="filter-chip range-preset" type="button" data-action="date-preset" data-range-preset="${preset.id}">${preset.label}</button>`).join("")}
+    ${(state.dateFrom || state.dateTo) ? `<button class="filter-chip" type="button" id="clear-date-range" data-action="clear-date-range">清除区间</button>` : ""}
   </div>`;
 }
 
@@ -2174,7 +2295,7 @@ function renderSelectionToolbar(): string {
   const aiTitle = aiEligible.length === 0 && selectedCount > 0
     ? "所选项目中没有可打标的照片（视频暂不支持）"
     : `对所选 ${formatCount(aiEligible.length)} 张照片执行 AI 打标`;
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" type="button">清除选择</button><button class="selection-button" id="batch-ai-tag" type="button" title="${escapeHtml(aiTitle)}" ${aiDisabled ? "disabled" : ""}>${state.aiSingleBusy ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…` : `✦ AI 打标`}</button><button class="selection-button" id="favorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" data-action="select-current-results" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" data-action="clear-selection" type="button">清除选择</button><button class="selection-button" id="batch-ai-tag" data-action="batch-ai-tag" type="button" title="${escapeHtml(aiTitle)}" ${aiDisabled ? "disabled" : ""}>${state.aiSingleBusy ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…` : `✦ AI 打标`}</button><button class="selection-button" id="favorite-selected" data-action="batch-favorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" data-action="batch-unfavorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" data-action="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" data-action="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" data-action="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" data-action="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" data-action="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
 }
 
 function renderDeleteFeedback(): string {
@@ -3528,9 +3649,9 @@ function render(): void {
     ${renderAiSidebarSection()}
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button theme-toggle" type="button" title="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" id="theme-toggle" aria-label="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter(state) ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter(state) ? `<button class="text-button clear-all-filters" id="clear-all-filters" data-action="clear-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
-    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
+    ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" data-action="sort-change" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" data-action="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
     <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}${renderAiChatDrawer()}`;
   bindEvents();
   bindTagManagerEvents();
@@ -3545,7 +3666,6 @@ function render(): void {
   // asset request is promise-cached, so this replays from cache.
   if (state.previewIndex !== null) void loadModalAsset();
   if (hasItems) observePreviews();
-  bindLoadMoreEvents();
   observeLoadMore();
   const nextContent = app.querySelector<HTMLElement>(".content");
   if (nextContent) {
@@ -3584,37 +3704,9 @@ function renderPreview(): string {
   </div></div>`;
 }
 
-/** Rebind grid card interactions after a media-area-only patch. */
-function bindMediaCardEvents(): void {
-  app.querySelectorAll<HTMLElement>(".media-card").forEach((card) => {
-    if (card.dataset.bound) return;
-    card.dataset.bound = "1";
-    const open = () => {
-      state.previewIndex = Number(card.dataset.index);
-      previewImmersiveOpen = state.previewMode === "immersive";
-      render();
-      void loadModalAsset();
-    };
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-select]").forEach((button) => {
-    if (button.dataset.bound) return;
-    button.dataset.bound = "1";
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const card = button.closest<HTMLElement>(".media-card");
-      const index = Number(card?.dataset.index ?? 0);
-      toggleSelection(button.dataset.select!, index, event.shiftKey);
-    });
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => {
-    if (button.dataset.bound) return;
-    button.dataset.bound = "1";
-    button.addEventListener("click", (event) => { event.stopPropagation(); void toggleFavorite(button.dataset.favorite!); });
-  });
-}
-
+/** Per-render binding for the regions that still use element-level listeners
+ *  (sidebar, topbar, dialogs, settings, AI drawer). The media grid and the
+ *  sticky toolbar are handled once by the delegated layer at the end of this file. */
 function bindEvents(): void {
   const themeToggle = app.querySelector<HTMLButtonElement>("#theme-toggle");
   if (themeToggle && !themeToggle.dataset.bound) {
@@ -3648,44 +3740,6 @@ function bindEvents(): void {
     else state.expandedMonths.add(month);
     render();
   }));
-  app.querySelectorAll<HTMLButtonElement>("[data-kind]").forEach((button) => button.addEventListener("click", () => {
-    // Type tabs replace the whole filter set rather than stacking with 收藏/连拍.
-    // Without resetting these flags, switching away kept querying only the
-    // secondary subset and made the other tabs appear unresponsive.
-    state.kind = (button.dataset.kind || undefined) as MediaKind | undefined;
-    state.favoriteOnly = false;
-    state.burstOnly = false;
-    void refreshMedia();
-  }));
-  app.querySelector<HTMLButtonElement>("#favorite-filter")?.addEventListener("click", () => {
-    // 收藏 / 连拍 are exclusive secondary tabs: selecting one clears the other.
-    if (state.favoriteOnly) state.favoriteOnly = false;
-    else { state.favoriteOnly = true; state.burstOnly = false; }
-    void refreshMedia();
-  });
-  app.querySelector<HTMLButtonElement>("#burst-filter")?.addEventListener("click", () => {
-    if (state.burstOnly) state.burstOnly = false;
-    else { state.burstOnly = true; state.favoriteOnly = false; }
-    void refreshMedia();
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-tag-filter]").forEach((button) => button.addEventListener("click", () => {
-    const tagId = button.dataset.tagFilter;
-    if (!tagId) return;
-    if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
-    else state.tagIds.add(tagId);
-    void refreshMedia();
-  }));
-  app.querySelector<HTMLButtonElement>("#open-tag-manager")?.addEventListener("click", () => openTagManager());
-  app.querySelector<HTMLButtonElement>("#toggle-tag-popover")?.addEventListener("click", () => {
-    if (tagPopoverOpen) {
-      tagPopoverOpen = false;
-      unmountTagPopover();
-      return;
-    }
-    tagPopoverOpen = true;
-    tagPopoverScroll = 0;
-    mountTagPopover(true);
-  });
   // Re-mount the popover after a full render (filter toggles re-render the app
   // while the popover stays open) and restore its scroll/search state. Only
   // while the toolbar is visible: advanced row expanded and no preview modal
@@ -3706,71 +3760,6 @@ function bindEvents(): void {
     tagPopoverQuery = "";
     tagPopoverScroll = 0;
   }
-  app.querySelector<HTMLSelectElement>("#rating-filter")?.addEventListener("change", (event) => {
-    const value = (event.target as HTMLSelectElement).value;
-    state.ratingEq = null;
-    state.ratingMin = null;
-    if (value.startsWith("eq:")) state.ratingEq = Number(value.slice(3));
-    else if (value.startsWith("min:")) state.ratingMin = Number(value.slice(4));
-    void refreshMedia();
-  });
-  const applyDateInputs = () => {
-    const from = app.querySelector<HTMLInputElement>("#date-from")?.value.trim();
-    const to = app.querySelector<HTMLInputElement>("#date-to")?.value.trim();
-    state.dateFrom = from || undefined;
-    state.dateTo = to || undefined;
-    if (state.dateFrom || state.dateTo) {
-      // Range wins over sidebar prefix so the two cannot fight in the title.
-      state.datePrefix = undefined;
-    }
-    void refreshMedia();
-  };
-  app.querySelector<HTMLInputElement>("#date-from")?.addEventListener("change", applyDateInputs);
-  app.querySelector<HTMLInputElement>("#date-to")?.addEventListener("change", applyDateInputs);
-  app.querySelector<HTMLButtonElement>("#clear-date-range")?.addEventListener("click", () => {
-    state.dateFrom = undefined;
-    state.dateTo = undefined;
-    void refreshMedia();
-  });
-  app.querySelectorAll<HTMLButtonElement>("[data-range-preset]").forEach((button) => button.addEventListener("click", () => {
-    const preset = button.dataset.rangePreset;
-    const today = new Date();
-    const toIso = (date: Date) => {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, "0");
-      const day = String(date.getDate()).padStart(2, "0");
-      return `${year}-${month}-${day}`;
-    };
-    if (preset === "month") {
-      state.dateFrom = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
-      state.dateTo = toIso(today);
-    } else if (preset === "year") {
-      state.dateFrom = `${today.getFullYear()}-01-01`;
-      state.dateTo = toIso(today);
-    } else if (preset === "days30") {
-      const start = new Date(today);
-      start.setDate(start.getDate() - 29);
-      state.dateFrom = toIso(start);
-      state.dateTo = toIso(today);
-    } else {
-      return;
-    }
-    state.datePrefix = undefined;
-    void refreshMedia();
-  }));
-  app.querySelectorAll<HTMLButtonElement>("#clear-all-filters, .clear-summary-filters, .advanced-clear").forEach((button) => {
-    button.addEventListener("click", () => clearAllFilters());
-  });
-  app.querySelector<HTMLButtonElement>("#toggle-advanced-filters")?.addEventListener("click", () => {
-    state.filtersExpanded = !state.filtersExpanded;
-    // Collapsing the toolbar hides the popover's anchor; dismiss it first so
-    // it cannot float orphaned over the grid.
-    if (!state.filtersExpanded && tagPopoverOpen) {
-      tagPopoverOpen = false;
-      unmountTagPopover();
-    }
-    render();
-  });
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   searchInput?.addEventListener("input", () => { searchDraft = searchInput.value; });
   searchInput?.addEventListener("keydown", (event) => {
@@ -3843,21 +3832,6 @@ function bindEvents(): void {
       }
     });
   }
-  app.querySelector<HTMLSelectElement>("#sort-select")?.addEventListener("change", (event) => {
-    state.sort = (event.target as HTMLSelectElement).value as SortMode;
-    void persistUiPrefs({ uiSort: state.sort });
-    void refreshMedia();
-  });
-  // Keep density live while dragging; persist only on release so the settings
-  // file is not rewritten on every slider tick.
-  app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("input", (event) => {
-    state.density = Number((event.target as HTMLInputElement).value) as Density;
-    app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
-  });
-  app.querySelector<HTMLInputElement>("#density-input")?.addEventListener("change", (event) => {
-    state.density = Number((event.target as HTMLInputElement).value) as Density;
-    void persistUiPrefs({ uiDensity: state.density });
-  });
   app.querySelector<HTMLButtonElement>("#scan-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLButtonElement>("#scan-top-button")?.addEventListener("click", () => void scanLibrary());
   app.querySelector<HTMLInputElement>("#auto-scan-toggle")?.addEventListener("change", (event) => {
@@ -3928,7 +3902,6 @@ function bindEvents(): void {
     state.error = null;
     render();
   });
-  bindSelectionToolbarEvents();
   app.querySelector<HTMLButtonElement>("#cancel-delete-confirm")?.addEventListener("click", cancelDeleteConfirm);
   app.querySelector<HTMLButtonElement>("#cancel-delete-confirm-footer")?.addEventListener("click", cancelDeleteConfirm);
   app.querySelector<HTMLButtonElement>("#confirm-delete")?.addEventListener("click", () => void runConfirmedDelete());
@@ -3944,7 +3917,6 @@ function bindEvents(): void {
     render();
   });
   app.querySelector<HTMLFormElement>("#library-form")?.addEventListener("submit", (event) => { event.preventDefault(); const input = app.querySelector<HTMLInputElement>("#library-path"); if (input?.value.trim()) void connectLibrary(input.value.trim()); });
-  bindMediaCardEvents();
   app.querySelectorAll<HTMLButtonElement>("[data-open-folder]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
     void openFolderForItem(button.dataset.openFolder!);
@@ -6372,14 +6344,6 @@ function loadMoreScrollRoot(): Element | null {
   return null;
 }
 
-function bindLoadMoreEvents(): void {
-  app.querySelector<HTMLButtonElement>("#load-more")?.addEventListener("click", () => void loadMore());
-  app.querySelector<HTMLButtonElement>("#load-more-retry")?.addEventListener("click", () => {
-    state.loadMoreError = null;
-    void loadMore();
-  });
-}
-
 function observeLoadMore(): void {
   disconnectLoadMoreObserver();
   const sentinel = app.querySelector<HTMLElement>("#load-more-sentinel");
@@ -6405,11 +6369,7 @@ function updateMediaArea(): void {
     return;
   }
   area.innerHTML = renderMediaAreaInner();
-  if (state.page.items.length) {
-    bindMediaCardEvents();
-    observePreviews();
-  }
-  bindLoadMoreEvents();
+  if (state.page.items.length) observePreviews();
   observeLoadMore();
 }
 
@@ -6422,7 +6382,6 @@ function updateLoadMoreFooter(): void {
   } else if (html) {
     app.querySelector<HTMLElement>(".media-area")?.insertAdjacentHTML("beforeend", html);
   }
-  bindLoadMoreEvents();
   observeLoadMore();
 }
 
@@ -7119,6 +7078,133 @@ window.addEventListener("keydown", (event) => {
     app.querySelector<HTMLInputElement>("#search-input")?.focus();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 事件委托（S3a）：媒体卡片区 + 粘性工具栏
+//
+// 这两块每次 render() 都被 app.innerHTML 重建，逐元素绑定等于每次交互都要
+// 重绑上百个监听器。这里改为模块初始化时在 document 上注册一次，元素只声明
+// "要做什么"（data-action），回调集中在下面的派发表里。
+//
+// 用捕获阶段的两个理由：
+// 1. 卡片内的缩略图"重试"按钮（data-retry-thumbnail）由 app 上的冒泡监听
+//    处理且会 stopPropagation()；改造前它先冒泡到卡片把预览打开，捕获阶段
+//    派发保持了这层既有顺序，不产生行为差异。
+// 2. 卡片按钮（选择/收藏）在改造前靠 stopPropagation() 压掉卡片打开；现在
+//    由 closest("[data-action]") 取最内层动作，天然等价。
+// ---------------------------------------------------------------------------
+
+type DelegatedHandler = (element: HTMLElement, event: Event) => void;
+
+/** 点击动作。用字面量联合 + Record 兜住完整性：漏写分支 tsc 直接报错。 */
+type ClickAction =
+  | "open-media"
+  | "toggle-select"
+  | "toggle-favorite"
+  | "load-more"
+  | "retry-load-more"
+  | "select-current-results"
+  | "clear-selection"
+  | "batch-ai-tag"
+  | "batch-favorite"
+  | "batch-unfavorite"
+  | "batch-tag-attach"
+  | "batch-tag-detach"
+  | "batch-rating-apply"
+  | "merge-selected"
+  | "delete-selected"
+  | "filter-kind"
+  | "filter-favorites"
+  | "filter-burst"
+  | "filter-tag"
+  | "toggle-tag-popover"
+  | "open-tag-manager"
+  | "toggle-advanced-filters"
+  | "clear-filters"
+  | "date-preset"
+  | "clear-date-range";
+
+type ChangeAction = "filter-rating" | "apply-date-range" | "sort-change" | "density-input";
+
+type InputAction = "density-input";
+
+const delegatedClickActions: Record<ClickAction, DelegatedHandler> = {
+  "open-media": (card) => openMediaCard(card),
+  "toggle-select": (button, event) => toggleCardSelection(button, event as MouseEvent),
+  "toggle-favorite": (button) => void toggleFavorite(button.dataset.id!),
+  "load-more": () => void loadMore(),
+  "retry-load-more": () => {
+    state.loadMoreError = null;
+    void loadMore();
+  },
+  "select-current-results": () => void selectCurrentResults(),
+  "clear-selection": () => {
+    state.selectedIds.clear();
+    state.lastSelectIndex = null;
+    applySelectionChrome();
+  },
+  "batch-ai-tag": () => {
+    const ids = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video").map((item) => item.id);
+    void runAiTagging(ids);
+  },
+  "batch-favorite": () => void applyBatchFavorite(true),
+  "batch-unfavorite": () => void applyBatchFavorite(false),
+  "batch-tag-attach": () => void applyBatchTag(true),
+  "batch-tag-detach": () => void applyBatchTag(false),
+  "batch-rating-apply": () => void applyBatchRating(),
+  "merge-selected": () => void openMergeModal(),
+  "delete-selected": () => void requestDeleteSelected(),
+  "filter-kind": (chip) => setKindFilter(chip.dataset.kind ?? ""),
+  "filter-favorites": () => toggleFavoriteOnlyFilter(),
+  "filter-burst": () => toggleBurstOnlyFilter(),
+  "filter-tag": (chip) => toggleTagFilter(chip.dataset.tagFilter ?? ""),
+  "toggle-tag-popover": () => toggleToolbarTagPopover(),
+  "open-tag-manager": () => openTagManager(),
+  "toggle-advanced-filters": () => toggleAdvancedFilters(),
+  "clear-filters": () => clearAllFilters(),
+  "date-preset": (chip) => applyDateRangePreset(chip.dataset.rangePreset),
+  "clear-date-range": () => clearDateRange(),
+};
+
+const delegatedChangeActions: Record<ChangeAction, DelegatedHandler> = {
+  "filter-rating": (select) => applyRatingFilter((select as HTMLSelectElement).value),
+  // from / to 两个输入框共用：任一变更都重读两侧的值。
+  "apply-date-range": () => applyDateRangeInputs(),
+  "sort-change": (select) => changeSortMode((select as HTMLSelectElement).value),
+  // 密度滑块同名动作分两段：拖动中走 input 只改本地，松手走 change 才落盘。
+  "density-input": (input) => commitDensity((input as HTMLInputElement).value),
+};
+
+const delegatedInputActions: Record<InputAction, DelegatedHandler> = {
+  "density-input": (input) => previewDensity((input as HTMLInputElement).value),
+};
+
+/** 把事件派发给最内层的 [data-action] 元素；没有登记的动作静默忽略。 */
+function dispatchDelegated(table: Record<string, DelegatedHandler>, event: Event): void {
+  const target = event.target as Element | null;
+  if (!target || typeof target.closest !== "function") return;
+  const element = target.closest<HTMLElement>("[data-action]");
+  const action = element?.dataset.action;
+  if (!element || !action) return;
+  const handler = table[action];
+  if (!handler) return;
+  handler(element, event);
+}
+
+document.addEventListener("click", (event) => dispatchDelegated(delegatedClickActions, event), true);
+document.addEventListener("change", (event) => dispatchDelegated(delegatedChangeActions, event), true);
+document.addEventListener("input", (event) => dispatchDelegated(delegatedInputActions, event), true);
+// 卡片焦点态下的 Enter / Space 打开预览。原监听在卡片上冒泡触发，因此卡片内
+// 任意子元素（含按钮）拿到焦点时按回车同样会打开预览并压掉原生激活。
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const target = event.target as Element | null;
+  if (!target || typeof target.closest !== "function") return;
+  const card = target.closest<HTMLElement>('[data-action="open-media"]');
+  if (!card) return;
+  event.preventDefault();
+  openMediaCard(card);
+}, true);
 
 // Delegated handlers survive full re-renders and must be bound only once.
 app.addEventListener("click", (event) => {
