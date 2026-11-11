@@ -136,6 +136,23 @@ import {
   type AiStatsDto,
   type AiTestResultDto,
 } from "./api/ai";
+import {
+  formatCaptureAt,
+  formatCount,
+  formatDuration,
+  formatEtaSeconds,
+  formatRangeLabel,
+  formatSize,
+  formatSpeed,
+  truncatePath,
+} from "./lib/format";
+import {
+  extensionsToInput,
+  hasAnyFilter,
+  parseExtensionsInput,
+  secondaryFilterParts,
+} from "./lib/filters";
+import { collectRangeIds } from "./lib/selection";
 
 type SortMode = UiSortMode;
 type Density = 1 | 2 | 3 | 4 | 5;
@@ -1181,15 +1198,6 @@ function prefetchPreviewNeighbors(index: number): void {
   pumpPreviewPrefetch();
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const mmss = `${minutes}:${String(seconds).padStart(2, "0")}`;
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}` : mmss;
-}
-
 /** Shared star path — keep in sync with `.icon-star-*` in card favorite buttons. */
 const STAR_PATH = "m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z";
 
@@ -1217,18 +1225,6 @@ function cardRatingHtml(rating: number): string {
   return `<span class="card-rating" title="评分 ${rating} 星" aria-label="评分 ${rating} 星">${Array.from({ length: rating }, () => starSvg(true)).join("")}</span>`;
 }
 
-function formatCaptureAt(value: string | null): string | null {
-  if (!value) return null;
-  if (value.startsWith("unix-ms:")) {
-    const ms = Number(value.slice("unix-ms:".length));
-    if (Number.isFinite(ms)) {
-      const date = new Date(ms);
-      if (!Number.isNaN(date.getTime())) return date.toLocaleString("zh-CN");
-    }
-  }
-  return value;
-}
-
 function formatDimensions(meta: PreviewMetaDto): string {
   if (meta.width && meta.height) return `${meta.width} × ${meta.height}`;
   return "尺寸未知";
@@ -1250,7 +1246,6 @@ function formatDate(date: string | null): string {
   return parts.length === 3 ? `${parts[0]}年${Number(parts[1])}月${Number(parts[2])}日` : date;
 }
 
-function formatCount(value: number): string { return new Intl.NumberFormat("zh-CN").format(value); }
 function pathBaseName(value: string): string {
   const parts = value.split(/[/\\]/);
   return parts[parts.length - 1] || value;
@@ -1260,27 +1255,6 @@ function mergeGroupMatches(group: LibraryMergeGroupDto, query: string): boolean 
   if (!query) return true;
   const haystack = [group.fileName, group.groupKey, ...group.sources.map(pathBaseName)].join("\n").toLowerCase();
   return haystack.includes(query);
-}
-function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "未知";
-  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes < 1024 ** 4) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-  return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
-}
-function formatSpeed(bytesPerSec: number): string {
-  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return "估算中";
-  return `${formatSize(bytesPerSec)}/秒`;
-}
-function formatEtaSeconds(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "估算中";
-  if (seconds < 60) return `约 ${Math.ceil(seconds)} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds % 60);
-  if (minutes < 60) return `约 ${minutes} 分 ${rest} 秒`;
-  const hours = Math.floor(minutes / 60);
-  return `约 ${hours} 小时 ${minutes % 60} 分`;
 }
 function conflictPolicyLabel(policy: ConflictPolicy): string {
   return policy === "rename" ? "自动重命名" : policy === "overwrite" ? "覆盖目标" : "跳过冲突";
@@ -1298,24 +1272,6 @@ function willCopyCount(preview: BackupPreviewDto): number {
 function kindLabel(kind: MediaKind): string { return kind === "photo" ? "照片" : kind === "video" ? "视频" : "实况"; }
 function selectedPrefix(prefix: string | undefined, value: string): string { return prefix === value ? "is-selected" : ""; }
 function facetTotal(): number { return state.facets.reduce((total, facet) => total + facet.count, 0); }
-
-function extensionsToInput(list: string[]): string {
-  return list.join(", ");
-}
-
-function parseExtensionsInput(value: string): string[] {
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => (part.startsWith(".") ? part.toLowerCase() : `.${part.toLowerCase()}`));
-}
-
-function truncatePath(path: string | null | undefined, maxLength = 48): string {
-  if (!path) return "—";
-  if (path.length <= maxLength) return path;
-  return `…${path.slice(-(maxLength - 1))}`;
-}
 
 function scanRunStatusLabel(status: ScanRunDto["status"]): string {
   if (status === "completed") return "成功";
@@ -1335,23 +1291,8 @@ function hasDateFilter(): boolean {
   return Boolean(state.datePrefix || state.dateFrom || state.dateTo);
 }
 
-function hasAnyFilter(): boolean {
-  return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null || state.semanticSearch);
-}
-
-/** Secondary toolbar conditions live under the collapsible「筛选」panel. */
-function secondaryFilterParts(): string[] {
-  const parts: string[] = [];
-  if (state.semanticSearch) parts.push("语义搜索");
-  if (state.tagIds.size) parts.push(`标签×${state.tagIds.size}`);
-  if (state.datePrefix || state.dateFrom || state.dateTo) parts.push("日期");
-  if (state.firstSeenFrom) parts.push("新导入");
-  if (state.ratingEq !== null || state.ratingMin !== null) parts.push("评分");
-  return parts;
-}
-
 function hasSecondaryFilter(): boolean {
-  return secondaryFilterParts().length > 0;
+  return secondaryFilterParts(state).length > 0;
 }
 
 function clearAllFilters(): void {
@@ -1397,17 +1338,10 @@ function commitSemanticSearch(): void {
   void refreshMedia();
 }
 
-function formatRangeLabel(): string {
-  if (state.dateFrom && state.dateTo) return `${state.dateFrom} ~ ${state.dateTo}`;
-  if (state.dateFrom) return `自 ${state.dateFrom}`;
-  if (state.dateTo) return `至 ${state.dateTo}`;
-  return "";
-}
-
 function primaryDateLabel(): string {
   if (state.firstSeenFrom) return "新导入";
   if (state.datePrefix) return formatDate(state.datePrefix);
-  if (state.dateFrom || state.dateTo) return formatRangeLabel();
+  if (state.dateFrom || state.dateTo) return formatRangeLabel(state.dateFrom, state.dateTo);
   return "";
 }
 
@@ -1517,11 +1451,9 @@ function updateFavoriteButton(id: string): void {
 
 function toggleSelection(id: string, index: number, range = false): void {
   if (range && state.lastSelectIndex !== null) {
-    const start = Math.min(state.lastSelectIndex, index);
-    const end = Math.max(state.lastSelectIndex, index);
-    for (let i = start; i <= end; i += 1) {
-      const item = state.page.items[i];
-      if (item) state.selectedIds.add(item.id);
+    // Range endpoints are resolved by collectRangeIds; out-of-page rows are skipped.
+    for (const rangeId of collectRangeIds(state.page.items, state.lastSelectIndex, index)) {
+      state.selectedIds.add(rangeId);
     }
     // The range end becomes the next anchor so chained Shift+clicks extend.
     state.lastSelectIndex = index;
@@ -1835,7 +1767,7 @@ function renderPrimaryFilters(): string {
   const secondaryActive = state.favoriteOnly || state.burstOnly;
   const kinds = ([{ value: undefined, label: "全部" }, { value: "photo" as MediaKind, label: "照片" }, { value: "video" as MediaKind, label: "视频" }, { value: "live" as MediaKind, label: "实况" }]).map((filter) => `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-kind="${filter.value ?? ""}">${filter.label}</button>`).join("");
   const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter">连拍</button>`;
-  const secondaryParts = secondaryFilterParts();
+  const secondaryParts = secondaryFilterParts(state);
   const hasSecondary = secondaryParts.length > 0;
   const expanded = state.filtersExpanded;
   const toggleLabel = hasSecondary && !expanded
@@ -2631,7 +2563,7 @@ function renderLibraryEmpty(): string {
   if (state.loading) return `<div class="empty-state"><span class="empty-icon spinner large"></span><h2>正在读取媒体库</h2><p>正在从 Tauri 后端加载索引。</p></div>`;
   if (state.availability === "unconfigured") return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会建立可搜索的索引。</p><div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div></div>`;
   if (!state.library) return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
-  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${hasAnyFilter() ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${hasAnyFilter() ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
+  if (!state.page.total) return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${hasAnyFilter(state) ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${hasAnyFilter(state) ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
   return "";
 }
 
@@ -3373,7 +3305,7 @@ function aiChatContextSummary(): string {
   if (preview) bits.push(`预览 ${preview.displayName}`);
   if (state.selectedIds.size) bits.push(`已选 ${state.selectedIds.size} 张`);
   if (state.semanticSearch) bits.push(`语义「${state.semanticSearch}」`);
-  else if (hasAnyFilter()) bits.push("筛选中");
+  else if (hasAnyFilter(state)) bits.push("筛选中");
   return bits.join(" · ");
 }
 
@@ -3596,7 +3528,7 @@ function render(): void {
     ${renderAiSidebarSection()}
     <div class="sidebar-footer"><span class="footer-dot"></span><span>${state.availability === "available" ? "索引已连接" : state.availability === "unconfigured" ? "等待连接" : "等待设备"}</span><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${state.availability !== "available" ? "disabled" : ""}>⟳</button><button class="icon-button theme-toggle" type="button" title="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" id="theme-toggle" aria-label="${state.theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></div>
   </aside><main class="content">
-    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter() ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
+    <header class="topbar"><div class="title-block"><div class="eyebrow">${primaryDateLabel() ? `筛选 · ${primaryDateLabel()}` : "媒体总览"}</div><h1>${primaryDateLabel() || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${hasAnyFilter(state) ? `<button class="text-button clear-all-filters" id="clear-all-filters" type="button">清除筛选</button>` : ""}</div><div class="top-actions"><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="${escapeHtml(searchDraft)}" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button" ${state.availability !== "available" ? "disabled" : ""}>${state.scanning ? "扫描中…" : "扫描媒体库"}</button></div></header>
     ${state.firstSeenFrom ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>` : ""}
     ${renderStatusBanner()}${renderDeleteFeedback()}<div class="sticky-controls"><div class="toolbar${state.filtersExpanded ? " is-filters-expanded" : ""}"><div class="filter-column"><div class="filter-row">${renderPrimaryFilters()}</div>${renderAdvancedFilters()}</div><div class="toolbar-right"><label class="select-wrap"><span>排序</span><select id="sort-select" aria-label="排序"><option value="newest" ${state.sort === "newest" ? "selected" : ""}>最新</option><option value="oldest" ${state.sort === "oldest" ? "selected" : ""}>最早</option><option value="name" ${state.sort === "name" ? "selected" : ""}>文件名</option><option value="rating-desc" ${state.sort === "rating-desc" ? "selected" : ""}>评分高→低</option><option value="rating-asc" ${state.sort === "rating-asc" ? "selected" : ""}>评分低→高</option><option value="size-desc" ${state.sort === "size-desc" ? "selected" : ""}>文件大→小</option><option value="size-asc" ${state.sort === "size-asc" ? "selected" : ""}>文件小→大</option></select></label><label class="density-control" title="缩略图密度"><span>▦</span><input id="density-input" type="range" min="1" max="5" value="${state.density}" aria-label="缩略图密度" /><span>▦</span></label></div></div>${renderSelectionToolbar()}</div>
     <section class="media-area" aria-live="polite">${renderMediaAreaInner()}</section></main></div>${state.previewIndex !== null ? renderPreview() : ""}${renderDeleteConfirm()}${renderTagManager()}${state.editorOpen ? renderEditor() : ""}${state.mergeModalOpen ? renderMergeModal() : ""}${renderSettingsPanel()}${renderAiChatDrawer()}`;
