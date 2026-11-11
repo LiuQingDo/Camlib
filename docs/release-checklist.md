@@ -4,7 +4,8 @@
 
 ## 1. 版本号
 
-- `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的 `version` 保持一致（当前 `0.5.0`）。
+- `package.json` 是**唯一**版本来源（当前 `0.5.0`）。`src-tauri/tauri.conf.json` 的 `version` 已指向 `../package.json`，不需要手改。
+- 改完 `package.json` 后运行 `python scripts/sync-version.py` 同步 `src-tauri/Cargo.toml`（幂等，只改 `[package]` 里那一行）；`--check` 只校验不写，CI 用。
 - 策略：`MAJOR.MINOR.PATCH`
   - **PATCH**：修 bug、文案、安全加固，无数据迁移
   - **MINOR**：新功能、索引/设置向后兼容扩展
