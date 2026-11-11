@@ -34,7 +34,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -47,8 +47,15 @@ jobs:
       - name: Frontend typecheck & build
         run: pnpm build
 
+      - name: Frontend lint
+        run: pnpm lint
+
       - name: Frontend unit tests
         run: pnpm test
+
+      # package.json 是唯一版本来源；这里只保证 Cargo.toml 没落后（--check 不写文件）。
+      - name: Version sync check
+        run: python scripts/sync-version.py --check
 
       - name: Cargo fmt
         working-directory: src-tauri
@@ -61,3 +68,10 @@ jobs:
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check
+
+      # 存量 55 条告警（too_many_arguments 14、useless_vec 等，主要在测试代码里），
+      # 先跑通不卡口，日志里可看到完整清单。清完删掉 continue-on-error 即为硬卡口。
+      - name: Cargo clippy
+        working-directory: src-tauri
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings

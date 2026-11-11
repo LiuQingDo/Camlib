@@ -1,0 +1,69 @@
+name: Release
+
+# 打 v* tag 即发布：在 windows-latest 上构建 NSIS 安装包并挂到对应的 GitHub Release。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-installer:
+    name: Build NSIS installer (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 版本号只有 package.json 一个来源：tag 必须与它一致，否则安装包会带着
+      # 和 tag 不符的版本发出去。
+      - name: Verify tag matches package.json
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "tag ${{ github.ref_name }} 与 package.json 版本 v$version 不一致"
+          }
+
+      - name: Verify Cargo.toml version is synced
+        run: python scripts/sync-version.py --check
+
+      - name: Build installer
+        run: pnpm tauri build --bundles nsis
+
+      - name: Upload NSIS installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true

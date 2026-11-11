@@ -65,13 +65,21 @@
 ## 7. 构建与冒烟
 
 ```powershell
+python scripts/sync-version.py --check
 pnpm build
+pnpm lint
+pnpm test
 cd src-tauri
 cargo test
 cargo fmt --check
+cargo clippy --all-targets
 cd ..
 pnpm tauri build
 ```
+
+`cargo clippy` 目前有存量告警（CI 里用 `continue-on-error` 只报告，见 `ci.yml`）；清完后 CI 改回 `-- -D warnings` 卡口。
+
+也可以只推 tag 让 CI 代劳：`git tag v0.5.0 && git push origin v0.5.0` 会触发 `release.yml`，在 `windows-latest` 上构建 NSIS 并自动挂到 GitHub Release（tag 与 `package.json` 版本不一致会直接失败）。
 
 安装包产物目录（NSIS）：
 
