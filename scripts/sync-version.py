@@ -27,6 +27,13 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+# GitHub Actions 的 Windows runner 控制台默认是 cp1252，而本脚本的状态行是中文：
+# 直接 print 会抛 UnicodeEncodeError，把 `--check` 的"版本一致"退出码 1 掉。
+# 固定按 UTF-8 输出，errors="replace" 保证日志本身永不成为失败原因。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_JSON = REPO_ROOT / "package.json"
 CARGO_TOML = REPO_ROOT / "src-tauri" / "Cargo.toml"
