@@ -1,7 +1,7 @@
 # Camlib SQLite 数据模型
 
 > 真相来源：`src-tauri/src/db/migrations/`  
-> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 7`（`src-tauri/src/db/mod.rs`）  
+> 当前 schema 版本：`CURRENT_SCHEMA_VERSION = 8`（`src-tauri/src/db/mod.rs`）  
 > 迁移在应用启动时按版本顺序自动执行；版本过高时拒绝打开，避免降级损坏。
 
 ## 1. 设计原则

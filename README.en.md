@@ -54,7 +54,7 @@ Camlib does **not** implement brand-specific camera protocols. Backup works on �
 3. A removable drive appears on the PC with a `DCIM` folder
 4. Open Camlib → Backup panel → refresh; pick the source drive and target library
 5. Preview counts, total size, duplicates/conflicts, and free space on the target
-6. Run the copy: temp files + **size verification**, then commit; the source is read-only and never modified or deleted
+6. Run the copy: temp files + **size verification**, then commit; optionally turn on **deep verification** (off by default — SHA-256 is computed while copying and re-read from the written file to compare, catching silent corruption that leaves the size unchanged); the source is read-only and never modified or deleted
 7. Failed items can be retried; jobs can be cancelled; the index refreshes after backup
 
 ### Default ignored extensions
