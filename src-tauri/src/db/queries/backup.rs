@@ -88,6 +88,9 @@ impl Repository {
             .map_err(Into::into)
     }
 
+    // 单条 UPDATE 的参数表：形参顺序与 SQL 的 ?1..?9 占位符一一对应，
+    // 拆成参数结构体后这条"形参↔占位符"的对应关系会被打散，反而更易绑错。
+    #[allow(clippy::too_many_arguments)]
     pub fn update_backup_run(
         &self,
         id: &str,

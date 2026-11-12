@@ -79,7 +79,7 @@ pub fn ai_test_connection_blocking(
                     dimension: None,
                 });
             }
-            let reply = transport.chat(&config, "请只回复两个字：正常", None)?;
+            let reply = transport.chat(config, "请只回复两个字：正常", None)?;
             let latency = started.elapsed().as_millis() as u64;
             Ok(AiTestResultDto {
                 ok: !reply.trim().is_empty(),
@@ -97,7 +97,7 @@ pub fn ai_test_connection_blocking(
                     dimension: None,
                 });
             }
-            let vector = transport.embed(&config, "连通性测试")?;
+            let vector = transport.embed(config, "连通性测试")?;
             let latency = started.elapsed().as_millis() as u64;
             Ok(AiTestResultDto {
                 ok: true,
@@ -288,6 +288,9 @@ pub fn ai_chat(
 
 /// Body of `ai_chat` after the infrastructure lock is released: the network
 /// stream runs against an independently opened repository.
+// 命令层的内部实现体：形参与 ai_chat 的 invoke 载荷一一对应，调用方按原样
+// 平铺透传（不经过结构体转换），保持与前端 IPC 字段顺序可对齐。
+#[allow(clippy::too_many_arguments)]
 pub fn ai_chat_stream(
     database_path: PathBuf,
     root: PathBuf,

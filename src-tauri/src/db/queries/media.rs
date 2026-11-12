@@ -159,9 +159,7 @@ impl Repository {
             .collect::<Result<Vec<_>, _>>()?;
         let favorite = self.is_favorite(id)?;
         let tags = self.list_tags_for_media(id)?;
-        let ai = self
-            .get_media_ai(&id)?
-            .filter(|row| row.status == "success");
+        let ai = self.get_media_ai(id)?.filter(|row| row.status == "success");
         // AI tags resolve through the relation table so each carries a real
         // tag id the UI can detach individually; tags whose row was deleted
         // (cascade) naturally drop out instead of lingering as bare strings.

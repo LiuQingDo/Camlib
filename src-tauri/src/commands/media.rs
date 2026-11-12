@@ -587,7 +587,7 @@ pub fn thumbnail_rebuild_start(
         }
         manager.finish(&job_for_thread);
     });
-    Ok(media::PreviewJobStartDto { job_id: job_id })
+    Ok(media::PreviewJobStartDto { job_id })
 }
 
 #[tauri::command]
@@ -616,7 +616,7 @@ pub fn library_scan_start(
     if !exists {
         return Err(AppError::invalid_argument("媒体库不存在"));
     }
-    let (job_id, cancel) = jobs.start(&library_id).map_err(AppError::from)?;
+    let (job_id, cancel) = jobs.start(&library_id)?;
     let manager = jobs.inner().clone();
     let scan_run_id = format!("run-{job_id}");
     scanner::spawn_scan(

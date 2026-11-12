@@ -300,6 +300,8 @@ pub fn preview(
     )
 }
 
+// 备份预览的既有签名：源卷、目标库、冲突策略、忽略项与两个开关共同决定预览
+// 结果，与 BackupPreviewDto 的入参字段一一对应，拆包后字段还是这些字段。
 #[allow(clippy::too_many_arguments)]
 fn preview_paths(
     repository: &Repository,
@@ -453,6 +455,9 @@ fn preview_paths(
 /// Start a previously persisted preview. The caller must provide the preview's
 /// job id as its confirmation token; this binds confirmation to exactly the
 /// plan the user inspected and prevents a fresh/unreviewed plan from running.
+// 备份任务的线程启动入口：参数由 commands 层按 invoke 载荷逐项透传，与
+// BackupStartDto 的字段一一对应；聚成参数结构体只是把同样的字段再抄一遍。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     app: AppHandle,
     manager: Arc<BackupManagerState>,
@@ -896,6 +901,9 @@ fn run(
     )
 }
 
+// 备份收尾写回：一次落盘 run 的完整终态（状态、计数、错误摘要），参数顺序
+// 与 update_backup_run 的绑定顺序对齐；拆结构体会让这条对应关系变模糊。
+#[allow(clippy::too_many_arguments)]
 fn finish(
     app: &AppHandle,
     repository: &Repository,
@@ -994,6 +1002,9 @@ fn sum_copied(items: &[BackupItem]) -> i64 {
     items.iter().map(|item| item.copied_bytes).sum()
 }
 
+// 进度快照构造器：入参是构造 BackupProgress 所需的原始计数（文件数、字节数、
+// 起始时刻、错误列表），保持扁平直读；包成结构体后字段还要再拆一次才能用。
+#[allow(clippy::too_many_arguments)]
 fn progress(
     job_id: &str,
     state: &'static str,
@@ -1037,13 +1048,12 @@ fn progress(
             .sum::<u64>() as i64,
         speed_bytes_per_sec: speed,
         eta_seconds: (speed > 0).then(|| {
-            (items
+            items
                 .iter()
                 .filter(|item| item.status == "planned")
                 .map(|item| item.size_bytes.max(0) as u64)
                 .sum::<u64>()
-                / speed)
-                .max(0)
+                / speed
         }),
         errors,
         error,
@@ -2065,7 +2075,9 @@ fn valid_date_digits(date: &str) -> bool {
 
 fn days_in_month(year: u32, month: u32) -> u32 {
     match month {
-        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
+            29
+        }
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,
@@ -2183,7 +2195,7 @@ fn timestamp_now() -> String {
 fn discover_candidates() -> Vec<VolumeCandidate> {
     #[cfg(windows)]
     {
-        return windows_candidates();
+        windows_candidates()
     }
     #[cfg(not(windows))]
     {
@@ -2731,19 +2743,19 @@ mod tests {
             &source
                 .path()
                 .join("DCIM/100MEDIA/VID_20261001_153408_333.mp4"),
-            &vec![1_u8; 10],
+            &[1_u8; 10],
         );
         write(
             &source
                 .path()
                 .join("DCIM/100MEDIA/VID_20261001_153408_334.mp4"),
-            &vec![2_u8; 20],
+            &[2_u8; 20],
         );
         write(
             &target
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_153408.mp4"),
-            &vec![0_u8; 30],
+            &[0_u8; 30],
         );
 
         let preview = preview_paths(
@@ -2779,19 +2791,19 @@ mod tests {
             &source
                 .path()
                 .join("DCIM/100MEDIA/VID_20261001_153408_333.mp4"),
-            &vec![1_u8; 10],
+            &[1_u8; 10],
         );
         write(
             &source
                 .path()
                 .join("DCIM/100MEDIA/VID_20261001_153408_334.mp4"),
-            &vec![2_u8; 20],
+            &[2_u8; 20],
         );
         write(
             &source
                 .path()
                 .join("DCIM/100MEDIA/VID_20260816_150035_122.mp4"),
-            &vec![3_u8; 5],
+            &[3_u8; 5],
         );
 
         let preview = preview_paths(
@@ -2807,7 +2819,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(preview.merge_segments, true);
+        assert!(preview.merge_segments);
         assert_eq!(preview.merge_group_count, 1);
         assert_eq!(preview.merge_segment_count, 2);
         assert_eq!(preview.ready_files, 2);

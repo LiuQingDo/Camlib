@@ -69,10 +69,6 @@ jobs:
         working-directory: src-tauri
         run: cargo check
 
-      # 存量 55 条告警（too_many_arguments 15、useless_vec 18、needless_borrow 6 等，
-      # 主要在 #[cfg(test)] 里），先跑通不卡口，日志里可看到完整清单。
-      # 清完删掉 continue-on-error 即为硬卡口。
       - name: Cargo clippy
         working-directory: src-tauri
-        continue-on-error: true
         run: cargo clippy --all-targets -- -D warnings

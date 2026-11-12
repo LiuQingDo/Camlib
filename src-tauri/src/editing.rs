@@ -603,6 +603,9 @@ fn start_edit_scan(
 
 /// Launch a trim job on a background thread. Emits `edit-progress` and
 /// triggers an incremental scan once the trimmed copy is committed.
+// 剪辑任务的线程启动入口：入参是命令层已解析好的上下文（库、作业、取消旗标、
+// 剪辑参数），逐项透传即可；聚成结构体只是把同一批字段再包一层。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     app: AppHandle,
     manager: Arc<EditJobManagerState>,
@@ -735,10 +738,10 @@ fn run_trim(
     let trim_result = run_ffmpeg_trim(
         &ffmpeg, &source, &temp, &log_path, params, cancel, job_id, app, None,
     );
-    if trim_result.is_err() {
+    if let Err(error) = trim_result {
         // Guards drop here and remove the scratch files.
         let _ = (&temp_guard, &log_guard);
-        return Err(trim_result.unwrap_err());
+        return Err(error);
     }
 
     if let Err(error) = fs::rename(&temp, &destination) {
@@ -775,6 +778,9 @@ struct CutUnitProgress {
     segment_count: usize,
 }
 
+// 单次 ffmpeg 调用的上下文：输入/输出/日志路径、剪辑参数、取消旗标与进度
+// 发射所需的 app/job_id，正好是拼命令行和回报进度要用的全套。
+#[allow(clippy::too_many_arguments)]
 fn run_ffmpeg_trim(
     ffmpeg: &Path,
     source: &Path,
@@ -945,6 +951,8 @@ fn run_ffmpeg_trim(
 /// `edit-progress` and triggers an incremental scan once all copies are
 /// committed — also after a failure, so segments committed before the error
 /// still join the library instead of lingering as unindexed files.
+// 分段剪辑任务的线程启动入口，与 spawn 同构：库、作业、取消旗标、切分方案，
+// 逐项透传给工作线程，包一层只是把同样字段再抄一遍。
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cut_segments(
     app: AppHandle,
@@ -1170,6 +1178,8 @@ fn run_cut_segments(
 /// Join the flagged segment copies (in segment order) into one extra
 /// `{stem}_edited_merged` copy via the concat demuxer. Every segment is cut
 /// from the same source with the same method, so stream copy applies.
+// 分段合成副本的 ffmpeg 调用上下文（源列表、目标、取消与进度所需的 app/job_id），
+// 正好是拼 concat 命令与回报进度要用的全套，再包一层没有额外语义。
 #[allow(clippy::too_many_arguments)]
 fn cut_merged_copy(
     app: &AppHandle,

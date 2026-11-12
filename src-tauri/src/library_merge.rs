@@ -164,6 +164,9 @@ pub fn preview(
     })
 }
 
+// 分段合并任务的线程启动入口：入参是命令层已解析好的上下文（库、作业、
+// 取消旗标、目标分组），逐项透传即可；聚成结构体只是把同一批字段再包一层。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     app: AppHandle,
     manager: Arc<LibraryMergeManagerState>,
@@ -507,12 +510,19 @@ fn filter_selected_groups(
     Ok(chosen)
 }
 
+/// Bucket key for grouping discovered segments: rewritten key + lowercase extension.
+type SegmentBucketKey = (String, String);
+/// One discovered segment: relative path, sequence number, size in bytes, directory.
+type SegmentPart = (String, u64, u64, String);
+/// Discovered segments grouped by [`SegmentBucketKey`].
+type SegmentBuckets = BTreeMap<SegmentBucketKey, Vec<SegmentPart>>;
+
 fn discover_groups(root: &Path) -> Result<Vec<LibraryMergeGroupDto>, crate::errors::AppError> {
     let mut files = Vec::new();
     collect_video_files(root, root, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut buckets: BTreeMap<(String, String), Vec<(String, u64, u64, String)>> = BTreeMap::new();
+    let mut buckets: SegmentBuckets = BTreeMap::new();
     for (relative, file_name, size, dir) in files {
         let Some((key, seq)) = parse_segment_key(&file_name) else {
             continue;
@@ -691,6 +701,9 @@ fn available_space(_path: &Path) -> Option<u64> {
     None
 }
 
+// 进度快照构造器：入参是构造 LibraryMergeProgress 所需的原始计数（组数、字节
+// 数、起始时刻、错误列表），保持扁平直读；包成结构体后字段还要再拆一次才能用。
+#[allow(clippy::too_many_arguments)]
 fn progress(
     job_id: &str,
     state: &'static str,
@@ -752,38 +765,38 @@ mod tests {
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
-            &vec![1_u8; 10],
+            &[1_u8; 10],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_153408_334.mp4"),
-            &vec![2_u8; 20],
+            &[2_u8; 20],
         );
         write(
             &root
                 .path()
                 .join("2026/08/2026-08-16/视频/VID_20260816_150035_122.mp4"),
-            &vec![3_u8; 5],
+            &[3_u8; 5],
         );
         write(
             &root
                 .path()
                 .join("2026/08/2026-08-16/视频/VID_20260816_150534_123.mp4"),
-            &vec![4_u8; 6],
+            &[4_u8; 6],
         );
 
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
-            &vec![5_u8; 3],
+            &[5_u8; 3],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
-            &vec![6_u8; 4],
+            &[6_u8; 4],
         );
 
         let groups = discover_groups(root.path()).unwrap();
@@ -803,31 +816,31 @@ mod tests {
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_144056_327.mp4"),
-            &vec![1_u8; 3],
+            &[1_u8; 3],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_144056_328.mp4"),
-            &vec![2_u8; 4],
+            &[2_u8; 4],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_144056.mp4"),
-            &vec![3_u8; 7],
+            &[3_u8; 7],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_153408_333.mp4"),
-            &vec![4_u8; 10],
+            &[4_u8; 10],
         );
         write(
             &root
                 .path()
                 .join("2026/10/2026-10-01/视频/VID_20261001_153408_335.mp4"),
-            &vec![5_u8; 11],
+            &[5_u8; 11],
         );
 
         let groups = discover_groups(root.path()).unwrap();
@@ -845,7 +858,7 @@ mod tests {
         ] {
             write(
                 &root.path().join(format!("2026/10/2026-10-01/视频/{name}")),
-                &vec![1_u8; 8],
+                &[1_u8; 8],
             );
         }
         let groups = discover_groups(root.path()).unwrap();

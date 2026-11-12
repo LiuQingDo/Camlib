@@ -497,8 +497,8 @@ fn plan_groups(
                 ambiguous: false,
                 burst_group: None,
                 files: vec![
-                    scan_file(photo, MediaFileRole::LivePhoto, &old_files),
-                    scan_file(video, MediaFileRole::LiveVideo, &old_files),
+                    scan_file(photo, MediaFileRole::LivePhoto, old_files),
+                    scan_file(video, MediaFileRole::LiveVideo, old_files),
                 ],
             });
         } else {
@@ -517,7 +517,7 @@ fn plan_groups(
                     capture_date: file.capture_date.clone(),
                     ambiguous,
                     burst_group: None,
-                    files: vec![scan_file(&file, MediaFileRole::Single, &old_files)],
+                    files: vec![scan_file(&file, MediaFileRole::Single, old_files)],
                 });
             }
         }
@@ -866,6 +866,9 @@ fn timestamp_now() -> String {
     format!("unix-ms:{millis}")
 }
 
+// 扫描收尾写回：一次性落盘 run 的全部统计（seen/added/updated/missing/errors），
+// 形参与 FinishScanRun 的字段一一对应，拆包只会把同一批计数换个地方排。
+#[allow(clippy::too_many_arguments)]
 fn finish_run(
     repository: &Repository,
     run_id: &str,
@@ -891,6 +894,9 @@ fn finish_run(
     });
 }
 
+// 终态进度事件发射：形参就是前端 scan 终态事件的字段，调用方按扫描结果直接
+// 平铺传入；包成结构体会让每处调用先造一次只读一次的对象。
+#[allow(clippy::too_many_arguments)]
 fn emit_terminal(
     app: &AppHandle,
     job_id: &str,

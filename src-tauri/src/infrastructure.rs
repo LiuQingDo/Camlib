@@ -25,8 +25,9 @@ pub struct VolumeInfo {
 // Serialized in kebab-case ("rating-desc") so the JSON matches `UiSort::parse`
 // and the frontend `UiSortMode` union. Values written by older builds use the
 // camelCase spelling ("ratingDesc"); loading still accepts those.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum UiSort {
+    #[default]
     Newest,
     Oldest,
     Name,
@@ -34,12 +35,6 @@ pub enum UiSort {
     RatingAsc,
     SizeDesc,
     SizeAsc,
-}
-
-impl Default for UiSort {
-    fn default() -> Self {
-        Self::Newest
-    }
 }
 
 impl UiSort {
@@ -461,8 +456,8 @@ impl Infrastructure {
         }
         if let Some(sizes) = ui_dialog_sizes {
             for (id, size) in &sizes {
-                let width_ok = size.width.map_or(true, is_valid_dialog_dimension);
-                let height_ok = size.height.map_or(true, is_valid_dialog_dimension);
+                let width_ok = size.width.is_none_or(is_valid_dialog_dimension);
+                let height_ok = size.height.is_none_or(is_valid_dialog_dimension);
                 if !width_ok || !height_ok {
                     return Err(InfrastructureError::InvalidSettings(format!(
                         "弹窗 {id} 的尺寸必须在 120 到 16384 像素之间"

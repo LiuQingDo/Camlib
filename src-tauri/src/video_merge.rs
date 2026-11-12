@@ -144,6 +144,8 @@ fn emit(app: &AppHandle, progress: VideoMergeProgress) {
     let _ = app.emit(MERGE_PROGRESS_EVENT, progress);
 }
 
+// 进度快照构造器：入参是构造 VideoMergeProgress 所需的原始计数与起止状态，
+// 保持扁平直读；包成结构体后字段还要再拆一次才能用。
 #[allow(clippy::too_many_arguments)]
 fn progress(
     job_id: &str,
@@ -193,6 +195,8 @@ struct SourceVideo {
 
 /// Launch a merge job on a background thread. Emits `media-merge-progress`
 /// and triggers an incremental scan once the merged copy is committed.
+// 合并任务的线程启动入口：命令层已解析好的上下文（库、作业、取消旗标、
+// 合并参数）逐项透传，包一层只是把同样字段再抄一遍。
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     app: AppHandle,
@@ -620,6 +624,8 @@ fn has_audio_track(text: &str) -> bool {
 /// frame (letterboxed, yuv420p) and 44.1 kHz stereo audio, then joined with
 /// the concat filter. Segments without an audio track get a silent
 /// `anullsrc` stand-in sized to their duration so the graph always completes.
+// 重编码合并的 ffmpeg 调用上下文（源列表、目标、总时长、取消与进度），
+// 正是拼 filter graph 与回报进度要用的全套。
 #[allow(clippy::too_many_arguments)]
 fn merge_reencode(
     app: &AppHandle,

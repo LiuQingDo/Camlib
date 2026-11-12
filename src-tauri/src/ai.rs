@@ -654,7 +654,9 @@ fn f32_slice_to_le_bytes(vector: &[f32]) -> Vec<u8> {
 
 fn le_bytes_to_f32_slice(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| f32::from_bits(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
         .collect()
 }
@@ -1015,6 +1017,9 @@ struct SharedProgress {
 }
 
 impl SharedProgress {
+    // 进度事件发射：这几个形参就是前端 AiIndexProgress 事件的字段，调用点
+    // （成功/失败/跳过/收尾）逐个直传；包成结构体会让每处调用先造一次临时对象。
+    #[allow(clippy::too_many_arguments)]
     fn emit(
         &self,
         app: &tauri::AppHandle,
@@ -1094,6 +1099,8 @@ struct WorkItem {
 }
 
 /// Spawn the background run thread. `spawn_scan` style: lib.rs only starts it.
+// AI 索引任务的线程启动入口：库路径、缩略图缓存、作业与取消旗标逐项透传，
+// 与 commands 层收到的载荷同构；包成结构体只是把同一批字段再抄一遍。
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_run(
     app: tauri::AppHandle,
@@ -1121,6 +1128,8 @@ pub fn spawn_run(
     });
 }
 
+// 索引批次的工作体：沿用 spawn_run 的同一组上下文（库、缓存、作业、取消），
+// 逐项传入以便工作线程内按需借用，不额外制造所有权转移。
 #[allow(clippy::too_many_arguments)]
 fn run_batch(
     app: &tauri::AppHandle,
@@ -1655,6 +1664,8 @@ fn build_chat_system_prompt(
 /// Collect grounding context, then stream one assistant reply. Thumbnail and
 /// tag lookups degrade silently: a chat answer is more important than a
 /// missing image or tag list.
+// 一次对话所需的全部上下文（配置、历史、检索上下文、事件通道、编码器）：
+// 拆成参数对象后调用点仍要逐字段填一遍，且会改变 run_chat 的对外签名。
 #[allow(clippy::too_many_arguments)]
 pub fn run_chat(
     repository: &Repository,

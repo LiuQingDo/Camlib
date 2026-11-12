@@ -22,7 +22,6 @@ impl Repository {
 
     /// Insert or replace the AI processing row. `embedding` fields stay as
     /// provided; pass `None` while only the tag/caption outcome is known.
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_media_ai(&self, row: MediaAiUpsert<'_>) -> DbResult<()> {
         validate_non_empty("media_item_id", row.media_item_id)?;
         validate_non_empty("status", row.status)?;

@@ -215,7 +215,7 @@ impl Repository {
 /// - `date_prefix`: `YYYY` / `YYYY-MM` / `YYYY-MM-DD` LIKE prefix (sidebar).
 /// - `date_from` / `date_to`: inclusive `capture_date` bounds (`YYYY-MM-DD`).
 ///   Rows with a NULL `capture_date` are excluded when either bound is set.
-/// Frontend normally keeps prefix and range mutually exclusive in the UI.
+///   Frontend normally keeps prefix and range mutually exclusive in the UI.
 #[derive(Debug, Clone, Default)]
 pub struct MediaQuery {
     pub library_id: String,

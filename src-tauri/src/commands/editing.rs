@@ -13,6 +13,9 @@ use tauri::{AppHandle, State};
 
 /// Render an edited COPY of a photo beside the original (never overwrites it)
 /// and kick off an incremental scan so the copy joins the library.
+// Tauri command：形参名就是前端 invoke 的载荷键，把编辑参数收进结构体会改变
+// IPC 契约；这里保留扁平形参，与前端 editing API 的字段逐项对应。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn media_edit_image(
     media_item_id: String,
@@ -85,6 +88,9 @@ pub async fn media_edit_image(
 
 /// Start trimming a video into a new `{stem}_edited{ext}` copy. Runs as a
 /// cancellable background job reporting `edit-progress` events.
+// Tauri command：形参名即前端 invoke 载荷键（含三个 State 注入），收成结构体
+// 会改变 IPC 契约，也会打乱 Tauri 的 State 注入顺序。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn media_trim_video(
     media_item_id: String,
@@ -205,6 +211,9 @@ pub fn media_edit_cancel(
 /// Start merging selected videos into one new `{stem}_merged{ext}` copy.
 /// `media_item_ids` order is the playback order. Runs as a cancellable
 /// background job reporting `media-merge-progress` events.
+// Tauri command：形参名即前端 invoke 载荷键（含三个 State 注入），收成结构体
+// 会改变 IPC 契约，也会打乱 Tauri 的 State 注入顺序。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn media_merge_videos(
     library_id: String,
@@ -269,13 +278,10 @@ pub fn library_merge_preview(
     library_id: String,
     state: State<'_, InfrastructureState>,
 ) -> Result<library_merge::LibraryMergePreviewDto, AppError> {
-    state
-        .with_infrastructure(|infrastructure| {
-            library_merge::preview(infrastructure.repository(), &library_id).map_err(|error| {
-                infrastructure::InfrastructureError::InvalidPath(error.to_string())
-            })
-        })
-        .map_err(AppError::from)
+    state.with_infrastructure(|infrastructure| {
+        library_merge::preview(infrastructure.repository(), &library_id)
+            .map_err(|error| infrastructure::InfrastructureError::InvalidPath(error.to_string()))
+    })
 }
 
 /// Start merging library segments. Sources stay untouched unless recycle is on.
