@@ -1691,16 +1691,18 @@ async function applyBatchFavorite(favorite: boolean): Promise<void> {
   } catch (error) {
     state.error = toUserMessage(error, "批量更新收藏失败");
   } finally {
+    // Only state reset belongs here: a `return` inside `finally` would swallow
+    // any exception thrown by the reset itself, so the branch runs below.
     state.favoritesBusy = false;
-    if ((!favorite && state.favoriteOnly) || state.error) {
-      patchGrid();
-      patchToolbar();
-      return;
-    }
-    applySelectionChrome();
-    showTransientNotice(state.deleteNotice ?? "");
-    state.deleteNotice = null;
   }
+  if ((!favorite && state.favoriteOnly) || state.error) {
+    patchGrid();
+    patchToolbar();
+    return;
+  }
+  applySelectionChrome();
+  showTransientNotice(state.deleteNotice ?? "");
+  state.deleteNotice = null;
 }
 
 /** Module-level timer so successive toasts never stack dismiss handles. */
@@ -1764,15 +1766,15 @@ async function applyBatchTag(attach: boolean): Promise<void> {
     state.error = toUserMessage(error, "批量更新标签失败");
   } finally {
     state.tagsBusy = false;
-    if (state.error || (state.tagIds.has(tagId) && !attach)) {
-      patchGrid();
-      patchToolbar();
-      return;
-    }
-    applySelectionChrome();
-    showTransientNotice(state.deleteNotice ?? "");
-    state.deleteNotice = null;
   }
+  if (state.error || (state.tagIds.has(tagId) && !attach)) {
+    patchGrid();
+    patchToolbar();
+    return;
+  }
+  applySelectionChrome();
+  showTransientNotice(state.deleteNotice ?? "");
+  state.deleteNotice = null;
 }
 
 async function applyBatchRating(): Promise<void> {
@@ -1810,15 +1812,15 @@ async function applyBatchRating(): Promise<void> {
     state.error = toUserMessage(error, "批量设置评分失败");
   } finally {
     state.tagsBusy = false;
-    if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
-      patchGrid();
-      patchToolbar();
-      return;
-    }
-    applySelectionChrome();
-    showTransientNotice(state.deleteNotice ?? "");
-    state.deleteNotice = null;
   }
+  if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
+    patchGrid();
+    patchToolbar();
+    return;
+  }
+  applySelectionChrome();
+  showTransientNotice(state.deleteNotice ?? "");
+  state.deleteNotice = null;
 }
 
 function groupedFacets(): Array<{ year: string; count: number; months: Array<{ month: string; count: number; dates: DateFacetDto[] }> }> {
@@ -6604,7 +6606,7 @@ function editorApplyDragGeometry(): void {
   const dy = (editorPointer.y - drag.startY) / bounds.height;
   const base = drag.rect;
   const min = EDITOR_MIN_CROP;
-  let next = state.editorCrop;
+  let next: typeof state.editorCrop;
   if (drag.mode === "move") {
     next = {
       x: Math.min(Math.max(0, base.x + dx), 1 - base.w),
@@ -6843,7 +6845,7 @@ function bindEditorVideoEvents(modal: HTMLElement): void {
     const playMs =
       video && Number.isFinite(video.currentTime) ? Math.round(video.currentTime * 1000) : 0;
     let inMs = Math.min(Math.max(0, playMs), Math.max(0, duration - EDITOR_MIN_TRIM_MS));
-    let outMs = Math.min(duration, inMs + EDITOR_DEFAULT_SEGMENT_MS);
+    const outMs = Math.min(duration, inMs + EDITOR_DEFAULT_SEGMENT_MS);
     if (outMs - inMs < EDITOR_MIN_TRIM_MS) inMs = Math.max(0, outMs - EDITOR_MIN_TRIM_MS);
     state.editorSegments.push({ inMs, outMs, merge: false });
     state.editorActiveSegment = state.editorSegments.length - 1;
