@@ -561,14 +561,14 @@ chore: 清理未引用资源与忽略目录
 
 | 会话 | 状态 | 完成日期 | commit |
 | --- | --- | --- | --- |
-| S1 AI 线程模型 | ☐ 未开始 | | |
-| S2 前端测试基座 | ☐ 未开始 | | |
-| S3a 事件委托 | ☑ 完成 | 2026-11-11 | refactor(frontend): 卡片区与工具栏改用事件委托 |
-| S3b 分区增量渲染 | ☐ 未开始 | | |
-| S4 虚拟滚动 | ☐ 未开始 | | |
-| S5 备份深度校验 | ☐ 未开始 | | |
-| S6 工程化清扫 | ☐ 未开始 | | |
-| S7 Rust 模块拆分 | ☐ 未开始 | | |
+| S1 AI 线程模型 | ☑ 完成 | 2026-11-11 | `391f662` fix(ai): 网络命令移出命令线程并补齐超时 |
+| S2 前端测试基座 | ☑ 完成 | 2026-11-11 | `442e3d2` test(frontend): 建立 vitest 基座并抽取纯函数 |
+| S3a 事件委托 | ☑ 完成 | 2026-11-11 | `205568c` refactor(frontend): 卡片区与工具栏改用事件委托 |
+| S3b 分区增量渲染 | ☑ 完成 | 2026-11-11 | `bcb02c8` refactor(frontend): render() 改为骨架 + 分区增量更新 |
+| S4 虚拟滚动 | ☑ 完成 | 2026-11-11 | `99ab023` perf(frontend): 媒体网格改用固定行高虚拟滚动 |
+| S5 备份深度校验 | ☑ 完成 | 2026-11-11 | `c9fa08c` feat(backup): 新增可选的内容哈希深度校验 |
+| S6 工程化清扫 | ◐ 基本完成 | 2026-11-11 | `80195c5` `cbf6da5` `1148415` `01e821c` `010b7d4` `fb187f7` `d50ef16`（clippy 债未清完，见第 7 节） |
+| S7 Rust 模块拆分 | ☑ 完成 | 2026-11-11 | `2a459cd` refactor(rust): 按实体拆分 db 与 commands 模块 |
 
 ---
 
@@ -597,3 +597,37 @@ chore: 清理未引用资源与忽略目录
 - 云同步、RAW 编辑、移动端
 - 视频打标（README 已标注为后续增强）
 - `facet` / `count` 聚合的缓存优化——需要真实大库的性能数据支撑，先测再做
+
+---
+
+## 7. 执行复核（2026-11-12）
+
+> 本节的 5 个遗留项已归并成第二轮 4 个会话，见 [`optimization-plan-round2.md`](optimization-plan-round2.md)。
+
+八个会话已全部执行完毕，本地实测结果如下。
+
+### 通过项
+
+| 项 | 结果 |
+| --- | --- |
+| 前端测试 | 5 个文件 / **63 个测试全绿**（format 20、virtual 17、filters 13、selection 8、grid 5） |
+| 后端测试 | **116 passed / 1 ignored**（原 112，净增 4） |
+| `pnpm build` | 通过，产物 260 KB JS / 122 KB CSS（gzip 75 KB / 22 KB） |
+| `pnpm lint` | 0 error / 5 warning |
+| `cargo fmt --check` | 通过 |
+| S1 超时 | `.timeout_connect(15s)` + `.timeout_read(60s)` + `.timeout(120s)` 三项均已落地，并在注释里说明了 ureq 的优先级语义 |
+| S2 行数 | 该 commit 内 `main.ts` 净减 120 行，符合"只减不增" |
+| S3b 硬指标 | `previousScrollTop` / `previousScrollLeft` / `tagPopoverScroll` **三处补偿代码已删除**；`render()` 调用点 109 → 64 |
+| S4 真实度 | 按天分组复用 section + `patchCardList` 复用卡片 + 上下 spacer 撑高，非伪虚拟化；连 1/64px 轨道宽误差都做了处理 |
+| S7 拆分 | `lib.rs` 2025 → **165 行**；`db/mod.rs` 3974 → **437 行**；`queries/` 按实体拆成 6 个文件，单文件均 ≤ 700 行 |
+| 类型质量 | 全项目 `any` 数量仍为 **0** |
+
+### 遗留项（建议下一轮处理，按优先级）
+
+| # | 遗留 | 现状 | 建议 |
+| --- | --- | --- | --- |
+| 1 | **clippy 59 个错误未清** | `cargo clippy --all-targets -- -D warnings` 失败；CI 用 `continue-on-error: true` 兜住（S6 允许的降级路径） | 大头是 18 个 `useless vec!`（多在测试里）+ 14 个 `too many arguments`。前者 `cargo clippy --fix --all-targets` 可批量自动修；后者集中在 `library_merge.rs`(15) 与 `backup.rs`(15) 两个存量文件，建议引入 `#[allow(clippy::too_many_arguments)]` 显式豁免而非硬拆参数（拆了反而伤可读性）。清完删掉 `continue-on-error` 即变硬卡口 |
+| 2 | **版本号仍是 0.5.0** | 本轮含 2 个 `feat`（深度校验、ffmpeg 探测）+ 1 个 `perf` + 新增 migration 0008（schema 8） | 按仓库自己的 SemVer 约定应走 **MINOR → 0.6.0**；`package.json` 一处改动即可（`tauri.conf.json` 已指向它） |
+| 3 | **CHANGELOG 未记全** | `[Unreleased]` 只有备份深度校验一条 | 补记：虚拟滚动、事件委托 + 分区增量渲染、ffmpeg 启动探测、Rust 模块拆分 |
+| 4 | **`main.ts` 仍 8441 行**（原 7482） | 不是违规（S2 单 commit 净减），但 S3b/S4 的新实现又堆回单文件 | 下一轮把 `renderShell` / `patch*` / 虚拟滚动（约 1400 行）移到 `src/render/`，`main.ts` 只留状态与装配 |
+| 5 | **3 处 `no-unsafe-finally`** | `main.ts` 的批量收藏/标签/评分三个函数在 `finally` 里 `return` | 非确定 bug（函数返回 void），但 ESLint 明确禁止该模式；改为"置标志位 → finally 外分支"更稳 |

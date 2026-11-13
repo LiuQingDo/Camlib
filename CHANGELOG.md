@@ -15,6 +15,10 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Changed
+
+- 前端渲染层按职责拆分：`src/main.ts` 从 8443 行收敛到 84 行，渲染原语进 `src/render/`、界面进 `src/views/`、动作与事件绑定进 `src/app/`，`state` 单例独立成 `src/state.ts`；模块间零循环依赖，视图层通过 `render/paint.ts` 门面回调重绘，不再反向依赖动作层。行为、DOM 结构、CSS 类名与事件全部不变
+
 ## [0.6.0] - 2026-11-12
 
 Assets: [GitHub Release v0.6.0](https://github.com/LiuQingDo/Camlib/releases/tag/v0.6.0) — `Camlib_0.6.0_x64-setup.exe` (NSIS, recommended)
