@@ -45,8 +45,42 @@ export type PaintHost = {
 
 let host: PaintHost | null = null;
 
+/**
+ * 本门面自己的那张表。用途只有一个：装配时认出「把壳当实现注入」的写法。
+ * 一旦成环，paint().x() → host.x() → paint().x() 会一直递归到爆栈，而界面
+ * 表现只是「骨架出来了、内容全空」，很容易被误判成渲染层的问题。
+ */
+const facade: PaintHost = {
+  render,
+  refreshMedia,
+  renderSettingsAware,
+  updateSettingsPanel,
+  persistUiPrefs,
+  showTransientNotice,
+  openSettings,
+  loadMoreScrollRoot,
+  updateLoadMoreFooter,
+  bindShellEvents,
+  bindSidebarEvents,
+  bindStatusEvents,
+  bindToolbarEvents,
+  bindEmptyStateEvents,
+  bindMergeModalEvents,
+  bindMergeFooterEvents,
+  bindSettingsEvents,
+  bindPreviewMetaEvents,
+  bindEditorFooterEvents,
+};
+
 /** 由 main.ts 在启动装配阶段调用一次。 */
 export function installPaint(next: PaintHost): void {
+  for (const key of Object.keys(facade) as (keyof PaintHost)[]) {
+    if (next[key] === facade[key]) {
+      throw new Error(
+        `installPaint(): ${key} 注入的是门面自身（render/paint.ts）而非实现模块，调用会无限递归。请从 app/ 或 views/ 导入真实实现。`,
+      );
+    }
+  }
   host = next;
 }
 

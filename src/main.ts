@@ -3,31 +3,28 @@
  *
  * main.ts 只做三件事：注入「重绘门面」的实现、启动首屏、接后端的全局事件。
  * 具体渲染在 render/，弹窗与编辑器在 views/，动作与状态流转在 app/。
+ *
+ * 注意：下面这些能力有「门面（render/paint.ts）」和「实现」两份同名导出。
+ * 注入时必须 import 实现所在模块，**不能**从 render/paint 拿——那张门面表
+ * 全是转调 paint().xxx() 的壳，把壳当实现注入会让第一次重绘自我递归到爆栈，
+ * 界面上只会剩一具空骨架（installPaint 里有防呆拦这一步）。
  */
 import { LibraryStatus } from "./api/infrastructure";
+import "./app/bindings/global"; // 副作用导入：全局快捷键、拖放与后端进度事件流
+import { bindMergeFooterEvents, bindMergeModalEvents } from "./app/bindings/dialogs";
 import { bindEditorFooterEvents } from "./app/bindings/editor";
-import { bootstrap, probeFfmpeg } from "./app/library";
-import { renderSettingsAware } from "./app/orchestrate";
+import { bindPreviewMetaEvents } from "./app/bindings/preview";
+import { bindSettingsEvents } from "./app/bindings/settings";
+import { bindEmptyStateEvents, bindShellEvents, bindSidebarEvents, bindStatusEvents } from "./app/bindings/shell";
+import { bindToolbarEvents } from "./app/bindings/toolbar";
+import { bootstrap, persistUiPrefs, probeFfmpeg } from "./app/library";
+import { loadMoreScrollRoot, refreshMedia, updateLoadMoreFooter } from "./app/media-query";
+import { render, renderSettingsAware } from "./app/orchestrate";
+import { openSettings } from "./app/settings-ops";
+import { showTransientNotice } from "./app/ui";
 import { initLiquidGlass } from "./liquid-glass";
-import {
-  bindEmptyStateEvents,
-  bindMergeFooterEvents,
-  bindMergeModalEvents,
-  bindPreviewMetaEvents,
-  bindSettingsEvents,
-  bindShellEvents,
-  bindSidebarEvents,
-  bindStatusEvents,
-  bindToolbarEvents,
-  installPaint,
-  loadMoreScrollRoot,
-  openSettings,
-  persistUiPrefs,
-  refreshMedia,
-  render,
-  showTransientNotice,
-  updateLoadMoreFooter,
-} from "./render/paint";
+import "./render/events"; // 副作用导入：卡片/工具栏的 data-action 事件委托
+import { installPaint } from "./render/paint";
 import { onGridScroll } from "./render/virtual";
 import { state } from "./state";
 import { initTitlebar } from "./titlebar";

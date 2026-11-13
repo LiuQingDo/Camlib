@@ -15,6 +15,11 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复拆分后启动只剩空骨架：`main.ts` 把 `render/paint.ts` 门面里的壳函数当成实现注入了 `installPaint()`，第一次重绘即自我递归爆栈（侧栏、工具栏、网格全部空白，只剩品牌栏与搜索框）。改为从 `app/`、`views/` 导入真实实现；`installPaint()` 增加装配期自检，注入门面自身时直接抛错并点名是哪个成员
+- 补回拆分时丢失的两处顶层副作用注册：`render/events.ts`（卡片/工具栏的 `data-action` 事件委托）与 `app/bindings/global.ts`（全局快捷键、拖放、后端进度事件流）此前无人 import，界面能画出来但卡片、筛选 chip、`/` 搜索快捷键全部无响应。`src/main.wiring.test.ts` 用静态断言堵住这两类回归
+
 ### Changed
 
 - 前端渲染层按职责拆分：`src/main.ts` 从 8443 行收敛到 84 行，渲染原语进 `src/render/`、界面进 `src/views/`、动作与事件绑定进 `src/app/`，`state` 单例独立成 `src/state.ts`；模块间零循环依赖，视图层通过 `render/paint.ts` 门面回调重绘，不再反向依赖动作层。行为、DOM 结构、CSS 类名与事件全部不变
