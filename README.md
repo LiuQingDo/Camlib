@@ -159,7 +159,7 @@ macOS:    src-tauri/resources/ffmpeg/ffmpeg
 Linux:    src-tauri/resources/ffmpeg/ffmpeg
 ```
 
-**仓库不内置第三方二进制**（见该目录 `README.txt`），`.gitignore` 已忽略本地放置的 `ffmpeg.exe`。
+**仓库不内置第三方二进制**（见该目录 `README.txt`），`.gitignore` 已忽略本地放置的 `ffmpeg.exe`。Windows 的 NSIS 发布包由 CI 自动补齐：`release.yml` 下载钉死版本的 ffmpeg（SHA-256 校验通过才使用）再打包；只有本地 `pnpm tauri build` 才需要自己放。
 
 没有 ffmpeg 时应用仍可启动、浏览、筛选与备份，仅视频缩略图失败并提示。
 

@@ -58,8 +58,51 @@ jobs:
       - name: Verify Cargo.toml version is synced
         run: python scripts/sync-version.py --check
 
+      # ffmpeg 是被 .gitignore 忽略的第三方二进制，CI 的工作区里自然没有。
+      # 不补这一步，打出来的包只有 4.5 MB：视频缩略图、分段合并、剪辑导出对
+      # 用户全是坏的（v0.6.0 首次由 CI 发版就踩了这个坑）。
+      # 来源、版本、校验和全部钉死；对不上直接失败，绝不带着未知二进制发版。
+      # 该 autobuild 资产若被上游删除，此步骤会明确报错，届时更新下面的常量即可。
+      - name: Fetch ffmpeg sidecar
+        shell: pwsh
+        env:
+          FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-12-15-40/ffmpeg-n9.0.2-57-gd838f9f9ae-win64-gpl-9.0.zip
+          FFMPEG_SHA256: cf43d18e45a1b79a4d74f0e6f94206fe23d82f38de11352e5db9496058dc9c48
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          # 195 MB 的包，curl.exe 比 Invoke-WebRequest 快得多也更省内存。
+          curl.exe -L --fail --retry 3 --max-time 900 -o $zip $env:FFMPEG_URL
+          if ($LASTEXITCODE -ne 0) { throw "下载 ffmpeg 失败，curl 退出码 $LASTEXITCODE" }
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:FFMPEG_SHA256.ToLower()) {
+            throw "ffmpeg 校验和不匹配: 期望 $env:FFMPEG_SHA256，实际 $actual"
+          }
+          $extracted = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $extracted -Force
+          $exe = Get-ChildItem -Path $extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "压缩包内未找到 ffmpeg.exe" }
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources/ffmpeg" | Out-Null
+          Copy-Item $exe.FullName "src-tauri/resources/ffmpeg/ffmpeg.exe" -Force
+          $size = (Get-Item "src-tauri/resources/ffmpeg/ffmpeg.exe").Length / 1MB
+          "ffmpeg sidecar: {0:N1} MB" -f $size
+
       - name: Build installer
         run: pnpm tauri build --bundles nsis
+
+      # 侧车是"静默丢失"型故障：包能装上、应用能开，只有视频功能坏掉。
+      # 用体积兜底，把它从"发完才发现"变成"构建即失败"。
+      - name: Verify installer bundles ffmpeg
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $setup) { throw "没有产出 NSIS 安装包" }
+          $mb = [math]::Round($setup.Length / 1MB, 1)
+          if ($setup.Length -lt 20MB) {
+            throw "安装包仅 $mb MB，ffmpeg sidecar 很可能没打进去"
+          }
+          "installer: $($setup.Name) $mb MB"
 
       - name: Upload NSIS installer to release
         uses: softprops/action-gh-release@v2

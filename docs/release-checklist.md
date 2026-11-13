@@ -22,11 +22,15 @@
 
 ## 3. ffmpeg sidecar
 
-- [ ] 将 **Windows 版** `ffmpeg.exe` 复制到 `src-tauri/resources/ffmpeg/ffmpeg.exe`
+CI（`release.yml`）会自动补齐，本地构建才需要手动放：
+
+- [ ] **CI 发布**：无需人工介入。`Fetch ffmpeg sidecar` 步骤按钉死的 URL 下载固定版本（BtbN `autobuild-2026-11-12-15-40` / n9.0.2 win64-gpl 静态构建），先用 `FFMPEG_SHA256` 校验再解压到 `src-tauri/resources/ffmpeg/ffmpeg.exe`；校验和不符直接失败。升级 ffmpeg 时同时更新 URL 与哈希两个常量
+- [ ] **本地构建**：将 **Windows 版** `ffmpeg.exe` 复制到 `src-tauri/resources/ffmpeg/ffmpeg.exe`
 - [ ] 确认 `resources/ffmpeg/README.txt` 仍在（说明布局，且**不提交**第三方二进制到 Git）
-- [ ] `.gitignore` 继续忽略 `ffmpeg.exe`（若已配置）；仅本地/构建机放置
+- [ ] `.gitignore` 继续忽略 `ffmpeg.exe`；仅本地/构建机放置，CI 靠下载步骤补
+- [ ] `Verify installer bundles ffmpeg` 步骤通过（安装包 < 20 MB 视为 sidecar 丢失，构建即失败）
 - [ ] 在干净机器安装后：设置 → 关于 中 ffmpeg 状态为「可用」
-- [ ] 无 ffmpeg 时应用可启动、可浏览、可备份；仅视频缩略图失败并提示
+- [ ] 无 ffmpeg 时应用可启动、可浏览、可备份；仅视频缩略图失败并提示（0.6.0 起启动后在顶部给一行安装引导）
 
 打包后资源路径通常为：
 

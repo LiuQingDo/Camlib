@@ -151,7 +151,7 @@ macOS:    src-tauri/resources/ffmpeg/ffmpeg
 Linux:    src-tauri/resources/ffmpeg/ffmpeg
 ```
 
-**The Git repo does not ship third-party binaries** (see `README.txt` in that folder). Local `ffmpeg.exe` is gitignored. Release installers may bundle ffmpeg so video thumbnails work out of the box.
+**The Git repo does not ship third-party binaries** (see `README.txt` in that folder). Local `ffmpeg.exe` is gitignored. Release installers bundle ffmpeg automatically: `release.yml` downloads a pinned build, verifies its SHA-256, then packages it — a local `pnpm tauri build` is the only path that needs you to place the binary yourself.
 
 Without ffmpeg the app still starts, browses, filters, and backs up; only video thumbnails fail.
 
