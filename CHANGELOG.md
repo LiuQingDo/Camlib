@@ -17,11 +17,16 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Fixed
 
+- 修复主页（媒体库网格）滚动卡顿：两张原因叠在一起——每张卡片自带 3 个 `backdrop-filter`（选择/收藏按钮 + 类型角标 + 时长胶囊），窗口化滚动时同时挂着二三十张就是近百个每帧重采样的合成层；粘性工具条的 `url(#lg-filter-*)` 位移贴图又因为 `position:sticky` 落在滚动容器内，被每帧重放整条滤镜链。现在滚动期间临时降级玻璃质感（停手 180ms 自动恢复，静止画面逐像素不变），并断开液体玻璃观察器、停手后全量同步一次。同条件实测：脚本耗时 −61%、样式重算 −76%、主线程繁忙 −48%
+- 修复虚拟滚动每帧的无谓重排：`paintGridWindow()` 原先即使挂载的窗口一像素没变，也要走完整条 reconcile（读 rect → 写 spacer → keyed diff → 每张卡 6 次 `querySelector` + 无条件 `setAttribute` → 最后再读 N 次 rect 触发一次强制同步回流）。改为先算窗口签名，相同就直接返回；非滚动的变化由 `patchGrid()` 主动失效
+- 修复虚拟滚动与浏览器滚动锚定打架：顶部 spacer 改高度时，`overflow-anchor` 会把它当成「内容在视口上方长出来」并反向补偿 `scrollTop`，表现为滚动位置一抽一抽地对不上指针。`.content` 现为 `overflow-anchor:none`
+- 修复 `.content` 滚动条样式整段失效：同时声明了 `scrollbar-width`/`scrollbar-color` 与 `::-webkit-scrollbar`，标准属性一旦命中就让 webkit 那套全部作废，条体宽度、圆角、拖拽热区都没生效
 - 修复拆分后启动只剩空骨架：`main.ts` 把 `render/paint.ts` 门面里的壳函数当成实现注入了 `installPaint()`，第一次重绘即自我递归爆栈（侧栏、工具栏、网格全部空白，只剩品牌栏与搜索框）。改为从 `app/`、`views/` 导入真实实现；`installPaint()` 增加装配期自检，注入门面自身时直接抛错并点名是哪个成员
 - 补回拆分时丢失的两处顶层副作用注册：`render/events.ts`（卡片/工具栏的 `data-action` 事件委托）与 `app/bindings/global.ts`（全局快捷键、拖放、后端进度事件流）此前无人 import，界面能画出来但卡片、筛选 chip、`/` 搜索快捷键全部无响应。`src/main.wiring.test.ts` 用静态断言堵住这两类回归
 
 ### Changed
 
+- 滚动条改为常驻自定义样式：可拖拽热区 11px（透明 border 撑开，视觉仍是细条）、圆角拇指、hover/active 逐级加深，替换掉系统默认那条又窄又没有反馈的
 - 前端渲染层按职责拆分：`src/main.ts` 从 8443 行收敛到 84 行，渲染原语进 `src/render/`、界面进 `src/views/`、动作与事件绑定进 `src/app/`，`state` 单例独立成 `src/state.ts`；模块间零循环依赖，视图层通过 `render/paint.ts` 门面回调重绘，不再反向依赖动作层。行为、DOM 结构、CSS 类名与事件全部不变
 
 ## [0.6.0] - 2026-11-12

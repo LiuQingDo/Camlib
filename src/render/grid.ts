@@ -4,7 +4,7 @@ import { formatDuration, formatSize } from "../lib/format";
 import { UNKNOWN_DAY } from "../lib/grid";
 import { ThumbnailCancelled, cancelQueuedThumbnail, loadThumbnail, thumbnailUrlCache } from "../media/cache";
 import { state } from "../state";
-import { app, fragmentElement, setText } from "./context";
+import { app, fragmentElement, setAttr, setText } from "./context";
 import { escapeHtml, formatDate, kindLabel } from "./text";
 
 /** Shared star path — keep in sync with `.icon-star-*` in card favorite buttons. */
@@ -81,8 +81,8 @@ export function patchCardNode(card: HTMLElement, item: MediaItemDto, index: numb
   const select = card.querySelector<HTMLButtonElement>(".card-select");
   if (select) {
     select.classList.toggle("is-checked", selected);
-    select.setAttribute("aria-pressed", String(selected));
-    select.setAttribute("aria-label", `${selected ? "取消选择" : "选择"}${item.displayName}`);
+    setAttr(select, "aria-pressed", String(selected));
+    setAttr(select, "aria-label", `${selected ? "取消选择" : "选择"}${item.displayName}`);
   }
   const favorite = state.favorites.has(item.id);
   const pending = state.favoritePendingIds.has(item.id);
@@ -91,9 +91,9 @@ export function patchCardNode(card: HTMLElement, item: MediaItemDto, index: numb
     favoriteButton.classList.toggle("is-favorite", favorite);
     favoriteButton.classList.toggle("is-pending", pending);
     if (favoriteButton.disabled !== pending) favoriteButton.disabled = pending;
-    favoriteButton.setAttribute("aria-pressed", String(favorite));
-    favoriteButton.setAttribute("aria-busy", String(pending));
-    favoriteButton.setAttribute("aria-label", `${favorite ? "取消收藏" : "收藏"}${item.displayName}`);
+    setAttr(favoriteButton, "aria-pressed", String(favorite));
+    setAttr(favoriteButton, "aria-busy", String(pending));
+    setAttr(favoriteButton, "aria-label", `${favorite ? "取消收藏" : "收藏"}${item.displayName}`);
   }
   const title = card.querySelector<HTMLElement>(".card-title");
   setText(title, item.displayName);
@@ -224,9 +224,9 @@ export function patchCardList(grid: HTMLElement, items: MediaItemDto[], startInd
 
 export function applyThumbnailToCard(id: string, asset: Awaited<ReturnType<typeof getMediaThumbnail>>): void {
   thumbnailUrlCache.set(id, asset.url);
-  const target = [...app.querySelectorAll<HTMLElement>("[data-preview]")].find(
-    (element) => element.dataset.preview === id,
-  );
+  // 原生选择器早停，别为了一次查找把整棵树拉成数组再线性扫一遍——滚动时缩略图
+  // 是按批到达的，8 并发 × 每秒几十批就是几十次全量遍历。
+  const target = app.querySelector<HTMLElement>(`[data-preview="${CSS.escape(id)}"]`);
   const item = state.page.items.find((entry) => entry.id === id);
   if (!target || !item) return;
   target.classList.add("has-preview");

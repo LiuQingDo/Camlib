@@ -35,6 +35,8 @@ import { bindEmptyStateEvents, loadMoreScrollRoot, updateLoadMoreFooter } from "
 export function patchGrid(): void {
   const area = region("media");
   if (!area) return;
+  // 结果集/选中态/收藏态变了：窗口结构可能没变，但卡片内容变了，必须重排。
+  invalidateGridWindow();
   app.style.setProperty("--tile-min", `${[150, 185, 220, 260, 310][state.density - 1]}px`);
   const items = state.page.items;
   if (!items.length) {
@@ -105,6 +107,28 @@ export let gridEpoch = 0;
 /** 结果集换代：筛选/媒体库/删除后 +1，让旧行盒失效。 */
 export function bumpGridEpoch(): void {
   gridEpoch += 1;
+}
+
+/**
+ * 窗口换代计数。
+ *
+ * 滚动事件比帧快得多，但「挂载哪些行」只在跨过一整行边界时才改变——绝大多数
+ * 中间帧算出来的窗口和上一帧一模一样。旧版在这些帧里仍然走完整条 reconcile：
+ * 读一次 layout、对每个天分组重跑 keyed diff、逐张卡片 querySelector 六次再写
+ * 属性、最后为了判断缩略图优先级再读 N 次 rect（写入之后的读＝一次同步回流）。
+ * 一帧下来光是把没变的 DOM 重新确认一遍就要几百次 DOM 调用。
+ *
+ * 所以先算出本帧窗口的签名，与上一帧相同就直接返回，什么都不碰。签名同时喂进
+ * 结果集签名与几何缓存键，任何会让窗口变形的输入都会让它失配。
+ */
+let gridWindowKey = "";
+
+let gridWindowEpoch = 0;
+
+/** 结果集/密度/选中态等「非滚动」变化：强制下一帧重排。 */
+export function invalidateGridWindow(): void {
+  gridWindowEpoch += 1;
+  gridWindowKey = "";
 }
 
 export let gridFrame: number | null = null;
@@ -309,7 +333,8 @@ export function paintGridWindow(): void {
   // ResizeObserver 会再叫我们一次。
   if (rect.width < 160) return;
   const geo = ensureGridGeometry(rect.width);
-  if (!gridBoxes.length || gridSignature !== currentGridSignature()) rebuildGridBoxes(geo);
+  const signature = currentGridSignature();
+  if (!gridBoxes.length || gridSignature !== signature) rebuildGridBoxes(geo);
 
   const scroller = loadMoreScrollRoot();
   const viewportHeight = scroller ? scroller.clientHeight : window.innerHeight || document.documentElement.clientHeight;
@@ -317,10 +342,17 @@ export function paintGridWindow(): void {
   const top = -rect.top;
   const plan = planWindow(gridBoxes, geo, { top, bottom: top + viewportHeight, overscan: viewportHeight });
 
+  const padTop = layoutPx(plan.padTop);
+  const padBottom = layoutPx(Math.max(0, gridTotal - plan.padBottom));
+  // 到这里为止只有读、没有写，所以「窗口没变就整帧退出」不需要回滚任何东西。
+  const key = `${gridWindowEpoch}|${signature}|${gridGeoKey}|${padTop}|${padBottom}|${plan.slices
+    .map((slice) => `${slice.box}:${slice.startRow}:${slice.endRow}:${slice.count}`)
+    .join(",")}`;
+  if (gridWindowKey === key) return;
+  gridWindowKey = key;
+
   const topSpacer = ensureGridSpacer(area, "top");
   const bottomSpacer = ensureGridSpacer(area, "bottom");
-  const padBottom = layoutPx(Math.max(0, gridTotal - plan.padBottom));
-  const padTop = layoutPx(plan.padTop);
   if (topSpacer.style.height !== padTop) topSpacer.style.height = padTop;
   if (bottomSpacer.style.height !== padBottom) bottomSpacer.style.height = padBottom;
 

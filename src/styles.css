@@ -229,7 +229,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 .drive-icon { display:grid; width:34px; height:34px; flex:0 0 34px; place-items:center; border-radius:11px; color:#333333; background:rgba(0,0,0,.06); font-size:17px; box-shadow:inset 0 1px rgba(255,255,255,.9); }
 .library-entry div { gap:3px; }.library-entry strong { overflow:hidden; color:#222222; font-size:12px; line-height:15px; text-overflow:ellipsis; white-space:nowrap; }.library-entry div span { line-height:14px; }
 .status-dot { width:8px; height:8px; margin-left:auto; border:2px solid rgba(255,255,255,.75); border-radius:50%; background:#333333; box-shadow:0 0 0 2px rgba(0,0,0,.08); }.is-offline .status-dot { background:#999999; box-shadow:0 0 0 2px rgba(0,0,0,.06); }
-.date-section { display:flex; min-height:0; flex:1 1 auto; flex-direction:column; overflow:hidden; }.date-tree { min-height:0; padding:0 3px 10px; overflow-y:auto; scrollbar-color:rgba(0,0,0,.25) transparent; scrollbar-width:thin; }.date-tree::-webkit-scrollbar { width:5px; }.date-tree::-webkit-scrollbar-thumb { border-radius:5px; background:rgba(0,0,0,.25); }
+.date-section { display:flex; min-height:0; flex:1 1 auto; flex-direction:column; overflow:hidden; }.date-tree { min-height:0; padding:0 3px 10px; overflow-y:auto; }
+.date-tree::-webkit-scrollbar { width:7px; }
+.date-tree::-webkit-scrollbar-track { background:transparent; }
+.date-tree::-webkit-scrollbar-thumb { border:2px solid transparent; border-radius:6px; background:rgba(0,0,0,.25); background-clip:padding-box; }
+.date-tree::-webkit-scrollbar-thumb:hover { background:rgba(0,0,0,.4); background-clip:padding-box; }
 .date-link,.day-link { display:flex; width:100%; align-items:center; justify-content:space-between; border:0; border-radius:9px; color:#555555; background:transparent; font-size:12px; text-align:left; }.date-link { min-height:32px; padding:0 8px; transition:color .18s ease,background .18s ease; }.date-link span:last-child,.day-link span:last-child { color:#9a9a9a; font-size:10px; font-variant-numeric:tabular-nums; }
 .date-link:hover,.day-link:hover { color:#111111; background:rgba(255,255,255,.5); }.date-link.is-selected,.day-link.is-selected { color:#111111; background:rgba(255,255,255,.78); box-shadow:inset 0 1px rgba(255,255,255,.86); }.date-link.is-selected span:last-child,.day-link.is-selected span:last-child { color:#666666; }
 .all-link { margin-bottom:7px; color:#333333; font-weight:750; }.year-group { margin-top:4px; }.year-link { color:#222222; font-weight:720; }.month-list { margin-left:13px; padding:1px 0 0 13px; border-left:1px solid rgba(0,0,0,.08); }.month-group { margin-bottom:7px; }.month-group + .month-group { margin-top:8px; padding-top:6px; border-top:1px solid rgba(0,0,0,.06); }.month-link { min-height:30px; color:#444444; font-weight:650; }.month-link:not(.is-selected) { background:rgba(255,255,255,.18); }.day-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px 3px; margin-left:5px; padding:0 0 4px 7px; border-left:1px solid rgba(0,0,0,.06); }.day-link { min-height:25px; padding:0 6px; font-size:11px; transition:color .18s ease,background .18s ease; }.nav-empty { padding:9px 10px; color:#8a8a8a; font-size:12px; }
@@ -237,7 +241,20 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 
 /* No top padding on the scroller: sticky top:0 would otherwise leave a gap
    above the pinned tools where scrolled media cards still paint. */
-.content { min-width:0; height:100%; flex:1; padding:0 var(--content-pad) 54px; overflow:auto; scrollbar-color:rgba(0,0,0,.22) transparent; scrollbar-width:thin; }.content::-webkit-scrollbar { width:9px; }.content::-webkit-scrollbar-thumb { border:3px solid transparent; border-radius:10px; background:rgba(0,0,0,.22); background-clip:padding-box; }
+/* overflow-anchor 必须关。虚拟滚动靠上下两个 spacer 撑高度，窗口每前进一天顶部
+   spacer 就整块改高度；浏览器的滚动锚定会把这当成「内容在它头上长出来」并反过来
+   补偿 scrollTop，表现为滚动时位置一抽一抽地对不上指针。滚动位置由我们自己的行盒
+   算术负责，不需要它插手。 */
+.content { min-width:0; height:100%; flex:1; padding:0 var(--content-pad) 54px; overflow:auto; overscroll-behavior:contain; overflow-anchor:none; }
+/* 只用 ::-webkit-scrollbar 一套。同时留 scrollbar-width/color 会让标准属性胜出，
+   webkit 那套整段失效，滚动条退回系统默认外观：条体窄、拖拽区域也窄，指针压上
+   去没有任何反馈，想拖到某个位置只能凭手感猜。下面这套把可点区域做到 11px、
+   hover/active 逐级加深，静止画面里的存在感反而更低。 */
+.content::-webkit-scrollbar { width:11px; }
+.content::-webkit-scrollbar-track { background:transparent; }
+.content::-webkit-scrollbar-thumb { min-height:48px; border:3px solid transparent; border-radius:10px; background:rgba(0,0,0,.22); background-clip:padding-box; }
+.content::-webkit-scrollbar-thumb:hover { background:rgba(0,0,0,.38); background-clip:padding-box; }
+.content::-webkit-scrollbar-thumb:active { background:rgba(0,0,0,.5); background-clip:padding-box; }
 .topbar { display:flex; align-items:flex-end; justify-content:space-between; gap:25px; margin-top:36px; margin-bottom:28px; }.eyebrow { color:#6b6b6b; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; } h1 { margin:6px 0 3px; color:#111111; font-size:clamp(29px,3vw,38px); font-weight:760; letter-spacing:-.055em; line-height:1.05; }.result-count { color:#6b6b6b; font-size:12px; font-weight:520; }.top-actions { display:flex; align-items:center; gap:10px; }
 .search-box { display:flex; width:clamp(238px,24vw,318px); height:42px; align-items:center; gap:8px; padding:0 6px 0 14px; border:1px solid rgba(255,255,255,.78); border-radius:14px; background:rgba(255,255,255,.42); box-shadow:var(--glass-specular),0 7px 18px rgba(0,0,0,.04); color:#666666; backdrop-filter:blur(18px) saturate(1.3); -webkit-backdrop-filter:blur(18px) saturate(1.3); transition:border .2s ease,background .2s ease,box-shadow .2s ease; }.search-box:focus-within { border-color:rgba(0,0,0,.15); background:rgba(255,255,255,.74); box-shadow:0 0 0 4px rgba(0,0,0,.06),inset 0 1px rgba(255,255,255,.9); }.search-box input { width:100%; min-width:0; border:0; outline:0; color:#111111; background:transparent; font-size:12px; }.search-box input::placeholder { color:#8a8a8a; }.search-box kbd { padding:2px 5px; border:1px solid rgba(0,0,0,.12); border-radius:5px; color:#777777; background:rgba(255,255,255,.45); font-family:inherit; font-size:10px; }.search-button { height:30px; flex:0 0 auto; padding:0 10px; border:0; border-radius:9px; color:#fff; background:#111111; box-shadow:0 3px 8px rgba(0,0,0,.18); font-size:11px; font-weight:700; transition:background .18s ease,transform .18s ease,box-shadow .18s ease; }.search-button:hover { background:#2a2a2a; box-shadow:0 5px 11px rgba(0,0,0,.22); transform:translateY(-1px); }.search-button:focus-visible { outline:2px solid #fff; outline-offset:1px; }
 .outline-button,.primary-button,.text-button,.load-more { border:1px solid rgba(255,255,255,.78); border-radius:13px; color:#333333; background:rgba(255,255,255,.46); box-shadow:var(--glass-specular),0 7px 17px rgba(0,0,0,.04); font-size:12px; font-weight:650; transition:transform .2s ease,box-shadow .2s ease,background .2s ease,border .2s ease; }.outline-button { height:42px; padding:0 15px; }.outline-button:hover,.load-more:hover { border-color:rgba(0,0,0,.12); color:#111111; background:rgba(255,255,255,.82); box-shadow:0 10px 22px rgba(0,0,0,.08),inset 0 1px rgba(255,255,255,.9); transform:translateY(-1px); }
@@ -3411,3 +3428,43 @@ body.is-merge-dragging { user-select:none; -webkit-user-select:none; cursor:grab
 [data-theme="dark"] .ai-chat-search-chip:hover { background:rgba(201,162,39,.26); }
 [data-theme="dark"] .ai-chat-empty { color:var(--muted); }
 [data-theme="dark"] .ai-chat-input-row textarea { background:var(--inset); }
+
+/* ==========================================================================
+   Scroll-time degradation
+   ==========================================================================
+   网格里每张卡片带 3 个 backdrop-filter（两个悬浮按钮 + 类型角标 + 时长胶囊），
+   一个滚动窗口同时挂着几十张，就是上百个每帧都要重新采样背景的合成层；
+   `.sticky-controls` 还粘在滚动容器里，位置每帧都在动。掉帧主要出在合成器，
+   不在虚拟滚动的算术上。
+
+   所以只在这几百毫秒里把「静止才看得出来」的质感降一档：徽章去掉模糊（底色
+   本来就是不透明度 .42–.58 的纯色，模糊在移动画面里无法分辨），粘性工具条
+   保留同一档模糊、只摘掉边缘位移贴图。停手 180ms 后原样恢复，静止画面逐像素
+   不变。开关在 render/scrolling.ts。 */
+
+html.is-scrolling .card-action,
+html.is-scrolling .kind-badge,
+html.is-scrolling .state-badge,
+html.is-scrolling .burst-badge,
+html.is-scrolling .duration-badge {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 粘性工具条：内联的 url(#lg-filter-*) 是 SVG 位移贴图，滚动时每帧都要重放
+   一遍整条滤镜链。这里退回同一档纯模糊（数值与 liquid-glass 里 sticky 目标
+   一致，切进切出只有折射带消失，不发生亮度跳变）。 */
+html.is-scrolling .sticky-controls {
+  backdrop-filter: blur(22px) saturate(1.4) contrast(1.05) brightness(1.04) !important;
+  -webkit-backdrop-filter: blur(22px) saturate(1.4) contrast(1.05) brightness(1.04) !important;
+}
+html[data-theme="dark"].is-scrolling .sticky-controls {
+  backdrop-filter: blur(14px) saturate(1.1) contrast(1.02) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(1.1) contrast(1.02) !important;
+}
+
+/* 骨架的 shimmer 是无限循环动画：一屏未加载的卡片就是几十条同时在跑。 */
+html.is-scrolling .preview-skeleton { animation: none !important; }
+
+/* 新挂载的缩略图淡入同理，滚动中每帧都在新建动画。 */
+html.is-scrolling .card-preview img { animation: none !important; }

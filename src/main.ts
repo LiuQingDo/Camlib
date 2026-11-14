@@ -22,9 +22,10 @@ import { loadMoreScrollRoot, refreshMedia, updateLoadMoreFooter } from "./app/me
 import { render, renderSettingsAware } from "./app/orchestrate";
 import { openSettings } from "./app/settings-ops";
 import { showTransientNotice } from "./app/ui";
-import { initLiquidGlass } from "./liquid-glass";
+import { initLiquidGlass, setGlassObserverPaused, syncLiquidGlass } from "./liquid-glass";
 import "./render/events"; // 副作用导入：卡片/工具栏的 data-action 事件委托
 import { installPaint } from "./render/paint";
+import { initScrolling, onScrollingChange } from "./render/scrolling";
 import { onGridScroll } from "./render/virtual";
 import { state } from "./state";
 import { initTitlebar } from "./titlebar";
@@ -79,3 +80,12 @@ void listen<LibraryStatus>("library-status", (event) => {
 // 所以既挂捕获阶段的 window 监听（能收到任意后代元素的 scroll），也在骨架里
 // 直挂 .content（见 bindShellEvents），两条路径都只是排一帧重绘。
 window.addEventListener("scroll", onGridScroll, { passive: true, capture: true });
+
+// 滚动态降级：滚动这几百毫秒里关掉卡片的背景模糊、把粘性工具条摘成纯模糊，
+// 停手后原样恢复。同时暂停玻璃观察器，滚动结束补一次同步。
+initScrolling();
+onScrollingChange((scrolling) => {
+  setGlassObserverPaused(scrolling);
+  if (scrolling) return;
+  requestAnimationFrame(() => syncLiquidGlass());
+});

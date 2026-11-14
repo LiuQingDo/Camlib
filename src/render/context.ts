@@ -53,6 +53,14 @@ export function setText(element: Element | null | undefined, text: string): void
   if (element && element.textContent !== text) element.textContent = text;
 }
 
+/**
+ * 只写不一样的属性。`setAttribute` 即使值相同也会走一遍失效检查，而卡片的
+ * aria-* 每帧都要重算一遍——窗口里几十张卡，这就是几百次空写。
+ */
+export function setAttr(element: Element | null | undefined, name: string, value: string): void {
+  if (element && element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
 /** 渲染片段 → 元素。<template> 内容不会提前解码其中的 <img>。 */
 export function fragmentElement(html: string): HTMLElement | null {
   const template = document.createElement("template");

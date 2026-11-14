@@ -393,6 +393,9 @@ const GLASS_SELECTOR = TARGETS.map((target) => target.selector).join(", ");
 
 let surfaceObserver: MutationObserver | null = null;
 
+/** 玻璃表面的观察配置：视图按区域 patch，只有「新建」才需要重建位移贴图。 */
+const GLASS_OBSERVE_OPTIONS: MutationObserverInit = { childList: true, subtree: true };
+
 /**
  * Watch for glass surfaces appearing in the DOM.
  *
@@ -402,6 +405,11 @@ let surfaceObserver: MutationObserver | null = null;
  * dialog opening, a banner appearing) does the map have to be rebuilt — and
  * that is exactly what this observer reports. Call sites no longer have to
  * remember to call syncLiquidGlass() after touching the DOM.
+ *
+ * 滚动期间整棵树都在增删卡片，观察器每帧都会收到上百条记录，再对每条记录跑一遍
+ * `querySelector(GLASS_SELECTOR)`——而窗口化滚动不可能凭空生出新的玻璃面。所以
+ * 滚动态直接断开，停手后重连并全量同步一次（见 main.ts）：漏掉的表面由那次全量
+ * 同步补上，不必靠观察器兜。
  */
 function watchGlassSurfaces(): void {
   if (surfaceObserver) return;
@@ -416,7 +424,14 @@ function watchGlassSurfaces(): void {
       }
     }
   });
-  surfaceObserver.observe(document.body, { childList: true, subtree: true });
+  surfaceObserver.observe(document.body, GLASS_OBSERVE_OPTIONS);
+}
+
+/** 滚动态：停观察器；结束时重连（由 main.ts 在滚动态翻回时调用）。 */
+export function setGlassObserverPaused(paused: boolean): void {
+  if (!surfaceObserver) return;
+  if (paused) surfaceObserver.disconnect();
+  else surfaceObserver.observe(document.body, GLASS_OBSERVE_OPTIONS);
 }
 
 /**
