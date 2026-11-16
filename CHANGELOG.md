@@ -17,6 +17,7 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Fixed
 
+- 修复主页滚轮停下时整屏缩略图"闪一下"：入场淡入原来写成 `.card-preview img` 的常驻 `animation`，滚动降级期间被 `html.is-scrolling … { animation:none }` 摘掉，撤掉降级标记的那一刻浏览器把它当成新动画重放——所有已显示的缩略图一起从 `opacity:0` 淡回 1（实测停手后第 56ms，12 张可见图 `opacity` 全部归 0）。现在淡入只挂在真正到货的那张图上（`.card-preview img.is-fresh`，`render/grid.ts` 建 `<img>` 时按是否在滚动决定加不加），骨架 shimmer 的降级也从 `animation:none` 改成 `animation-play-state:paused`，暂停不重启动画
 - 修复预览里 ←/→ 换图的"卡一下、闪一下"：换图走的是整块签名重建，`.modal-backdrop` 连同全屏 `backdrop-filter: blur(18px)` 和面板一起被替换，入场动画重播、弹窗几何重算、媒体节点重新挂载。现在外壳只在打开时建一次，换图只改位置计数/标题/按钮可见性，`#modal-media` 由装载钩子交叉替换（旧图一直留到替换那一刻，不再先清成转圈）。12 次连续换图同条件实测：脚本耗时 −40%、样式重算 −11%、主线程繁忙 −17%，入场动画 `startTime` 不再重置
 - 修复关闭弹窗是硬切：原来是直接把容器 `innerHTML` 清空，画面上"闪没了"。现在先给根节点播 140ms 淡出再摘 DOM，退场期间 `pointer-events:none` 不吃点击；这 140ms 内重新打开同一个弹窗会撤掉定时器直接换新内容，不会清掉刚绘制的面板
 - 修复打开设置/预览时面板动画掉帧：liquid-glass 的位移贴图按元素当前尺寸生成，入场动画每帧都在改它的尺寸与位置，`url(#lg-filter-*)` 整条滤镜链要逐帧重放，同一时间观察器还会对刚插入的面板跑一次 canvas 生成 + `toDataURL()`。现在过渡窗口里摘掉位移贴图、只留同档纯模糊，动画结束补一次全量同步把折射带还回来（与滚动降级同一套思路）

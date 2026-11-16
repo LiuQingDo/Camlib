@@ -6,6 +6,7 @@ import { ThumbnailCancelled, cancelQueuedThumbnail, loadThumbnail, thumbnailUrlC
 import { state } from "../state";
 import { app, fragmentElement, setAttr, setText } from "./context";
 import { escapeHtml, formatDate, kindLabel } from "./text";
+import { isScrolling } from "./scrolling";
 
 /** Shared star path — keep in sync with `.icon-star-*` in card favorite buttons. */
 export const STAR_PATH = "m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z";
@@ -247,6 +248,9 @@ export function applyThumbnailToCard(id: string, asset: Awaited<ReturnType<typeo
     image.src = asset.url;
     image.alt = "";
     image.decoding = "async";
+    // 只有真正到货的新图才淡入；滚动中的挂载不加，滚动时图应该直接出现。
+    // 标记一次性：动画放完就留着无害，节点回收时随内容一起丢掉。
+    if (!isScrolling()) image.classList.add("is-fresh");
     target.prepend(image);
   }
   if (item.kind === "video" && !target.querySelector(".video-overlay")) {

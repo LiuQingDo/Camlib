@@ -358,7 +358,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 }
 .card-favorite.is-pending { cursor:wait; opacity:.68; }
 .card-favorite:disabled { transform:none; }
-.card-preview.has-preview { background:rgba(0,0,0,.04); }.card-preview img { position:relative; z-index:1; width:100%; height:100%; object-fit:cover; animation:preview-in .18s ease both; }.preview-fallback { position:relative; z-index:1; color:#666666; font-size:11px; }
+.card-preview.has-preview { background:rgba(0,0,0,.04); }.card-preview img { position:relative; z-index:1; width:100%; height:100%; object-fit:cover; }
+/* 入场淡入只挂在「刚到货的那张图」上（render/grid.ts 建 <img> 时打 is-fresh）。
+   不能写成 `.card-preview img` 的常驻 animation：滚动降级一旦用 `animation:none`
+   把它摘掉，撤掉降级标记时浏览器会把这条动画当成新动画重放——停手那一刻整屏
+   缩略图集体从 opacity:0 淡入，看起来就是"滚完闪一下"。 */
+.card-preview img.is-fresh { animation:preview-in .18s ease both; }.preview-fallback { position:relative; z-index:1; color:#666666; font-size:11px; }
 /* Thumbnail skeleton: fills the preview stage until the image arrives (no text). */
 .preview-skeleton { position:absolute; z-index:0; inset:0; border-radius:inherit; pointer-events:none; background:rgba(0,0,0,.06); background-image:linear-gradient(100deg, transparent 28%, rgba(255,255,255,.52) 50%, transparent 72%); background-size:220% 100%; background-repeat:no-repeat; animation:skeleton-shimmer 1.2s ease-in-out infinite; }
 @keyframes skeleton-shimmer { from { background-position:120% 0; } to { background-position:-120% 0; } }
@@ -3456,11 +3461,10 @@ html[data-theme="dark"].is-scrolling .sticky-controls {
   -webkit-backdrop-filter: blur(14px) saturate(1.1) contrast(1.02) !important;
 }
 
-/* 骨架的 shimmer 是无限循环动画：一屏未加载的卡片就是几十条同时在跑。 */
-html.is-scrolling .preview-skeleton { animation: none !important; }
-
-/* 新挂载的缩略图淡入同理，滚动中每帧都在新建动画。 */
-html.is-scrolling .card-preview img { animation: none !important; }
+/* 骨架的 shimmer 是无限循环动画：一屏未加载的卡片就是几十条同时在跑。
+   用 paused 而不是 none——摘掉再挂回去会重启动画，滚动中的新节点也会开始跑。
+   暂停保持住当前进度，撤掉降级标记后接着走，不产生亮度跳变。 */
+html.is-scrolling .preview-skeleton { animation-play-state: paused !important; }
 
 /* ==========================================================================
    Overlay transitions（页面切换）
