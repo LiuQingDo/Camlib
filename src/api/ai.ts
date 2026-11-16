@@ -1,5 +1,5 @@
 /**
- * AI 增强（可选云端 API）：自动打标 + 语义搜索的 invoke 封装。
+ * AI 增强（可选云端 API）：自动打标 + 自然语言检索的 invoke 封装。
  *
  * 命令与 DTO 与 `src-tauri/src/ai.rs` 一一对应；错误由调用方通过
  * `toUserMessage` 转成中文提示（本层不捕获）。
@@ -12,12 +12,11 @@ import type { MediaItemDto } from "./media";
 /** 与 Rust `AiConfig` 对齐；API key 明文存本地（个人应用，设置页回显）。 */
 export interface AiConfigDto {
   enabled: boolean;
+  /** 设置页选中的服务商预设 id（只用于回显卡片，请求只用 baseUrl + model）。 */
+  provider: string;
   chatBaseUrl: string;
   chatModel: string;
   chatApiKey: string;
-  embeddingBaseUrl: string;
-  embeddingModel: string;
-  embeddingApiKey: string;
   concurrency: number;
 }
 
@@ -25,7 +24,6 @@ export interface AiTestResultDto {
   ok: boolean;
   message: string;
   latencyMs: number;
-  dimension?: number;
 }
 
 export interface AiStatsDto {
@@ -33,11 +31,9 @@ export interface AiStatsDto {
   processed: number;
   failed: number;
   pending: number;
-  missingEmbedding: number;
-  embeddingModel: string | null;
 }
 
-export type AiRunMode = "incremental" | "full" | "retry" | "embeddings";
+export type AiRunMode = "incremental" | "full" | "retry";
 
 export interface AiProcessPreviewDto {
   mode: AiRunMode;
@@ -45,9 +41,7 @@ export interface AiProcessPreviewDto {
   processed: number;
   failed: number;
   pending: number;
-  missingEmbedding: number;
   chatCalls: number;
-  embeddingCalls: number;
   estimatedCalls: number;
 }
 
@@ -80,8 +74,8 @@ export interface AiSearchResultDto {
   total: number;
   offset: number;
   limit: number;
-  /** vector = 向量检索；text = caption/tags 关键字降级；structured = 纯条件。 */
-  mode: "vector" | "text" | "structured";
+  /** text = 描述/标签关键字匹配；structured = 纯时间/类型条件走 SQL。 */
+  mode: "text" | "structured";
   parsed: AiParsedQueryDto;
 }
 
@@ -100,19 +94,16 @@ export function setAiConfig(config: AiConfigDto): Promise<AiConfigDto> {
   return invoke<AiConfigDto>("ai_set_config", { config });
 }
 
-/** target: "chat" | "embedding"；AI 未开启时也可测试连通性。 */
-export function testAiConnection(target: "chat" | "embedding"): Promise<AiTestResultDto> {
-  return invoke<AiTestResultDto>("ai_test_connection", { target });
+/** 连通性探测；AI 未开启时也可测试（会用到已保存的配置）。 */
+export function testAiConnection(): Promise<AiTestResultDto> {
+  return invoke<AiTestResultDto>("ai_test_connection");
 }
 
 export function getAiStats(libraryId: string): Promise<AiStatsDto> {
   return invoke<AiStatsDto>("ai_stats", { libraryId });
 }
 
-export function previewAiProcess(
-  libraryId: string,
-  mode: AiRunMode,
-): Promise<AiProcessPreviewDto> {
+export function previewAiProcess(libraryId: string, mode: AiRunMode): Promise<AiProcessPreviewDto> {
   return invoke<AiProcessPreviewDto>("ai_process_preview", { libraryId, mode });
 }
 
@@ -147,9 +138,7 @@ export function detachAiTag(mediaItemId: string, tagId: string): Promise<void> {
   return invoke<void>("ai_tag_detach", { mediaItemId, tagId });
 }
 
-export function onAiProgress(
-  callback: (progress: AiProgressDto) => void,
-): Promise<UnlistenFn> {
+export function onAiProgress(callback: (progress: AiProgressDto) => void): Promise<UnlistenFn> {
   return listen<AiProgressDto>("ai-progress", (event) => callback(event.payload));
 }
 

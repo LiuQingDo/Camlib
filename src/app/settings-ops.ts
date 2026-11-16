@@ -37,6 +37,7 @@ import {
   startLibraryScan,
   startThumbnailRebuild,
 } from "../api/media";
+import { CUSTOM_MODEL_ID, findProvider } from "../lib/ai-providers";
 import { extensionsToInput, parseExtensionsInput } from "../lib/filters";
 import { formatCount } from "../lib/format";
 import { syncLiquidGlass } from "../liquid-glass";
@@ -113,6 +114,8 @@ export async function loadSettingsSectionData(): Promise<void> {
     if (state.settingsSection === "ai") {
       const config = await getAiConfig();
       state.aiConfig = config;
+      state.aiDraft = initialAiDraft(config);
+      state.aiKeyVisible = false;
       state.aiConfirming = false;
       state.aiTestResult = null;
       if (state.library) {
@@ -291,29 +294,82 @@ export async function saveBackupDefaults(): Promise<void> {
 
 // ── AI 增强（设置页） ───────────────────────────────────────────────────────
 
-export function readAiConfigFromInputs(base: AiConfigDto): AiConfigDto {
-  const value = (selector: string): string =>
-    app.querySelector<HTMLInputElement | HTMLSelectElement>(selector)?.value?.trim() ?? "";
-  const concurrency = Number.parseInt(value("#settings-ai-concurrency"), 10);
-  return {
-    ...base,
-    enabled: app.querySelector<HTMLInputElement>("#settings-ai-enabled")?.checked ?? base.enabled,
-    chatBaseUrl: value("#settings-ai-chat-url"),
-    chatModel: value("#settings-ai-chat-model"),
-    chatApiKey: app.querySelector<HTMLInputElement>("#settings-ai-chat-key")?.value?.trim() ?? "",
-    embeddingBaseUrl: value("#settings-ai-embed-url"),
-    embeddingModel: value("#settings-ai-embed-model"),
-    embeddingApiKey: app.querySelector<HTMLInputElement>("#settings-ai-embed-key")?.value?.trim() ?? "",
-    concurrency: Number.isFinite(concurrency) ? concurrency : base.concurrency,
-  };
+/**
+ * 首次配置时给草稿垫一个默认服务商：卡片有选中项、地址与推荐模型都填好，
+ * 用户只用粘一个 Key。已经配过的（任一字段有值）原样返回，不覆盖旧选择。
+ */
+function initialAiDraft(config: AiConfigDto): AiConfigDto {
+  const draft: AiConfigDto = { ...config };
+  if (draft.provider.trim() || draft.chatBaseUrl.trim() || draft.chatModel.trim()) return draft;
+  const preset = findProvider("openai");
+  draft.provider = preset.id;
+  draft.chatBaseUrl = preset.baseUrl;
+  draft.chatModel = preset.models[0]?.id ?? "";
+  return draft;
+}
+
+/**
+ * 把 DOM 上可能尚未提交的输入同步回草稿。切服务商、保存、测试连接前都要先
+ * 调一次，否则刚敲完还没失焦的 Key / 手填模型名会丢。
+ */
+export function syncAiDraftFromDom(): void {
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const value = (selector: string): string | null =>
+    app.querySelector<HTMLInputElement | HTMLSelectElement>(selector)?.value ?? null;
+  const key = value("#settings-ai-chat-key");
+  if (key !== null) draft.chatApiKey = key.trim();
+  const url = value("#settings-ai-chat-url");
+  if (url !== null) draft.chatBaseUrl = url.trim();
+  const customModel = value("#settings-ai-model-custom");
+  if (customModel !== null) draft.chatModel = customModel.trim();
+  const concurrency = Number.parseInt(value("#settings-ai-concurrency") ?? "", 10);
+  if (Number.isFinite(concurrency)) draft.concurrency = concurrency;
+  const enabled = app.querySelector<HTMLInputElement>("#settings-ai-enabled");
+  if (enabled) draft.enabled = enabled.checked;
+}
+
+/** 切换服务商卡片：预设服务商自带接口地址与首个推荐模型。 */
+export function selectAiProvider(providerId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const preset = findProvider(providerId);
+  draft.provider = preset.id;
+  if (!preset.custom) {
+    draft.chatBaseUrl = preset.baseUrl;
+    draft.chatModel = preset.models[0]?.id ?? "";
+  }
+  state.aiTestResult = null;
+  updateSettingsPanel();
+}
+
+/** 模型下拉：选「自定义模型…」时清空名称，露出可手填的输入框。 */
+export function selectAiModel(modelId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  draft.chatModel = modelId === CUSTOM_MODEL_ID ? "" : modelId;
+  state.aiTestResult = null;
+  updateSettingsPanel();
+}
+
+/** API Key 明文/密文切换（只影响显示，不改草稿值）。 */
+export function toggleAiKeyVisibility(): void {
+  syncAiDraftFromDom();
+  state.aiKeyVisible = !state.aiKeyVisible;
+  updateSettingsPanel();
 }
 
 export async function saveAiSettings(): Promise<void> {
-  if (!state.aiConfig) return;
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
   state.settingsBusy = true;
   state.settingsError = null;
   try {
-    state.aiConfig = await setAiConfig(readAiConfigFromInputs(state.aiConfig));
+    state.aiConfig = await setAiConfig(draft);
+    state.aiDraft = { ...state.aiConfig };
     state.settingsNotice = state.aiConfig.enabled ? "AI 配置已保存并启用" : "AI 配置已保存（功能保持关闭）";
     if (state.library) state.aiStats = await getAiStats(state.library.id);
   } catch (error) {
@@ -324,28 +380,27 @@ export async function saveAiSettings(): Promise<void> {
   }
 }
 
-export async function testAiConnectionFor(target: "chat" | "embedding"): Promise<void> {
-  state.aiTestBusy = target;
+export async function testAiConnectionNow(): Promise<void> {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  state.aiTestBusy = true;
   state.aiTestResult = null;
   state.settingsError = null;
   renderSettingsAware();
   try {
-    // Test with the values currently in the inputs so users can validate
-    // before saving; persist nothing.
-    if (state.aiConfig) {
-      await setAiConfig(readAiConfigFromInputs(state.aiConfig));
-    }
-    const result = await testAiConnection(target);
-    state.aiTestResult = { ...result, target };
+    // 测试命令只读已保存的配置，所以先把草稿落库，避免「测的是 A、存的是 B」。
+    state.aiConfig = await setAiConfig(draft);
+    state.aiDraft = { ...state.aiConfig };
+    state.aiTestResult = await testAiConnection();
   } catch (error) {
     state.aiTestResult = {
       ok: false,
       message: toDetailedMessage(error, "连接失败"),
       latencyMs: 0,
-      target,
     };
   } finally {
-    state.aiTestBusy = null;
+    state.aiTestBusy = false;
     renderSettingsAware();
   }
 }

@@ -219,8 +219,12 @@ export interface AppState {
   mergeProgress: VideoMergeProgressDto | null;
   mergeError: string | null;
   mergeNotice: string | null;
-  /** AI 增强（云端 API 自动打标 + 语义搜索），配置/统计/任务进度。 */
+  /** AI 增强（云端 API 自动打标 + 自然语言检索），配置/统计/任务进度。 */
   aiConfig: AiConfigDto | null;
+  /** 设置页 AI 表单草稿：改动先落这里，保存/测试时才提交后端。 */
+  aiDraft: AiConfigDto | null;
+  /** API Key 是否明文显示（仅 UI）。 */
+  aiKeyVisible: boolean;
   aiStats: AiStatsDto | null;
   aiPreview: AiProcessPreviewDto | null;
   aiPreviewLoading: boolean;
@@ -228,8 +232,8 @@ export interface AppState {
   aiProgress: AiProgressDto | null;
   aiProcessMode: AiRunMode;
   aiConfirming: boolean;
-  aiTestBusy: "chat" | "embedding" | null;
-  aiTestResult: (AiTestResultDto & { target: "chat" | "embedding" }) | null;
+  aiTestBusy: boolean;
+  aiTestResult: AiTestResultDto | null;
   /** 激活的语义搜索查询（null = 常规筛选模式）。 */
   semanticSearch: string | null;
   semanticDraft: string;
@@ -380,6 +384,8 @@ export const state: AppState = {
   mergeError: null,
   mergeNotice: null,
   aiConfig: null,
+  aiDraft: null,
+  aiKeyVisible: false,
   aiStats: null,
   aiPreview: null,
   aiPreviewLoading: false,
@@ -387,7 +393,7 @@ export const state: AppState = {
   aiProgress: null,
   aiProcessMode: "incremental",
   aiConfirming: false,
-  aiTestBusy: null,
+  aiTestBusy: false,
   aiTestResult: null,
   semanticSearch: null,
   semanticDraft: "",

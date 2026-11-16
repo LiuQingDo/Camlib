@@ -23,8 +23,9 @@
 | 4 | `0004_backup_items.sql` | backup_items（备份单文件状态） |
 | 5 | `0005_media_ratings.sql` | media_ratings（1–5 星评分） |
 | 6 | `0006_backup_merge.sql` | backup_items.merge_sources_json（相机分段合并源列表） |
-| 7 | `0007_ai_tags.sql` | media_ai、media_ai_tags（AI 自动打标 + 语义搜索，可选增强） |
+| 7 | `0007_ai_tags.sql` | media_ai、media_ai_tags（AI 自动打标 + 自然语言检索，可选增强） |
 | 8 | `0008_backup_deep_verify.sql` | backup_runs.deep_verify（可选的内容哈希深度校验，默认 0） |
+| 9 | `0009_ai_drop_embeddings.sql` | 删除 media_ai 的 embedding / embedding_model / embedding_dim（检索改为描述/标签匹配） |
 
 ## 3. 表结构（与迁移对齐）
 
@@ -196,17 +197,14 @@ CREATE TABLE media_ratings (
 - 评分存在独立 `media_ratings` 表；`rating = 0` 表示未评分（删除行）。
 - 扫描 upsert **不得**改写 favorites / tags / ratings。
 
-### AI 增强（v7，可选功能）
+### AI 增强（v7 建表 / v9 去向量，可选功能）
 
 ```sql
 CREATE TABLE media_ai (
   media_item_id   TEXT PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
   caption         TEXT,                -- 对话模型生成的一句话中文描述
   tags_json       TEXT,                -- 打标时的标签名快照（筛选以关系表为准）
-  embedding       BLOB,                -- caption 向量（little-endian f32）
-  embedding_model TEXT,                -- 生成向量的模型名；检索只匹配同名模型
   ai_model        TEXT,
-  embedding_dim   INTEGER,
   status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed')),
   error_message   TEXT,
   processed_at    TEXT
@@ -224,8 +222,8 @@ CREATE TABLE media_ai_tags (
 
 - AI 标签**不写入** `media_tags`：`tag_detach` 等用户操作不会误删 AI 关联；同名标签复用 `tags` 表同一行（`tags.name` 唯一），`list_tags` 投影 `has_ai` 供筛选区加 AI 徽标。
 - `query_media` 的 `tag_ids` 过滤同时匹配 `media_tags` 与 `media_ai_tags`（AND 语义不变）。
-- `embedding` 仅作暴力余弦检索（Rust 端，top-K + 阈值），不引入向量扩展；更换 embedding 模型后需全量重算，检索按 `embedding_model` 过滤避免混用维度。
-- AI 配置存于 `app_settings` 表（key = `ai_config`），含总开关与两组模型配置；功能默认关闭。
+- 自然语言检索不存向量：`ai_search` 先把查询解析为时间/类型条件 + 关键词，条件走 SQL、关键词用 `LIKE` 匹配 `caption` 与 `tags_json`，两者取交集。v9 迁移（`0009_ai_drop_embeddings.sql`）删除了 v7 遗留的 `embedding` / `embedding_model` / `embedding_dim` 三列。
+- AI 配置存于 `app_settings` 表（key = `ai_config`）：总开关、服务商预设 id、接口地址、模型名、API Key、并发数；功能默认关闭。
 
 ## 4. 索引与查询约定
 

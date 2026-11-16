@@ -1,4 +1,4 @@
-//! AI tagging results, embeddings, and AI search helpers.
+//! AI tagging results and AI keyword search helpers.
 
 use crate::db::{escape_like, validate_non_empty, DbResult, Repository};
 use rusqlite::{params, OptionalExtension, Row};
@@ -10,8 +10,8 @@ impl Repository {
     pub fn get_media_ai(&self, media_item_id: &str) -> DbResult<Option<MediaAiRow>> {
         self.connection
             .query_row(
-                "SELECT media_item_id, caption, tags_json, embedding, embedding_model,
-                        ai_model, embedding_dim, status, error_message, processed_at
+                "SELECT media_item_id, caption, tags_json, ai_model, status, error_message,
+                        processed_at
                  FROM media_ai WHERE media_item_id = ?1",
                 [media_item_id],
                 map_media_ai,
@@ -20,23 +20,18 @@ impl Repository {
             .map_err(Into::into)
     }
 
-    /// Insert or replace the AI processing row. `embedding` fields stay as
-    /// provided; pass `None` while only the tag/caption outcome is known.
+    /// Insert or replace the AI processing row.
     pub fn upsert_media_ai(&self, row: MediaAiUpsert<'_>) -> DbResult<()> {
         validate_non_empty("media_item_id", row.media_item_id)?;
         validate_non_empty("status", row.status)?;
         self.connection.execute(
             "INSERT INTO media_ai
-             (media_item_id, caption, tags_json, embedding, embedding_model, ai_model,
-              embedding_dim, status, error_message, processed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             (media_item_id, caption, tags_json, ai_model, status, error_message, processed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(media_item_id) DO UPDATE SET
                caption = excluded.caption,
                tags_json = excluded.tags_json,
-               embedding = excluded.embedding,
-               embedding_model = excluded.embedding_model,
                ai_model = excluded.ai_model,
-               embedding_dim = excluded.embedding_dim,
                status = excluded.status,
                error_message = excluded.error_message,
                processed_at = excluded.processed_at",
@@ -44,38 +39,10 @@ impl Repository {
                 row.media_item_id,
                 row.caption,
                 row.tags_json,
-                row.embedding,
-                row.embedding_model,
                 row.ai_model,
-                row.embedding_dim,
                 row.status,
                 row.error_message,
                 row.processed_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Store (or replace) just the caption embedding after a later backfill.
-    pub fn set_media_ai_embedding(
-        &self,
-        media_item_id: &str,
-        embedding: &[u8],
-        embedding_model: &str,
-        embedding_dim: i64,
-        processed_at: &str,
-    ) -> DbResult<()> {
-        validate_non_empty("media_item_id", media_item_id)?;
-        self.connection.execute(
-            "UPDATE media_ai SET embedding = ?2, embedding_model = ?3,
-                    embedding_dim = ?4, processed_at = ?5
-             WHERE media_item_id = ?1",
-            params![
-                media_item_id,
-                embedding,
-                embedding_model,
-                embedding_dim,
-                processed_at
             ],
         )?;
         Ok(())
@@ -100,56 +67,8 @@ impl Repository {
         Ok(rows)
     }
 
-    /// Rows that succeeded but lack a current-model embedding (never embedded,
-    /// or produced by a different embedding model that was since configured).
-    pub fn list_ai_missing_embeddings(
-        &self,
-        library_id: &str,
-        embedding_model: &str,
-    ) -> DbResult<Vec<AiWorkItem>> {
-        let mut statement = self.connection.prepare(
-            "SELECT m.id, m.display_name FROM media_ai a
-             JOIN media_items m ON m.id = a.media_item_id
-             WHERE m.library_id = ?1 AND a.status = 'success'
-               AND (a.embedding IS NULL OR a.embedding_model IS NULL
-                    OR a.embedding_model != ?2)",
-        )?;
-        let rows = statement
-            .query_map(params![library_id, embedding_model], |row| {
-                Ok(AiWorkItem {
-                    media_item_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// All current-model caption vectors for a library, for brute-force cosine.
-    pub fn list_ai_embeddings(
-        &self,
-        library_id: &str,
-        embedding_model: &str,
-    ) -> DbResult<Vec<AiEmbeddingRow>> {
-        let mut statement = self.connection.prepare(
-            "SELECT a.media_item_id, a.embedding FROM media_ai a
-             JOIN media_items m ON m.id = a.media_item_id
-             WHERE m.library_id = ?1 AND a.status = 'success'
-               AND a.embedding IS NOT NULL AND a.embedding_model = ?2",
-        )?;
-        let rows = statement
-            .query_map(params![library_id, embedding_model], |row| {
-                Ok(AiEmbeddingRow {
-                    media_item_id: row.get(0)?,
-                    embedding: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Rows whose caption/tags contain the term (LIKE). Fallback search path
-    /// when no embedding model is configured; case-insensitive for ASCII.
+    /// Rows whose caption/tags contain the term (LIKE). Case-insensitive for
+    /// ASCII; the single retrieval path behind natural-language search.
     pub fn search_media_ai_text(&self, library_id: &str, term: &str) -> DbResult<Vec<String>> {
         let pattern = format!("%{}%", escape_like(term));
         let mut statement = self.connection.prepare(
@@ -300,10 +219,7 @@ pub struct MediaAiRow {
     pub media_item_id: String,
     pub caption: Option<String>,
     pub tags_json: Option<String>,
-    pub embedding: Option<Vec<u8>>,
-    pub embedding_model: Option<String>,
     pub ai_model: Option<String>,
-    pub embedding_dim: Option<i64>,
     pub status: String,
     pub error_message: Option<String>,
     pub processed_at: Option<String>,
@@ -316,10 +232,7 @@ pub struct MediaAiUpsert<'a> {
     pub media_item_id: &'a str,
     pub caption: Option<&'a str>,
     pub tags_json: Option<&'a str>,
-    pub embedding: Option<&'a [u8]>,
-    pub embedding_model: Option<&'a str>,
     pub ai_model: Option<&'a str>,
-    pub embedding_dim: Option<i64>,
     pub status: &'a str,
     pub error_message: Option<&'a str>,
     pub processed_at: Option<&'a str>,
@@ -331,13 +244,6 @@ pub struct MediaAiUpsert<'a> {
 pub struct AiWorkItem {
     pub media_item_id: String,
     pub display_name: String,
-}
-
-/// A persisted caption vector ready for cosine scoring.
-#[derive(Debug, Clone)]
-pub struct AiEmbeddingRow {
-    pub media_item_id: String,
-    pub embedding: Vec<u8>,
 }
 
 /// Counters shown in the settings AI card.
@@ -370,12 +276,9 @@ pub(crate) fn map_media_ai(row: &Row<'_>) -> rusqlite::Result<MediaAiRow> {
         media_item_id: row.get(0)?,
         caption: row.get(1)?,
         tags_json: row.get(2)?,
-        embedding: row.get(3)?,
-        embedding_model: row.get(4)?,
-        ai_model: row.get(5)?,
-        embedding_dim: row.get(6)?,
-        status: row.get(7)?,
-        error_message: row.get(8)?,
-        processed_at: row.get(9)?,
+        ai_model: row.get(3)?,
+        status: row.get(4)?,
+        error_message: row.get(5)?,
+        processed_at: row.get(6)?,
     })
 }

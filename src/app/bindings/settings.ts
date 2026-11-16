@@ -30,8 +30,12 @@ import {
   saveSystemSettings,
   saveThemeSetting,
   saveThumbnailCacheDir,
+  selectAiModel,
+  selectAiProvider,
   startAiRun,
-  testAiConnectionFor,
+  syncAiDraftFromDom,
+  testAiConnectionNow,
+  toggleAiKeyVisibility,
 } from "../settings-ops";
 
 export function bindSettingsEvents(): void {
@@ -211,14 +215,33 @@ export function bindSettingsBodyEvents(): void {
     ?.addEventListener("click", () => void saveBackupDefaults());
   app.querySelector<HTMLButtonElement>("#settings-save-ai")?.addEventListener("click", () => void saveAiSettings());
   app.querySelector<HTMLInputElement>("#settings-ai-enabled")?.addEventListener("change", (event) => {
-    if (state.aiConfig) state.aiConfig.enabled = (event.target as HTMLInputElement).checked;
+    if (state.aiDraft) state.aiDraft.enabled = (event.target as HTMLInputElement).checked;
+  });
+  // 服务商卡片：切换后自动填接口地址与推荐模型，重新渲染以联动模型下拉。
+  app.querySelectorAll<HTMLButtonElement>("[data-ai-provider]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const providerId = button.dataset.aiProvider;
+      if (providerId) selectAiProvider(providerId);
+    });
+  });
+  app.querySelector<HTMLSelectElement>("#settings-ai-model")?.addEventListener("change", (event) => {
+    selectAiModel((event.target as HTMLSelectElement).value);
+    // 选「自定义模型…」后把光标送到刚出现的输入框，省一次点击。
+    app.querySelector<HTMLInputElement>("#settings-ai-model-custom")?.focus();
   });
   app
-    .querySelector<HTMLButtonElement>("#settings-ai-test-chat")
-    ?.addEventListener("click", () => void testAiConnectionFor("chat"));
+    .querySelector<HTMLButtonElement>("#settings-ai-key-toggle")
+    ?.addEventListener("click", () => toggleAiKeyVisibility());
+  // 未失焦的输入先同步进草稿，避免切换服务商/重新渲染时丢字。
   app
-    .querySelector<HTMLButtonElement>("#settings-ai-test-embed")
-    ?.addEventListener("click", () => void testAiConnectionFor("embedding"));
+    .querySelectorAll<HTMLInputElement>("#settings-ai-chat-key, #settings-ai-model-custom, #settings-ai-chat-url")
+    .forEach((input) => input.addEventListener("input", () => syncAiDraftFromDom()));
+  app
+    .querySelector<HTMLSelectElement>("#settings-ai-concurrency")
+    ?.addEventListener("change", () => syncAiDraftFromDom());
+  app
+    .querySelector<HTMLButtonElement>("#settings-ai-test")
+    ?.addEventListener("click", () => void testAiConnectionNow());
   app.querySelector<HTMLSelectElement>("#settings-ai-mode")?.addEventListener("change", (event) => {
     state.aiProcessMode = (event.target as HTMLSelectElement).value as AiRunMode;
     state.aiConfirming = false;

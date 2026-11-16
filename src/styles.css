@@ -2570,6 +2570,246 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   height:13px;
   flex:0 0 auto;
 }
+
+/* AI 设置：服务商卡片 + 模型选择（对齐桌面向 agent 的配置面板：只选不填） */
+.ai-card-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:14px;
+}
+.ai-card-title {
+  min-width:0;
+}
+.ai-card-title h3 {
+  margin:0 0 6px;
+}
+.ai-card-title .settings-note {
+  margin:0;
+}
+.ai-switch {
+  position:relative;
+  display:inline-flex;
+  flex:0 0 auto;
+  align-items:center;
+}
+.ai-switch input {
+  position:absolute;
+  width:1px;
+  height:1px;
+  opacity:0;
+}
+.ai-switch-track {
+  display:inline-flex;
+  width:38px;
+  height:22px;
+  align-items:center;
+  padding:2px;
+  border:1px solid rgba(0,0,0,.08);
+  border-radius:999px;
+  background:rgba(0,0,0,.14);
+  cursor:pointer;
+  transition:background .18s ease,border-color .18s ease;
+}
+.ai-switch-thumb {
+  width:16px;
+  height:16px;
+  border-radius:50%;
+  background:#ffffff;
+  box-shadow:0 1px 3px rgba(0,0,0,.28);
+  transition:transform .18s ease;
+}
+.ai-switch input:checked + .ai-switch-track {
+  border-color:color-mix(in srgb, var(--accent) 74%, #000 6%);
+  background:var(--accent);
+}
+.ai-switch input:checked + .ai-switch-track .ai-switch-thumb {
+  transform:translateX(16px);
+}
+.ai-switch input:focus-visible + .ai-switch-track {
+  box-shadow:0 0 0 3px var(--focus-ring);
+}
+.ai-provider-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(148px,1fr));
+  gap:8px;
+  margin-top:12px;
+}
+.ai-provider-card {
+  display:flex;
+  min-height:52px;
+  align-items:center;
+  gap:9px;
+  padding:9px 10px;
+  border:1px solid var(--border-soft);
+  border-radius:13px;
+  background:rgba(255,255,255,.62);
+  text-align:left;
+  cursor:pointer;
+  transition:border-color .16s ease,background .16s ease,box-shadow .16s ease,transform .16s ease;
+}
+.ai-provider-card:hover {
+  border-color:rgba(0,0,0,.2);
+  background:#ffffff;
+  transform:translateY(-1px);
+}
+.ai-provider-card.is-active {
+  border-color:color-mix(in srgb, var(--accent) 62%, #ffffff);
+  background:color-mix(in srgb, var(--accent) 9%, #ffffff);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent),0 6px 14px rgba(0,0,0,.06);
+}
+.ai-provider-mark {
+  display:inline-flex;
+  width:28px;
+  height:28px;
+  flex:0 0 auto;
+  align-items:center;
+  justify-content:center;
+  border-radius:9px;
+  color:#333333;
+  background:rgba(0,0,0,.06);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.02em;
+}
+.ai-provider-card.is-active .ai-provider-mark {
+  color:#ffffff;
+  background:var(--accent);
+}
+.ai-provider-copy {
+  display:flex;
+  min-width:0;
+  flex-direction:column;
+  gap:2px;
+}
+.ai-provider-copy strong {
+  color:#1a1a1a;
+  font-size:12px;
+  font-weight:700;
+}
+.ai-provider-copy span {
+  overflow:hidden;
+  color:#7a7a7a;
+  font-size:10px;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.ai-field-row {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1.12fr);
+  gap:10px;
+  margin-top:12px;
+}
+.ai-field {
+  display:flex;
+  min-width:0;
+  flex-direction:column;
+  gap:5px;
+  color:#555555;
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.ai-field input,
+.ai-field select {
+  height:36px;
+  min-width:0;
+  padding:0 10px;
+  border:1px solid var(--border-soft);
+  border-radius:10px;
+  color:#222222;
+  background:rgba(255,255,255,.78);
+  font-size:12px;
+  text-transform:none;
+  outline:0;
+}
+.ai-field input:focus,
+.ai-field select:focus {
+  border-color:rgba(0,0,0,.24);
+  box-shadow:0 0 0 3px rgba(0,0,0,.06);
+}
+.ai-key-row {
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.ai-key-row input {
+  flex:1;
+}
+.ai-key-row .text-button {
+  flex:0 0 auto;
+  height:36px;
+}
+.ai-model-line {
+  margin-top:10px;
+}
+.ai-endpoint {
+  margin-top:9px;
+  color:#6b6b6b;
+  font-size:11px;
+}
+.ai-endpoint code {
+  padding:1px 5px;
+  border-radius:6px;
+  background:rgba(0,0,0,.05);
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+  font-size:11px;
+}
+.ai-actions-row {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  margin-top:12px;
+}
+.ai-actions-row .primary-button,
+.ai-actions-row .outline-button {
+  height:34px;
+  padding:0 12px;
+  font-size:11px;
+}
+.ai-actions-row .ai-test-pill {
+  margin-top:0;
+}
+.ai-hint-inline {
+  color:#8a8a8a;
+  font-size:11px;
+}
+details.ai-advanced {
+  margin-top:12px;
+  padding-top:10px;
+  border-top:1px solid var(--border-hairline);
+}
+details.ai-advanced > summary {
+  color:#666666;
+  font-size:11px;
+  font-weight:650;
+  list-style:none;
+  cursor:pointer;
+}
+details.ai-advanced > summary::-webkit-details-marker {
+  display:none;
+}
+details.ai-advanced > summary::before {
+  display:inline-block;
+  margin-right:5px;
+  content:"\25B8";
+  transition:transform .15s ease;
+}
+details.ai-advanced[open] > summary::before {
+  transform:rotate(90deg);
+}
+details.ai-advanced .settings-form {
+  margin-top:10px;
+}
+.ai-stats {
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  margin-top:14px;
+}
+.settings-kv dd.is-danger {
+  color:var(--danger);
+}
 /* 详情面板 AI 区块：描述一行 + AI 标签 chips。 */
 .meta-ai-block {
   margin-top:14px;
@@ -2603,6 +2843,23 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 [data-theme="dark"] .ai-test-pill.is-ok { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
 [data-theme="dark"] .ai-test-pill.is-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
 [data-theme="dark"] .ai-progress-note { color: var(--ink); }
+[data-theme="dark"] .ai-switch-track { border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.16); }
+[data-theme="dark"] .ai-switch-thumb { background: #f2f2f2; }
+[data-theme="dark"] .ai-provider-card { border-color: rgba(255,255,255,.1); background: rgba(255,255,255,.05); }
+[data-theme="dark"] .ai-provider-card:hover { border-color: rgba(255,255,255,.22); background: rgba(255,255,255,.1); }
+[data-theme="dark"] .ai-provider-card.is-active { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+[data-theme="dark"] .ai-provider-mark { color: var(--ink); background: rgba(255,255,255,.1); }
+[data-theme="dark"] .ai-provider-card.is-active .ai-provider-mark { color: #1a1a1a; background: var(--accent); }
+[data-theme="dark"] .ai-provider-copy strong { color: var(--ink); }
+[data-theme="dark"] .ai-provider-copy span { color: var(--muted); }
+[data-theme="dark"] .ai-field { color: var(--muted); }
+[data-theme="dark"] .ai-field input,
+[data-theme="dark"] .ai-field select { border-color: rgba(255,255,255,.12); color: var(--ink); background: rgba(255,255,255,.08); }
+[data-theme="dark"] .ai-endpoint { color: var(--muted); }
+[data-theme="dark"] .ai-endpoint code { color: var(--ink); background: rgba(255,255,255,.08); }
+[data-theme="dark"] details.ai-advanced { border-color: rgba(255,255,255,.1); }
+[data-theme="dark"] details.ai-advanced > summary { color: var(--muted); }
+[data-theme="dark"] .ai-hint-inline { color: var(--faint); }
 [data-theme="dark"] .meta-ai-caption { color: var(--ink); }
 [data-theme="dark"] .tag-chip-ai {
   border-color: color-mix(in srgb, #c9a227 45%, transparent);

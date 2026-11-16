@@ -40,80 +40,45 @@ pub struct AiTestResultDto {
     ok: bool,
     message: String,
     latency_ms: u64,
-    dimension: Option<i64>,
 }
 
-/// Minimal reachability probe for one endpoint group. Works while AI is still
-/// disabled so users can validate credentials before turning the feature on.
+/// Minimal reachability probe for the configured endpoint. Works while AI is
+/// still disabled so users can validate credentials before turning the feature
+/// on.
 ///
 /// The probe is a blocking HTTP round-trip, so the command itself only
 /// snapshots the config (the `State` borrow ends before the first `await`) and
 /// the network call runs on a blocking worker.
 #[tauri::command]
 pub async fn ai_test_connection(
-    target: String,
     state: State<'_, InfrastructureState>,
 ) -> Result<AiTestResultDto, AppError> {
     let config = state.with_infrastructure(|infrastructure| {
         ai::load_config(infrastructure.repository()).map_err(InfrastructureError::App)
     })?;
-    tauri::async_runtime::spawn_blocking(move || ai_test_connection_blocking(&target, &config))
+    tauri::async_runtime::spawn_blocking(move || ai_test_connection_blocking(&config))
         .await
         .map_err(|error| AppError::internal(format!("连接测试异常结束: {error}")))?
 }
 
 /// Body of `ai_test_connection` after the infrastructure lock is released.
-pub fn ai_test_connection_blocking(
-    target: &str,
-    config: &AiConfig,
-) -> Result<AiTestResultDto, AppError> {
+pub fn ai_test_connection_blocking(config: &AiConfig) -> Result<AiTestResultDto, AppError> {
     let transport = ai::UreqTransport;
-    let started = std::time::Instant::now();
-    match target {
-        "chat" => {
-            if !config.chat_ready() {
-                return Ok(AiTestResultDto {
-                    ok: false,
-                    message: "请先填写对话模型 Base URL 与模型名称".to_owned(),
-                    latency_ms: 0,
-                    dimension: None,
-                });
-            }
-            let reply = transport.chat(config, "请只回复两个字：正常", None)?;
-            let latency = started.elapsed().as_millis() as u64;
-            Ok(AiTestResultDto {
-                ok: !reply.trim().is_empty(),
-                message: format!("模型 {} 已连通（{latency} ms）", config.chat_model),
-                latency_ms: latency,
-                dimension: None,
-            })
-        }
-        "embedding" => {
-            if !config.embedding_ready() {
-                return Ok(AiTestResultDto {
-                    ok: false,
-                    message: "请先填写 Embedding 模型 Base URL 与模型名称".to_owned(),
-                    latency_ms: 0,
-                    dimension: None,
-                });
-            }
-            let vector = transport.embed(config, "连通性测试")?;
-            let latency = started.elapsed().as_millis() as u64;
-            Ok(AiTestResultDto {
-                ok: true,
-                message: format!(
-                    "模型 {} 已连通，向量维度 {}（{latency} ms）",
-                    config.embedding_model,
-                    vector.len()
-                ),
-                latency_ms: latency,
-                dimension: Some(vector.len() as i64),
-            })
-        }
-        other => Err(AppError::invalid_argument(format!(
-            "不支持的测试目标: {other}"
-        ))),
+    if !config.chat_ready() {
+        return Ok(AiTestResultDto {
+            ok: false,
+            message: "请先选择或填写对话模型与接口地址".to_owned(),
+            latency_ms: 0,
+        });
     }
+    let started = std::time::Instant::now();
+    let reply = transport.chat(config, "请只回复两个字：正常", None)?;
+    let latency = started.elapsed().as_millis() as u64;
+    Ok(AiTestResultDto {
+        ok: !reply.trim().is_empty(),
+        message: format!("模型 {} 已连通（{latency} ms）", config.chat_model),
+        latency_ms: latency,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,8 +88,6 @@ pub struct AiStatsDto {
     processed: i64,
     failed: i64,
     pending: i64,
-    missing_embedding: i64,
-    embedding_model: Option<String>,
 }
 
 /// Counters for the settings AI card.
@@ -134,28 +97,15 @@ pub fn ai_stats(
     state: State<'_, InfrastructureState>,
 ) -> Result<AiStatsDto, AppError> {
     state.with_infrastructure(|infrastructure| {
-        let repository = infrastructure.repository();
-        let config = ai::load_config(repository).map_err(InfrastructureError::App)?;
-        let stats = repository
+        let stats = infrastructure
+            .repository()
             .ai_stats(&library_id)
             .map_err(infrastructure::InfrastructureError::database)?;
-        let missing_embedding = if config.embedding_ready() {
-            repository
-                .list_ai_missing_embeddings(&library_id, config.embedding_model.trim())
-                .map_err(infrastructure::InfrastructureError::database)?
-                .len() as i64
-        } else {
-            0
-        };
         Ok(AiStatsDto {
             total_photos: stats.total_photos,
             processed: stats.processed,
             failed: stats.failed,
             pending: stats.pending,
-            missing_embedding,
-            embedding_model: config
-                .embedding_ready()
-                .then(|| config.embedding_model.clone()),
         })
     })
 }
@@ -171,7 +121,7 @@ pub fn ai_process_preview(
         let repository = infrastructure.repository();
         let config = ai::load_config(repository).map_err(InfrastructureError::App)?;
         ai::validate_config_for_run(&config).map_err(InfrastructureError::App)?;
-        ai::preview(repository, &config, &library_id, mode).map_err(InfrastructureError::App)
+        ai::preview(repository, &library_id, mode).map_err(InfrastructureError::App)
     })
 }
 
@@ -406,7 +356,7 @@ pub fn ai_process_item_blocking(
         &root,
         &cache_dir,
     )? {
-        ai::AiItemOutcome::Tagged { .. } => {
+        ai::AiItemOutcome::Tagged => {
             let row = repository
                 .get_media_ai(media_item_id)
                 .map_err(AppError::from)?
@@ -431,11 +381,11 @@ pub fn ai_process_item_blocking(
     }
 }
 
-/// Natural-language semantic search over AI captions/embeddings.
+/// Natural-language search over AI captions/tags.
 ///
-/// Two network calls (query parsing + query embedding) sit behind this command,
-/// so it is async: the sync section grabs the config and database path, then the
-/// retrieval runs on a blocking worker against its own repository handle.
+/// One network call (query parsing) sits behind this command, so it is async:
+/// the sync section grabs the config and database path, then the retrieval runs
+/// on a blocking worker against its own repository handle.
 #[tauri::command]
 pub async fn ai_search(
     library_id: String,

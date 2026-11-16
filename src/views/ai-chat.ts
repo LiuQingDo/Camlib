@@ -41,7 +41,7 @@ export function renderAiSidebarSection(): string {
           ? `<div class="ai-single-notice">${escapeHtml(state.aiSingleNotice)}</div>`
           : ""
     }
-    <div class="ai-sidebar-actions"><button class="text-button" id="ai-chat-open" type="button">✬ AI 助手</button><button class="text-button" id="ai-semantic-focus" type="button">✦ 语义搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
+    <div class="ai-sidebar-actions"><button class="text-button" id="ai-chat-open" type="button">✬ AI 助手</button><button class="text-button" id="ai-semantic-focus" type="button">✦ AI 搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
   </div>`;
 }
 
@@ -88,7 +88,7 @@ export function renderAiChatMessage(message: AiChatUiMessage, index: number): st
     return `<div class="ai-chat-message is-user" data-chat-index="${index}"><div class="ai-chat-bubble">${escapeHtml(message.content)}</div></div>`;
   }
   const action = message.searchAction
-    ? `<button type="button" class="ai-chat-search-chip" data-chat-search="${escapeHtml(message.searchAction)}" title="用语义搜索在媒体库中查找">⌕ 执行语义搜索：${escapeHtml(message.searchAction)}</button>`
+    ? `<button type="button" class="ai-chat-search-chip" data-chat-search="${escapeHtml(message.searchAction)}" title="用 AI 搜索在媒体库中查找">⌕ 执行 AI 搜索：${escapeHtml(message.searchAction)}</button>`
     : "";
   return `<div class="ai-chat-message is-assistant" data-chat-index="${index}"><div class="ai-chat-bubble">${escapeHtml(message.content)}${message.streaming ? `<span class="ai-chat-caret" aria-hidden="true"></span>` : ""}</div>${action}</div>`;
 }
@@ -98,7 +98,7 @@ export function renderAiChatDrawer(): string {
   const ready = aiChatReady();
   const summary = aiChatContextSummary();
   const body = !ready
-    ? `<div class="ai-chat-empty"><span class="ai-chat-empty-icon" aria-hidden="true">✬</span><p>AI 助手需要在设置中启用 AI 增强，并填写对话模型的 Base URL 与模型名称。</p><button class="primary-button" id="ai-chat-goto-settings" type="button">去设置</button></div>`
+    ? `<div class="ai-chat-empty"><span class="ai-chat-empty-icon" aria-hidden="true">✬</span><p>AI 助手需要在设置中启用 AI 增强，并选好服务商与模型。</p><button class="primary-button" id="ai-chat-goto-settings" type="button">去设置</button></div>`
     : state.aiChatMessages.length === 0
       ? `<div class="ai-chat-empty"><span class="ai-chat-empty-icon" aria-hidden="true">✬</span><p>我是你的相册助手，可以试试：</p><ul><li>去年十月我拍了哪些照片？</li><li>帮我找海边的照片</li><li>这张照片里是什么？（预览时可用）</li></ul></div>`
       : state.aiChatMessages.map((message, index) => renderAiChatMessage(message, index)).join("");
@@ -163,7 +163,7 @@ export function splitSearchMarker(content: string): { content: string; query: st
 export function collectAiChatContext(): AiChatContextDto {
   const view: Record<string, unknown> = {};
   if (state.search) view["文件名搜索"] = state.search;
-  if (state.semanticSearch) view["语义搜索"] = state.semanticSearch;
+  if (state.semanticSearch) view["AI 搜索"] = state.semanticSearch;
   if (state.kind) view["类型"] = kindLabel(state.kind);
   if (state.datePrefix) view["日期"] = state.datePrefix;
   if (state.dateFrom) view["起始日期"] = state.dateFrom;

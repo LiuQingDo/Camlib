@@ -31,6 +31,9 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Changed
 
+- AI 增强取消 Embedding 模型与向量检索：模型配置从「对话 + embedding 两组」收成一套，语义检索改为对话模型解析出时间/类型条件 + 关键词，条件走 SQL、关键词匹配已生成的描述与标签后取交集；批量处理去掉「仅补算向量」。`media_ai` 的 `embedding` / `embedding_model` / `embedding_dim` 三列由迁移 `0009_ai_drop_embeddings.sql` 删除（schema v9）
+- AI 模型配置改为服务商卡片 + 模型下拉，不再要求手填 Base URL：OpenAI / 通义千问 / 智谱 GLM / Moonshot / DeepSeek / 硅基流动 / OpenRouter / Ollama / LM Studio 各带接口地址与常用模型，私有部署或清单外的模型走「自定义」；选中纯文本模型时提前提示打标不可用，配置改动先落草稿、保存或测试时才写库
+- 界面文案里的「语义搜索」统一改为「AI 搜索」，与"检索依据是描述与标签而不是向量"保持一致
 - 虚拟滚动的缩略图排队改为只处理本帧新建的卡片：原来每次挂载新行都要把整棵树拉出来、对每张卡读一次 `getBoundingClientRect`，而写入之后的读会当场触发一次强制同步回流——其中绝大多数卡片早就装载过，属于白读
 - 弹出层开关统一走 `render/overlay-transition.ts` 的过渡窗口，新增 `html.is-overlay-animating` 标记，进出场的动画只动 `opacity`/`transform` 两个合成属性
 - 滚动条改为常驻自定义样式：可拖拽热区 11px（透明 border 撑开，视觉仍是细条）、圆角拇指、hover/active 逐级加深，替换掉系统默认那条又窄又没有反馈的

@@ -47,7 +47,7 @@ export function hasAnyFilter(state: FilterState): boolean {
 /** Secondary toolbar conditions live under the collapsible「筛选」panel. */
 export function secondaryFilterParts(state: FilterState): string[] {
   const parts: string[] = [];
-  if (state.semanticSearch) parts.push("语义搜索");
+  if (state.semanticSearch) parts.push("AI 搜索");
   if (state.tagIds.size) parts.push(`标签×${state.tagIds.size}`);
   if (state.datePrefix || state.dateFrom || state.dateTo) parts.push("日期");
   if (state.firstSeenFrom) parts.push("新导入");

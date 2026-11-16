@@ -21,6 +21,7 @@ mod migrations {
     pub const BACKUP_MERGE: &str = include_str!("migrations/0006_backup_merge.sql");
     pub const AI_TAGS: &str = include_str!("migrations/0007_ai_tags.sql");
     pub const BACKUP_DEEP_VERIFY: &str = include_str!("migrations/0008_backup_deep_verify.sql");
+    pub const AI_DROP_EMBEDDINGS: &str = include_str!("migrations/0009_ai_drop_embeddings.sql");
 }
 
 mod queries;
@@ -46,7 +47,7 @@ pub use queries::ai::*;
 
 pub type DbResult<T> = Result<T, DbError>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -289,6 +290,15 @@ fn apply_migrations(connection: &mut Connection) -> DbResult<()> {
         )?;
         transaction.commit()?;
     }
+    if max_version < 9 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(migrations::AI_DROP_EMBEDDINGS)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [9_i64],
+        )?;
+        transaction.commit()?;
+    }
     Ok(())
 }
 
@@ -343,7 +353,7 @@ mod tests {
     #[test]
     fn migrations_are_repeatable_and_create_required_tables_and_indexes() {
         let mut repository = Repository::open_in_memory().unwrap();
-        assert_eq!(repository.schema_version().unwrap(), 8);
+        assert_eq!(repository.schema_version().unwrap(), 9);
         apply_migrations(&mut repository.connection).unwrap();
         let tables: i64 = repository.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('libraries','media_items','media_files','favorites','tags','media_tags','media_ratings','backup_runs','backup_items','app_settings','deletion_logs','media_ai','media_ai_tags')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 13);
@@ -374,6 +384,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_deep_verify_column, 1);
+        let embedding_columns: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('media_ai')
+                 WHERE name IN ('embedding', 'embedding_model', 'embedding_dim')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(embedding_columns, 0);
     }
 }
 

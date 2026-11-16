@@ -1,13 +1,14 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { AiRunMode } from "../api/ai";
 import {
-  formatCaptureAt,
-  formatCount,
-  formatEtaSeconds,
-  formatSize,
-  formatSpeed,
-  truncatePath,
-} from "../lib/format";
+  AI_PROVIDERS,
+  CUSTOM_MODEL_ID,
+  findProvider,
+  isPresetModel,
+  modelSupportsVision,
+  resolveProviderId,
+} from "../lib/ai-providers";
+import { formatCaptureAt, formatCount, formatEtaSeconds, formatSize, formatSpeed, truncatePath } from "../lib/format";
 import { app } from "../render/context";
 import { bindSettingsEvents, persistUiPrefs, render } from "../render/paint";
 import {
@@ -270,9 +271,9 @@ export function renderSettingsBackupSection(): string {
   </div>`;
 }
 
-/** AI 增强（可选）：总开关、两组模型配置、连通性测试、批量处理入口。 */
+/** AI 增强（可选）：服务商/模型选择、连通性测试、批量处理入口。 */
 export function renderSettingsAiSection(): string {
-  const config = state.aiConfig;
+  const config = state.aiDraft ?? state.aiConfig;
   if (!config) {
     return `<div class="settings-section-body"><div class="settings-status-card"><div class="settings-note">加载 AI 配置…</div></div></div>`;
   }
@@ -283,52 +284,97 @@ export function renderSettingsAiSection(): string {
       ? Math.min(100, Math.max(0, Math.round((progress.processed / progress.total) * 100)))
       : 0;
   const stats = state.aiStats;
-  const testPill = (target: "chat" | "embedding"): string => {
-    const result = state.aiTestResult?.target === target ? state.aiTestResult : null;
-    if (!result) return "";
-    return `<span class="ai-test-pill ${result.ok ? "is-ok" : "is-error"}">${escapeHtml(result.message)}</span>`;
-  };
+  const testResult = state.aiTestResult;
+  const providerId = resolveProviderId(config.provider, config.chatBaseUrl);
+  const provider = findProvider(providerId);
+  const presetModel = isPresetModel(providerId, config.chatModel);
+  const customModel = provider.custom || !presetModel;
+  const visionOk = modelSupportsVision(providerId, config.chatModel);
   const preview = state.aiPreview;
+  const keyField = `<label class="ai-field ai-field-key"><span>API Key</span><span class="ai-key-row"><input id="settings-ai-chat-key" type="${state.aiKeyVisible ? "text" : "password"}" value="${escapeHtml(config.chatApiKey)}" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(provider.keyPlaceholder)}" /><button class="text-button" type="button" id="settings-ai-key-toggle" aria-label="显示或隐藏 API Key">${state.aiKeyVisible ? "隐藏" : "显示"}</button></span></label>`;
+  const modelNameField = `<label class="ai-field ai-model-line"><span>模型名称</span><input id="settings-ai-model-custom" value="${escapeHtml(config.chatModel)}" spellcheck="false" placeholder="${provider.custom ? "例如 gpt-4o-mini / qwen-vl-max" : "手填服务商支持的模型 ID"}" /></label>`;
   const modeLabels: Record<AiRunMode, string> = {
-    incremental: "增量处理（仅未处理 + 补算向量）",
+    incremental: "增量处理（仅未处理过的照片）",
     full: "全量重跑（重新打标所有照片）",
     retry: "仅重试失败项",
-    embeddings: "仅补算描述向量（不重新打标）",
   };
   return `<div class="settings-section-body">
     <div class="settings-status-card">
-      <h3>AI 自动打标与语义搜索</h3>
-      <div class="settings-note">可选增强功能，<strong>默认关闭</strong>。开启并执行处理后，照片缩略图（约 512px 压缩图，非原图）将发送到你配置的第三方 API；标签与描述保存在本地索引中。</div>
-      <label class="settings-checkbox"><input type="checkbox" id="settings-ai-enabled" ${config.enabled ? "checked" : ""} /><span>启用 AI 增强（对话模型打标 + 语义搜索）</span></label>
+      <div class="ai-card-head">
+        <div class="ai-card-title">
+          <h3>AI 模型</h3>
+          <p class="settings-note">可选增强，<strong>默认关闭</strong>。开启并执行处理后，照片缩略图（约 512px 压缩图，非原图）会发送到你选择的服务商；标签与描述只存在本地索引。</p>
+        </div>
+        <label class="ai-switch" title="启用 AI 增强">
+          <input type="checkbox" id="settings-ai-enabled" ${config.enabled ? "checked" : ""} aria-label="启用 AI 增强" />
+          <span class="ai-switch-track"><span class="ai-switch-thumb"></span></span>
+        </label>
+      </div>
+      <div class="ai-provider-grid" role="radiogroup" aria-label="服务商">
+        ${AI_PROVIDERS.map(
+          (
+            item,
+          ) => `<button type="button" class="ai-provider-card ${item.id === providerId ? "is-active" : ""}" role="radio" aria-checked="${item.id === providerId}" data-ai-provider="${item.id}">
+          <span class="ai-provider-mark">${escapeHtml(item.mark)}</span>
+          <span class="ai-provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.hint)}</span></span>
+        </button>`,
+        ).join("")}
+      </div>
+      ${
+        provider.custom
+          ? `<div class="ai-field-row">
+        <label class="ai-field"><span>接口地址</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>
+        ${keyField}
+      </div>
+      ${modelNameField}`
+          : `<div class="ai-field-row">
+        <label class="ai-field">
+          <span>模型</span>
+          <select id="settings-ai-model">
+            ${provider.models
+              .map(
+                (option) =>
+                  `<option value="${escapeHtml(option.id)}" ${option.id === config.chatModel.trim() ? "selected" : ""}>${escapeHtml(`${option.label}${option.note ? ` · ${option.note}` : ""}`)}</option>`,
+              )
+              .join("")}
+            <option value="${CUSTOM_MODEL_ID}" ${customModel ? "selected" : ""}>自定义模型…</option>
+          </select>
+        </label>
+        ${keyField}
+      </div>
+      ${customModel ? modelNameField : ""}
+      <div class="ai-endpoint">接口地址 <code>${escapeHtml(provider.baseUrl)}</code></div>`
+      }
+      ${!visionOk ? `<div class="settings-note is-warning">当前模型不支持图片输入：助手对话与搜索解析可用，但自动打标会失败。需要打标请换用带视觉的模型。</div>` : ""}
+      <div class="ai-actions-row">
+        <button class="primary-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存配置"}</button>
+        <button class="outline-button" type="button" id="settings-ai-test" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy ? "测试中…" : "测试连接"}</button>
+        ${
+          testResult
+            ? `<span class="ai-test-pill ${testResult.ok ? "is-ok" : "is-error"}">${escapeHtml(testResult.message)}</span>`
+            : `<span class="ai-hint-inline">${config.enabled ? "配置已保存并启用" : "保存后需打开上方开关才会启用"}</span>`
+        }
+      </div>
+      <details class="ai-advanced">
+        <summary>高级设置</summary>
+        <div class="settings-form">
+          ${provider.custom ? "" : `<label><span>接口地址（Base URL）</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>`}
+          <label><span>并发请求数</span><select id="settings-ai-concurrency">
+            ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
+          </select></label>
+        </div>
+        <div class="settings-note">接口地址一般填到 /v1 这一级，不要带 /chat/completions。切换服务商会自动填好地址；自定义服务商必须自己填。</div>
+      </details>
       ${
         stats
-          ? `<dl class="settings-kv">
+          ? `<dl class="settings-kv ai-stats">
         <div><dt>可处理照片</dt><dd>${formatCount(stats.totalPhotos)}</dd></div>
         <div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div>
         <div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div>
-        <div><dt>失败</dt><dd>${formatCount(stats.failed)}</dd></div>
-        <div><dt>缺向量</dt><dd>${formatCount(stats.missingEmbedding)}</dd></div>
-      </dl>${stats.embeddingModel ? `<div class="settings-note">当前向量模型：${escapeHtml(stats.embeddingModel)}。更换模型后需「全量重跑」重新计算向量。</div>` : `<div class="settings-note">未配置 Embedding 模型：语义搜索将降级为描述/标签关键字匹配。</div>`}`
+        <div><dt>失败</dt><dd class="${stats.failed > 0 ? "is-danger" : ""}">${formatCount(stats.failed)}</dd></div>
+      </dl>`
           : `<div class="settings-note">统计需要已配置的媒体库。</div>`
       }
-      <div class="settings-form">
-        <label><span>对话模型 Base URL</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://api.openai.com/v1" /></label>
-        <label><span>对话模型名称</span><input id="settings-ai-chat-model" value="${escapeHtml(config.chatModel)}" spellcheck="false" placeholder="gpt-4o-mini / qwen-vl-…（需支持图片输入）" /></label>
-        <label><span>对话模型 API Key</span><input id="settings-ai-chat-key" type="password" value="${escapeHtml(config.chatApiKey)}" spellcheck="false" placeholder="本地服务的兼容接口可留空" /></label>
-        <label><span>Embedding Base URL</span><input id="settings-ai-embed-url" value="${escapeHtml(config.embeddingBaseUrl)}" spellcheck="false" placeholder="https://api.openai.com/v1（留空则停用向量检索）" /></label>
-        <label><span>Embedding 模型名称</span><input id="settings-ai-embed-model" value="${escapeHtml(config.embeddingModel)}" spellcheck="false" placeholder="text-embedding-3-small / bge-…" /></label>
-        <label><span>Embedding API Key</span><input id="settings-ai-embed-key" type="password" value="${escapeHtml(config.embeddingApiKey)}" spellcheck="false" placeholder="留空则沿用对话模型 Key 不发送鉴权头" /></label>
-        <label><span>并发请求数</span><select id="settings-ai-concurrency">
-          ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
-        </select></label>
-        <div class="settings-actions">
-          <button class="primary-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存 AI 配置"}</button>
-          <button class="outline-button" type="button" id="settings-ai-test-chat" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy === "chat" ? "测试中…" : "测试对话模型"}</button>
-          <button class="outline-button" type="button" id="settings-ai-test-embed" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy === "embedding" ? "测试中…" : "测试 Embedding"}</button>
-        </div>
-        ${testPill("chat")}${testPill("embedding")}
-      </div>
-      <div class="settings-note">Base URL 填到 /v1 这一级；任何支持图片输入的 OpenAI 兼容对话模型均可。</div>
     </div>
     <div class="settings-status-card">
       <h3>批量处理</h3>
@@ -345,10 +391,10 @@ export function renderSettingsAiSection(): string {
       ${
         preview && preview.mode === state.aiProcessMode
           ? `<dl class="settings-kv">
-        <div><dt>预计 API 调用</dt><dd>${formatCount(preview.estimatedCalls)} 次（对话 ${formatCount(preview.chatCalls)} + 向量 ${formatCount(preview.embeddingCalls)}）</dd></div>
-        <div><dt>涉及照片</dt><dd>${formatCount(preview.mode === "full" ? preview.totalPhotos : preview.mode === "retry" ? preview.failed : preview.pending + preview.missingEmbedding)}</dd></div>
+        <div><dt>预计 API 调用</dt><dd>${formatCount(preview.estimatedCalls)} 次</dd></div>
+        <div><dt>涉及照片</dt><dd>${formatCount(preview.mode === "full" ? preview.totalPhotos : preview.mode === "retry" ? preview.failed : preview.pending)}</dd></div>
       </dl>
-      ${state.aiConfirming ? `<div class="settings-confirm"><span>将向上方配置的第三方 API 发送约 ${formatCount(preview.estimatedCalls)} 次请求，确认执行？</span><button class="outline-button" type="button" id="settings-ai-start-cancel">取消</button><button class="primary-button" type="button" id="settings-ai-start-confirm">确认执行</button></div>` : ""}`
+      ${state.aiConfirming ? `<div class="settings-confirm"><span>将向所选服务商发送约 ${formatCount(preview.estimatedCalls)} 次请求，确认执行？</span><button class="outline-button" type="button" id="settings-ai-start-cancel">取消</button><button class="primary-button" type="button" id="settings-ai-start-confirm">确认执行</button></div>` : ""}`
           : ""
       }
       ${

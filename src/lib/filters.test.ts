@@ -105,7 +105,7 @@ describe("secondaryFilterParts", () => {
         ratingMin: 3,
       }),
     );
-    expect(all).toEqual(["语义搜索", "标签×2", "日期", "新导入", "评分"]);
+    expect(all).toEqual(["AI 搜索", "标签×2", "日期", "新导入", "评分"]);
   });
 
   it("reports rating 0 as a rating filter and counts tags exactly", () => {

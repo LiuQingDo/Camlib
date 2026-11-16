@@ -1,18 +1,17 @@
-//! Optional AI enhancement over user-configured OpenAI-compatible endpoints.
+//! Optional AI enhancement over a user-configured OpenAI-compatible endpoint.
 //!
-//! Two endpoint groups power both features and are configured independently:
-//! ① a multimodal chat model that tags each photo thumbnail and writes a
-//! one-line Chinese caption, and parses natural-language search queries into
-//! structured conditions; ② a text embedding model that vectorises captions
-//! (and queries) so cosine retrieval can answer "去年秋天湖边的照片".
+//! One multimodal chat model powers every AI feature: it tags each photo
+//! thumbnail and writes a one-line Chinese caption, and parses natural-language
+//! search queries into structured conditions plus a keyword phrase that is
+//! matched against the stored captions/tags.
 //!
 //! Privacy: the feature is off by default. Thumbnail JPEGs (~512px, reused
 //! from the local cache pipeline) are only sent to the configured third-party
 //! API after the user explicitly enables AI and starts a run.
 
 use crate::db::{
-    AiEmbeddingRow, AiStats, AiWorkItem, MediaAiRow, MediaAiUpsert, MediaItemDetails, MediaKind,
-    MediaQuery, MediaSort, Repository,
+    AiStats, AiWorkItem, MediaAiRow, MediaAiUpsert, MediaItemDetails, MediaKind, MediaQuery,
+    MediaSort, Repository,
 };
 use crate::errors::AppError;
 use crate::media;
@@ -32,10 +31,7 @@ const CONFIG_KEY: &str = "ai_config";
 const AI_TAG_PREFIX: &str = "ai-tag-";
 /// Thumbnails are recompressed by the cache pipeline; 512px keeps tokens low.
 const AI_THUMBNAIL_WIDTH: u32 = 512;
-/// Brute-force cosine search keeps a bounded candidate list (no sqlite-vec).
-const VECTOR_TOP_K: usize = 200;
-const MIN_COSINE_SCORE: f32 = 0.2;
-/// LIKE fallback stays bounded to keep the final SQL parameter list small.
+/// LIKE retrieval stays bounded to keep the final SQL parameter list small.
 const TEXT_FALLBACK_LIMIT: usize = 500;
 const MAX_CHAT_ATTEMPTS: u32 = 3;
 const MAX_TAGS_PER_PHOTO: usize = 10;
@@ -86,12 +82,13 @@ static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 pub struct AiConfig {
     /// Master switch. Off means no network call is ever made.
     pub enabled: bool,
+    /// Provider preset id picked in the settings page (`openai`, `deepseek`,
+    /// `custom`, …). Persisted so the UI restores the same card; the request
+    /// path itself only reads `chat_base_url` + `chat_model`.
+    pub provider: String,
     pub chat_base_url: String,
     pub chat_model: String,
     pub chat_api_key: String,
-    pub embedding_base_url: String,
-    pub embedding_model: String,
-    pub embedding_api_key: String,
     /// Parallel photo workers, clamped to 1..=4.
     pub concurrency: u32,
 }
@@ -100,12 +97,10 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: String::new(),
             chat_base_url: String::new(),
             chat_model: String::new(),
             chat_api_key: String::new(),
-            embedding_base_url: String::new(),
-            embedding_model: String::new(),
-            embedding_api_key: String::new(),
             concurrency: 2,
         }
     }
@@ -117,12 +112,6 @@ impl AiConfig {
         !self.chat_model.trim().is_empty() && Self::url_ok(&self.chat_base_url)
     }
 
-    /// Whether embeddings can be called; semantic search degrades to caption
-    /// LIKE matching otherwise.
-    pub fn embedding_ready(&self) -> bool {
-        !self.embedding_model.trim().is_empty() && Self::url_ok(&self.embedding_base_url)
-    }
-
     fn url_ok(url: &str) -> bool {
         let trimmed = url.trim();
         trimmed.starts_with("http://") || trimmed.starts_with("https://")
@@ -130,35 +119,19 @@ impl AiConfig {
 
     /// Trim inputs and enforce invariants. Returns the normalized copy.
     pub fn normalized(mut self) -> Result<Self, AppError> {
+        self.provider = self.provider.trim().to_lowercase();
         self.chat_base_url = self.chat_base_url.trim().trim_end_matches('/').to_owned();
         self.chat_model = self.chat_model.trim().to_owned();
         self.chat_api_key = self.chat_api_key.trim().to_owned();
-        self.embedding_base_url = self
-            .embedding_base_url
-            .trim()
-            .trim_end_matches('/')
-            .to_owned();
-        self.embedding_model = self.embedding_model.trim().to_owned();
-        self.embedding_api_key = self.embedding_api_key.trim().to_owned();
         self.concurrency = self.concurrency.clamp(1, 4);
         if self.enabled {
             if !Self::url_ok(&self.chat_base_url) {
                 return Err(AppError::invalid_argument(
-                    "对话模型 Base URL 无效，需以 http(s):// 开头（一般填到 /v1 这一级）",
+                    "对话模型接口地址无效，需以 http(s):// 开头（一般填到 /v1 这一级）",
                 ));
             }
             if self.chat_model.is_empty() {
-                return Err(AppError::invalid_argument("请填写对话模型名称"));
-            }
-            if !self.embedding_base_url.is_empty() && !Self::url_ok(&self.embedding_base_url) {
-                return Err(AppError::invalid_argument(
-                    "Embedding 模型 Base URL 无效，需以 http(s):// 开头",
-                ));
-            }
-            if !self.embedding_base_url.is_empty() && self.embedding_model.is_empty() {
-                return Err(AppError::invalid_argument(
-                    "已填写 Embedding 服务地址，请同时填写模型名称（或清空地址停用语义向量检索）",
-                ));
+                return Err(AppError::invalid_argument("请选择或填写对话模型名称"));
             }
         }
         Ok(self)
@@ -189,7 +162,7 @@ pub fn validate_config_for_run(config: &AiConfig) -> Result<(), AppError> {
     }
     if !config.chat_ready() {
         return Err(AppError::invalid_argument(
-            "对话模型未配置完整（Base URL 与模型名称必填）",
+            "对话模型未配置完整（接口地址与模型名称必填）",
         ));
     }
     Ok(())
@@ -260,7 +233,7 @@ pub struct AiChatOutcome {
 
 // ── Transport (OpenAI-compatible HTTP) ──────────────────────────────────────
 
-/// Abstraction over the two HTTP calls so batch logic is unit-testable.
+/// Abstraction over the HTTP calls so batch logic is unit-testable.
 pub trait AiTransport: Send + Sync {
     /// One chat completion. `image_jpeg` attaches the thumbnail as a data URL.
     fn chat(
@@ -280,9 +253,6 @@ pub trait AiTransport: Send + Sync {
         image_jpeg: Option<&[u8]>,
         on_delta: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, AppError>;
-
-    /// One text embedding vector.
-    fn embed(&self, config: &AiConfig, text: &str) -> Result<Vec<f32>, AppError>;
 }
 
 /// Default `ureq` implementation; blocking by design (workers are OS threads).
@@ -474,32 +444,6 @@ impl AiTransport for UreqTransport {
         }
         Ok(full)
     }
-
-    fn embed(&self, config: &AiConfig, text: &str) -> Result<Vec<f32>, AppError> {
-        let body = json!({
-            "model": config.embedding_model,
-            "input": [text],
-        });
-        let agent = Self::agent();
-        let mut request = agent.post(format!("{}/embeddings", config.embedding_base_url).as_str());
-        if let Some((name, value)) = authorization_header(&config.embedding_api_key) {
-            request = request.set(name, &value);
-        }
-        let response = request
-            .send_json(body)
-            .map_err(|error| map_http_error("Embedding 请求", error))?;
-        let value: serde_json::Value = response
-            .into_json()
-            .map_err(|error| AppError::io(format!("Embedding 响应解析失败: {error}")))?;
-        let vector = value
-            .pointer("/data/0/embedding")
-            .and_then(|embedding| serde_json::from_value::<Vec<f32>>(embedding.clone()).ok())
-            .ok_or_else(|| AppError::internal("Embedding 响应缺少 data[0].embedding"))?;
-        if vector.is_empty() {
-            return Err(AppError::internal("Embedding 返回了空向量"));
-        }
-        Ok(vector)
-    }
 }
 
 // ── LLM output parsing ──────────────────────────────────────────────────────
@@ -580,7 +524,7 @@ pub struct ParsedQuery {
     /// Inclusive `YYYY-MM-DD` upper bound, or None.
     pub date_to: Option<String>,
     pub kind: Option<String>,
-    /// Remaining semantic text used for embedding / LIKE retrieval.
+    /// Remaining keyword phrase used for caption/tag LIKE retrieval.
     pub keywords: Option<String>,
 }
 
@@ -635,61 +579,25 @@ fn query_parse_prompt(query: &str, today: &str) -> String {
     format!(
         "今天是 {today}。把用户的照片库搜索请求解析为 JSON：\
 {{\"date_from\": \"YYYY-MM-DD 或 null\", \"date_to\": \"YYYY-MM-DD 或 null\", \
-\"kind\": \"photo\" 或 \"video\" 或 null, \"keywords\": \"剩余语义描述\"}}。\
+\"kind\": \"photo\" 或 \"video\" 或 null, \"keywords\": \"剩余描述词\"}}。\
 规则：相对时间（去年、上个月、今年、上周、最近三天等）按今天推算为绝对日期区间，跨年区间用 1 月 1 日到 12 月 31 日；\
 \"照片/图片\"→photo，\"视频\"→video；无法判断的字段填 null；\
-keywords 保留主体、场景、风格等语义信息，去掉已解析为条件的时间与类型词。只输出 JSON。\
+keywords 保留主体、场景、风格等描述信息（会用于匹配照片描述与标签），去掉已解析为条件的时间与类型词。只输出 JSON。\
 用户请求：{query}"
     )
 }
 
-// ── Vector helpers ──────────────────────────────────────────────────────────
-
-fn f32_slice_to_le_bytes(vector: &[f32]) -> Vec<u8> {
-    vector
-        .iter()
-        .flat_map(|value| value.to_bits().to_le_bytes())
-        .collect()
-}
-
-fn le_bytes_to_f32_slice(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|chunk| f32::from_bits(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
-        .collect()
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
-    if a.is_empty() || a.len() != b.len() {
-        return None;
-    }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for (left, right) in a.iter().zip(b.iter()) {
-        dot += left * right;
-        norm_a += left * left;
-        norm_b += right * right;
-    }
-    if norm_a <= f32::EPSILON || norm_b <= f32::EPSILON {
-        return None;
-    }
-    Some(dot / (norm_a.sqrt() * norm_b.sqrt()))
-}
-
 // ── Single-item pipeline ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiItemOutcome {
-    /// Tags + caption (+ embedding) written.
-    Tagged { embedding_warning: Option<String> },
+    /// Tags + caption written.
+    Tagged,
     /// Thumbnail unavailable — the item stays pending for a later run.
     Skipped,
 }
 
-/// Run the full description pipeline for one media item. Thumbnail problems
+/// Run the description pipeline for one media item. Thumbnail problems
 /// surface as `Ok(Skipped)` so the item stays pending instead of failed; any
 /// other failure becomes an `Err` the caller persists as a failed row.
 pub fn process_item(
@@ -719,10 +627,7 @@ pub fn process_item(
             media_item_id: &details.item.id,
             caption: Some(&description.caption),
             tags_json: Some(&tags_json),
-            embedding: None,
-            embedding_model: None,
             ai_model: Some(config.chat_model.as_str()),
-            embedding_dim: None,
             status: "success",
             error_message: None,
             processed_at: Some(&now),
@@ -732,71 +637,7 @@ pub fn process_item(
         .replace_ai_tags(&details.item.id, &description.tags, AI_TAG_PREFIX, &now)
         .map_err(AppError::from)?;
 
-    let embedding_warning = embed_caption(
-        repository,
-        transport,
-        config,
-        &details.item.id,
-        &description.caption,
-    )?;
-    Ok(AiItemOutcome::Tagged { embedding_warning })
-}
-
-/// Embed-only refresh for rows that already carry a caption but no current-
-/// model vector (first run had embeddings disabled, or the model changed).
-pub fn embed_existing(
-    repository: &Repository,
-    transport: &dyn AiTransport,
-    config: &AiConfig,
-    media_item_id: &str,
-) -> Result<(), AppError> {
-    let row = repository
-        .get_media_ai(media_item_id)
-        .map_err(AppError::from)?
-        .ok_or_else(|| AppError::media_missing("AI 记录不存在"))?;
-    if row.status != "success" {
-        return Err(AppError::invalid_argument("该条目尚未成功打标"));
-    }
-    let caption = row
-        .caption
-        .filter(|caption| !caption.trim().is_empty())
-        .ok_or_else(|| AppError::invalid_argument("该条目缺少描述文本，无法生成向量"))?;
-    embed_caption(repository, transport, config, media_item_id, &caption)?;
-    Ok(())
-}
-
-/// Persist the caption vector. A failure here does NOT undo a successful tag
-/// write; the warning is surfaced and the next run backfills the vector.
-fn embed_caption(
-    repository: &Repository,
-    transport: &dyn AiTransport,
-    config: &AiConfig,
-    media_item_id: &str,
-    caption: &str,
-) -> Result<Option<String>, AppError> {
-    if !config.embedding_ready() {
-        return Ok(Some(
-            "未配置 Embedding 模型，本次仅写入标签与描述".to_owned(),
-        ));
-    }
-    match transport.embed(config, caption) {
-        Ok(vector) => {
-            let dim = vector.len() as i64;
-            let bytes = f32_slice_to_le_bytes(&vector);
-            repository
-                .set_media_ai_embedding(
-                    media_item_id,
-                    &bytes,
-                    config.embedding_model.trim(),
-                    dim,
-                    &timestamp_now(),
-                )
-                .map_err(AppError::from)?;
-            Ok(None)
-        }
-        // Keep the tag success; report the embedding problem for the run log.
-        Err(error) => Ok(Some(format!("Embedding 生成失败: {error}"))),
-    }
+    Ok(AiItemOutcome::Tagged)
 }
 
 /// Chat with bounded exponential backoff on retryable failures.
@@ -837,14 +678,12 @@ fn chat_with_retry(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiRunMode {
-    /// Items without an AI row, plus embedding backfill for captioned rows.
+    /// Items without an AI row.
     Incremental,
-    /// Re-tag and re-embed every eligible photo.
+    /// Re-tag every eligible photo.
     Full,
     /// Only items whose last attempt failed.
     Retry,
-    /// Re-embed existing captions without new chat calls.
-    Embeddings,
 }
 
 impl AiRunMode {
@@ -853,7 +692,6 @@ impl AiRunMode {
             "incremental" => Ok(Self::Incremental),
             "full" => Ok(Self::Full),
             "retry" => Ok(Self::Retry),
-            "embeddings" => Ok(Self::Embeddings),
             other => Err(AppError::invalid_argument(format!(
                 "未知的处理模式: {other}"
             ))),
@@ -956,17 +794,13 @@ pub struct AiProcessPreviewDto {
     pub processed: i64,
     pub failed: i64,
     pub pending: i64,
-    /// Succeeded rows missing a current-model embedding.
-    pub missing_embedding: i64,
     pub chat_calls: i64,
-    pub embedding_calls: i64,
     pub estimated_calls: i64,
 }
 
 /// Aggregate counts per mode before the user confirms a run.
 pub fn preview(
     repository: &Repository,
-    config: &AiConfig,
     library_id: &str,
     mode: AiRunMode,
 ) -> Result<AiProcessPreviewDto, AppError> {
@@ -976,20 +810,10 @@ pub fn preview(
         failed,
         pending,
     } = repository.ai_stats(library_id).map_err(AppError::from)?;
-    let missing_embedding = if config.embedding_ready() {
-        repository
-            .list_ai_missing_embeddings(library_id, config.embedding_model.trim())
-            .map_err(AppError::from)?
-            .len() as i64
-    } else {
-        0
-    };
-    let (chat_calls, embedding_calls) = match mode {
-        AiRunMode::Incremental => (pending, pending + missing_embedding),
-        AiRunMode::Full => (total_photos, total_photos),
-        AiRunMode::Retry => (failed, failed),
-        // Re-embeddings reuse stored captions; no chat calls.
-        AiRunMode::Embeddings => (0, missing_embedding),
+    let chat_calls = match mode {
+        AiRunMode::Incremental => pending,
+        AiRunMode::Full => total_photos,
+        AiRunMode::Retry => failed,
     };
     Ok(AiProcessPreviewDto {
         mode,
@@ -997,10 +821,8 @@ pub fn preview(
         processed,
         failed,
         pending,
-        missing_embedding,
         chat_calls,
-        embedding_calls,
-        estimated_calls: chat_calls + embedding_calls,
+        estimated_calls: chat_calls,
     })
 }
 
@@ -1058,11 +880,8 @@ impl SharedProgress {
     fn record(&self, item: &WorkItem, outcome: Result<AiItemOutcome, AppError>) {
         self.processed.fetch_add(1, Ordering::Relaxed);
         match outcome {
-            Ok(AiItemOutcome::Tagged { embedding_warning }) => {
+            Ok(AiItemOutcome::Tagged) => {
                 self.succeeded.fetch_add(1, Ordering::Relaxed);
-                if let Some(warning) = embedding_warning {
-                    self.push_error(format!("{}: {warning}", item.display_name));
-                }
             }
             Ok(AiItemOutcome::Skipped) => {
                 self.skipped.fetch_add(1, Ordering::Relaxed);
@@ -1083,19 +902,10 @@ impl SharedProgress {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkKind {
-    /// Tag + caption + embedding.
-    Full,
-    /// Embedding backfill only.
-    EmbedOnly,
-}
-
 #[derive(Debug, Clone)]
 struct WorkItem {
     media_item_id: String,
     display_name: String,
-    kind: WorkKind,
 }
 
 /// Spawn the background run thread. `spawn_scan` style: lib.rs only starts it.
@@ -1157,7 +967,7 @@ fn run_batch(
         Ok(config) => config,
         Err(error) => return abort(error.message),
     };
-    let work = match build_work_list(&repository, &config, library_id, mode) {
+    let work = match build_work_list(&repository, library_id, mode) {
         Ok(work) => work,
         Err(error) => return abort(error.message),
     };
@@ -1230,27 +1040,16 @@ fn execute_work_item(
     root: &Path,
     cache_dir: &Path,
 ) -> Result<AiItemOutcome, AppError> {
-    match item.kind {
-        WorkKind::Full => {
-            let details = repository
-                .get_media_item_details(&item.media_item_id)
-                .map_err(AppError::from)?
-                .ok_or_else(|| AppError::media_missing("媒体不存在"))?;
-            process_item(repository, transport, config, &details, root, cache_dir)
-        }
-        WorkKind::EmbedOnly => {
-            embed_existing(repository, transport, config, &item.media_item_id)?;
-            Ok(AiItemOutcome::Tagged {
-                embedding_warning: None,
-            })
-        }
-    }
+    let details = repository
+        .get_media_item_details(&item.media_item_id)
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::media_missing("媒体不存在"))?;
+    process_item(repository, transport, config, &details, root, cache_dir)
 }
 
 /// Decide which items this run touches, honouring the mode semantics.
 fn build_work_list(
     repository: &Repository,
-    config: &AiConfig,
     library_id: &str,
     mode: AiRunMode,
 ) -> Result<Vec<WorkItem>, AppError> {
@@ -1268,16 +1067,15 @@ fn build_work_list(
             (candidate.media_item_id.clone(), row)
         })
         .collect();
-    let to_item = |candidate: &AiWorkItem, kind: WorkKind| WorkItem {
+    let to_item = |candidate: &AiWorkItem| WorkItem {
         media_item_id: candidate.media_item_id.clone(),
         display_name: candidate.display_name.clone(),
-        kind,
     };
 
     let mut work: Vec<WorkItem> = Vec::new();
     match mode {
         AiRunMode::Full => {
-            work.extend(candidates.iter().map(|item| to_item(item, WorkKind::Full)));
+            work.extend(candidates.iter().map(to_item));
         }
         AiRunMode::Retry => {
             for candidate in &candidates {
@@ -1286,38 +1084,18 @@ fn build_work_list(
                     .and_then(|row| row.as_ref())
                     .is_some_and(|row| row.status == "failed")
                 {
-                    work.push(to_item(candidate, WorkKind::Full));
+                    work.push(to_item(candidate));
                 }
             }
         }
         AiRunMode::Incremental => {
             for candidate in &candidates {
-                match rows
+                if rows
                     .get(&candidate.media_item_id)
                     .and_then(|row| row.as_ref())
+                    .is_none()
                 {
-                    None => work.push(to_item(candidate, WorkKind::Full)),
-                    Some(row) if row.status == "success" && needs_embedding(row, config) => {
-                        work.push(to_item(candidate, WorkKind::EmbedOnly));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        AiRunMode::Embeddings => {
-            if !config.embedding_ready() {
-                return Err(AppError::invalid_argument(
-                    "未配置 Embedding 模型，无法执行向量补算",
-                ));
-            }
-            for candidate in &candidates {
-                if let Some(row) = rows
-                    .get(&candidate.media_item_id)
-                    .and_then(|row| row.as_ref())
-                {
-                    if row.status == "success" && needs_embedding(row, config) {
-                        work.push(to_item(candidate, WorkKind::EmbedOnly));
-                    }
+                    work.push(to_item(candidate));
                 }
             }
         }
@@ -1325,14 +1103,7 @@ fn build_work_list(
     Ok(work)
 }
 
-fn needs_embedding(row: &MediaAiRow, config: &AiConfig) -> bool {
-    match (&row.embedding, &row.embedding_model) {
-        (Some(_), Some(model)) => model != config.embedding_model.trim(),
-        _ => true,
-    }
-}
-
-// ── Semantic search ─────────────────────────────────────────────────────────
+// ── Natural-language search ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1341,18 +1112,17 @@ pub struct AiSearchResult {
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
-    /// "vector" (embedding retrieval), "text" (caption/tags LIKE fallback) or
-    /// "structured" (pure SQL conditions when the query carried no semantics).
+    /// "text" (caption/tags LIKE on the parsed keyword phrase) or "structured"
+    /// (pure SQL conditions when the query carried no semantic residue).
     pub mode: &'static str,
     pub parsed: ParsedQuery,
 }
 
 /// Two-stage retrieval: the chat model turns the query into structured
-/// conditions + remaining semantic text. Structured conditions filter via SQL
-/// while the semantic text is matched by vectors (intersection), or by
-/// caption/tags LIKE when no embedding model is configured. A query with
-/// structured conditions but no semantic residue skips vector scoring so pure
-/// time/type questions keep exact SQL semantics.
+/// conditions + a remaining keyword phrase. Structured conditions filter via
+/// SQL while the keyword phrase is matched against stored captions/tags
+/// (intersection). A query with structured conditions but no semantic residue
+/// skips keyword matching so pure time/type questions keep exact SQL semantics.
 pub fn search(
     repository: &Repository,
     transport: &dyn AiTransport,
@@ -1373,7 +1143,7 @@ pub fn search(
     let kind = parsed.kind.as_deref().and_then(kind_from_str);
     let semantic_text = parsed.keywords.clone().unwrap_or_default();
 
-    // Query projection reused by all three paths below.
+    // Query projection reused by both paths below.
     let base_query = |item_ids: Vec<String>, query_offset: i64, query_limit: i64| MediaQuery {
         library_id: library_id.to_owned(),
         kind,
@@ -1393,43 +1163,8 @@ pub fn search(
         sort: MediaSort::Newest,
     };
 
-    if !semantic_text.is_empty() && config.embedding_ready() {
-        let query_vector = transport.embed(config, &semantic_text)?;
-        let rows: Vec<AiEmbeddingRow> = repository
-            .list_ai_embeddings(library_id, config.embedding_model.trim())
-            .map_err(AppError::from)?;
-        let mut scored: Vec<(String, f32)> = rows
-            .iter()
-            .filter_map(|row| {
-                let vector = le_bytes_to_f32_slice(&row.embedding);
-                cosine(&query_vector, &vector)
-                    .filter(|score| *score >= MIN_COSINE_SCORE)
-                    .map(|score| (row.media_item_id.clone(), score))
-            })
-            .collect();
-        scored.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(VECTOR_TOP_K);
-        let ids = scored.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-        let items = fetch_ordered(
-            repository,
-            base_query(Vec::new(), 0, TEXT_FALLBACK_LIMIT as i64),
-            &ids,
-        )?;
-        Ok(AiSearchResult {
-            total: items.len() as i64,
-            items,
-            offset,
-            limit,
-            mode: "vector",
-            parsed,
-        })
-    } else if !semantic_text.is_empty() {
-        // Degraded path: LIKE over captions/tags for the semantic text.
+    if !semantic_text.is_empty() {
+        // Keyword path: LIKE over captions/tags for the parsed keyword phrase.
         let mut ids = repository
             .search_media_ai_text(library_id, &semantic_text)
             .map_err(AppError::from)?;
@@ -1459,29 +1194,6 @@ pub fn search(
             parsed,
         })
     }
-}
-
-/// Fetch items by id, keep the ranked order, and apply structured conditions.
-fn fetch_ordered(
-    repository: &Repository,
-    mut candidate_query: MediaQuery,
-    ranked_ids: &[String],
-) -> Result<Vec<crate::db::MediaItem>, AppError> {
-    if ranked_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    candidate_query.item_ids = ranked_ids.to_vec();
-    let page = repository
-        .query_media(candidate_query)
-        .map_err(AppError::from)?;
-    let order: HashMap<&str, usize> = ranked_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.as_str(), index))
-        .collect();
-    let mut items = page.items;
-    items.sort_by_key(|item| order.get(item.id.as_str()).copied().unwrap_or(usize::MAX));
-    Ok(items)
 }
 
 fn kind_from_str(value: &str) -> Option<MediaKind> {
@@ -1656,7 +1368,7 @@ fn build_chat_system_prompt(
          - 用简体中文，简洁、准确、口语化；不确定的不要编造。\n\
          - 优先回答与相册、照片、视频相关的问题，也可以聊通用摄影话题。\n\
          - 如果用户想找出某些照片或视频（例如\u{201c}去年秋天的湖边\u{201d}），在回答的最后另起一行输出 \
-         `{CHAT_SEARCH_MARKER} 关键词`，关键词将用于语义搜索；一次最多一个，其他情况不要输出这个标记。\n"
+         `{CHAT_SEARCH_MARKER} 关键词`，关键词将用于在媒体库中检索；一次最多一个，其他情况不要输出这个标记。\n"
     ));
     prompt
 }
@@ -1764,14 +1476,12 @@ mod tests {
 
     struct MockTransport {
         replies: Mutex<VecDeque<String>>,
-        vector: Vec<f32>,
     }
 
     impl MockTransport {
-        fn new(reply: &str, vector: Vec<f32>) -> Self {
+        fn new(reply: &str) -> Self {
             Self {
                 replies: Mutex::new(VecDeque::from(vec![reply.to_owned()])),
-                vector,
             }
         }
     }
@@ -1806,21 +1516,15 @@ mod tests {
             on_delta(&reply);
             Ok(reply)
         }
-
-        fn embed(&self, _config: &AiConfig, _text: &str) -> Result<Vec<f32>, AppError> {
-            Ok(self.vector.clone())
-        }
     }
 
     fn ready_config() -> AiConfig {
         AiConfig {
             enabled: true,
+            provider: "openai".into(),
             chat_base_url: "https://api.example.com/v1".into(),
             chat_model: "vision-model".into(),
             chat_api_key: "key".into(),
-            embedding_base_url: "https://api.example.com/v1".into(),
-            embedding_model: "embed-model".into(),
-            embedding_api_key: "key".into(),
             concurrency: 2,
         }
     }
@@ -1885,10 +1589,7 @@ mod tests {
                 media_item_id,
                 caption: Some(caption),
                 tags_json: Some("[\"风景\"]"),
-                embedding: None,
-                embedding_model: None,
                 ai_model: Some("vision-model"),
-                embedding_dim: None,
                 status: "success",
                 error_message: None,
                 processed_at: Some("unix-ms:2"),
@@ -1943,16 +1644,6 @@ mod tests {
     }
 
     #[test]
-    fn cosine_and_bytes_roundtrip() {
-        let vector = vec![1.0f32, -2.5, 3.25];
-        let bytes = f32_slice_to_le_bytes(&vector);
-        assert_eq!(le_bytes_to_f32_slice(&bytes), vector);
-        assert_eq!(cosine(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
-        assert_eq!(cosine(&[1.0, 0.0], &[0.0, 1.0]), Some(0.0));
-        assert!(cosine(&[1.0], &[1.0, 2.0]).is_none());
-    }
-
-    #[test]
     fn local_today_is_a_valid_iso_date() {
         assert!(is_valid_date(&local_today()));
     }
@@ -1975,29 +1666,31 @@ mod tests {
         };
         // Missing model name is rejected.
         assert!(config.clone().normalized().is_err());
-        let config = AiConfig {
-            chat_model: "m".into(),
-            embedding_base_url: "https://embed.example.com/v1".into(),
-            ..config
-        };
-        // Embedding address without model name is rejected.
-        assert!(config.clone().normalized().is_err());
-        // Trailing slash trimmed once the model name completes the pair.
+        // Trailing slash trimmed and provider lower-cased once the model is set.
         let normalized = AiConfig {
-            embedding_model: "e".into(),
+            provider: "  OpenAI ".into(),
+            chat_model: "m".into(),
             ..config
         }
         .normalized()
         .unwrap();
         assert_eq!(normalized.chat_base_url, "https://api.example.com/v1");
+        assert_eq!(normalized.provider, "openai");
+        // Disabled configs are stored as-is without validation.
+        let idle = AiConfig {
+            enabled: false,
+            ..Default::default()
+        }
+        .normalized()
+        .unwrap();
+        assert!(idle.chat_base_url.is_empty());
         assert!(!AiConfig::default().enabled);
         assert_eq!(AiConfig::default().concurrency, 2);
     }
 
     #[test]
-    fn media_ai_rows_roundtrip_and_backfill_detection() {
+    fn media_ai_rows_roundtrip() {
         let repository = setup();
-        let config = ready_config();
         store_success_row(&repository, "photo-lake", "湖边秋色");
 
         let stats = repository.ai_stats("library-1").unwrap();
@@ -2011,23 +1704,10 @@ mod tests {
             (2, 1, 1, 0)
         );
 
-        // Different model counts as missing; same model does not.
-        let missing = repository
-            .list_ai_missing_embeddings("library-1", "embed-model")
-            .unwrap();
-        assert_eq!(missing.len(), 1);
-        let bytes = f32_slice_to_le_bytes(&[0.1, 0.2]);
-        repository
-            .set_media_ai_embedding("photo-lake", &bytes, "embed-model", 2, "unix-ms:3")
-            .unwrap();
-        let missing = repository
-            .list_ai_missing_embeddings("library-1", "embed-model")
-            .unwrap();
-        assert_eq!(missing.len(), 0);
-        assert!(!needs_embedding(
-            &repository.get_media_ai("photo-lake").unwrap().unwrap(),
-            &config
-        ));
+        let row = repository.get_media_ai("photo-lake").unwrap().unwrap();
+        assert_eq!(row.status, "success");
+        assert_eq!(row.caption.as_deref(), Some("湖边秋色"));
+        assert_eq!(row.ai_model.as_deref(), Some("vision-model"));
     }
 
     #[test]
@@ -2108,118 +1788,58 @@ mod tests {
     #[test]
     fn preview_counts_match_modes() {
         let repository = setup();
-        let config = ready_config();
         store_success_row(&repository, "photo-lake", "湖边");
         repository
             .upsert_media_ai(MediaAiUpsert {
                 media_item_id: "photo-food",
                 caption: None,
                 tags_json: None,
-                embedding: None,
-                embedding_model: None,
                 ai_model: None,
-                embedding_dim: None,
                 status: "failed",
                 error_message: Some("boom"),
                 processed_at: Some("unix-ms:2"),
             })
             .unwrap();
 
-        let incremental =
-            preview(&repository, &config, "library-1", AiRunMode::Incremental).unwrap();
+        let incremental = preview(&repository, "library-1", AiRunMode::Incremental).unwrap();
         assert_eq!(incremental.pending, 0);
         assert_eq!(incremental.chat_calls, 0);
-        assert_eq!(incremental.embedding_calls, 1);
-        let full = preview(&repository, &config, "library-1", AiRunMode::Full).unwrap();
+        let full = preview(&repository, "library-1", AiRunMode::Full).unwrap();
         assert_eq!(full.chat_calls, 2);
-        let retry = preview(&repository, &config, "library-1", AiRunMode::Retry).unwrap();
+        assert_eq!(full.estimated_calls, 2);
+        let retry = preview(&repository, "library-1", AiRunMode::Retry).unwrap();
         assert_eq!(retry.chat_calls, 1);
-        let embeddings = preview(&repository, &config, "library-1", AiRunMode::Embeddings).unwrap();
-        assert_eq!(embeddings.chat_calls, 0);
-        assert_eq!(embeddings.embedding_calls, 1);
     }
 
     #[test]
     fn build_work_list_honours_modes() {
         let repository = setup();
-        let config = ready_config();
         store_success_row(&repository, "photo-lake", "湖边");
 
         let incremental =
-            build_work_list(&repository, &config, "library-1", AiRunMode::Incremental).unwrap();
+            build_work_list(&repository, "library-1", AiRunMode::Incremental).unwrap();
         assert_eq!(
             incremental
                 .iter()
-                .map(|item| (item.media_item_id.as_str(), item.kind))
+                .map(|item| item.media_item_id.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                ("photo-food", WorkKind::Full),
-                ("photo-lake", WorkKind::EmbedOnly)
-            ]
+            vec!["photo-food"]
         );
-        let full = build_work_list(&repository, &config, "library-1", AiRunMode::Full).unwrap();
+        let full = build_work_list(&repository, "library-1", AiRunMode::Full).unwrap();
         assert_eq!(full.len(), 2);
-        let retry = build_work_list(&repository, &config, "library-1", AiRunMode::Retry).unwrap();
+        let retry = build_work_list(&repository, "library-1", AiRunMode::Retry).unwrap();
         assert!(retry.is_empty());
     }
 
     #[test]
-    fn search_intersects_vectors_with_structured_conditions() {
+    fn search_matches_caption_and_structured_conditions() {
         let repository = setup();
         let config = ready_config();
         let transport = MockTransport::new(
-            "{\"date_from\":null,\"date_to\":null,\"kind\":null,\"keywords\":\"湖边秋天\"}",
-            vec![1.0, 0.0],
-        );
-        store_success_row(&repository, "photo-lake", "湖边秋天的清晨");
-        store_success_row(&repository, "photo-food", "晚餐");
-        // photo-lake matches the query vector; photo-food is orthogonal and
-        // excluded by the score threshold.
-        repository
-            .set_media_ai_embedding(
-                "photo-lake",
-                &f32_slice_to_le_bytes(&[1.0, 0.0]),
-                "embed-model",
-                2,
-                "unix-ms:3",
-            )
-            .unwrap();
-        repository
-            .set_media_ai_embedding(
-                "photo-food",
-                &f32_slice_to_le_bytes(&[0.0, 1.0]),
-                "embed-model",
-                2,
-                "unix-ms:3",
-            )
-            .unwrap();
-
-        let result = search(
-            &repository,
-            &transport,
-            &config,
-            "library-1",
-            "去年秋天湖边的照片",
-            0,
-            50,
-        )
-        .unwrap();
-        assert_eq!(result.mode, "vector");
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].id, "photo-lake");
-    }
-
-    #[test]
-    fn search_degrades_to_text_like_without_embedding_model() {
-        let repository = setup();
-        let mut config = ready_config();
-        config.embedding_base_url = String::new();
-        config.embedding_model = String::new();
-        let transport = MockTransport::new(
             "{\"date_from\":\"2025-10-01\",\"date_to\":\"2025-10-31\",\"kind\":\"photo\",\"keywords\":\"湖边\"}",
-            Vec::new(),
         );
         store_success_row(&repository, "photo-lake", "湖边秋色");
+        store_success_row(&repository, "photo-food", "晚餐");
 
         let result = search(
             &repository,
@@ -2238,12 +1858,11 @@ mod tests {
     }
 
     #[test]
-    fn structured_only_queries_skip_vector_scoring() {
+    fn structured_only_queries_use_sql() {
         let repository = setup();
         let config = ready_config();
         let transport = MockTransport::new(
             "{\"date_from\":\"2025-10-01\",\"date_to\":\"2025-10-31\",\"kind\":null,\"keywords\":null}",
-            Vec::new(),
         );
         // photo-lake carries no AI row at all — the SQL path must still see it.
         let result = search(
@@ -2267,10 +1886,7 @@ mod tests {
     fn process_item_skips_without_thumbnail_and_succeeds_with_one() {
         let repository = setup();
         let config = ready_config();
-        let transport = MockTransport::new(
-            "{\"tags\":[\"风景\",\"秋\"],\"caption\":\"湖边秋色\"}",
-            vec![0.5, 0.5],
-        );
+        let transport = MockTransport::new("{\"tags\":[\"风景\",\"秋\"],\"caption\":\"湖边秋色\"}");
         let details = repository
             .get_media_item_details("photo-lake")
             .unwrap()
@@ -2329,16 +1945,12 @@ mod tests {
             &dir.path().join("cache"),
         )
         .unwrap();
-        let AiItemOutcome::Tagged { embedding_warning } = outcome else {
-            panic!("expected Tagged");
-        };
-        assert!(embedding_warning.is_none());
+        assert_eq!(outcome, AiItemOutcome::Tagged);
 
         let row = repository.get_media_ai("photo-lake").unwrap().unwrap();
         assert_eq!(row.status, "success");
         assert_eq!(row.caption.as_deref(), Some("湖边秋色"));
-        assert_eq!(row.embedding_model.as_deref(), Some("embed-model"));
-        assert_eq!(row.embedding_dim, Some(2));
+        assert_eq!(row.ai_model.as_deref(), Some("vision-model"));
         // Two AI tags created and flagged in the shared tag list.
         let ai_tagged = repository
             .list_tags()
@@ -2437,10 +2049,7 @@ mod tests {
     #[test]
     fn run_chat_streams_and_injects_context() {
         let repository = setup();
-        let transport = MockTransport::new(
-            "你的媒体库共有 3 项，其中照片 2 张。\n[搜索] 湖边",
-            Vec::new(),
-        );
+        let transport = MockTransport::new("你的媒体库共有 3 项，其中照片 2 张。\n[搜索] 湖边");
         let cancel = AtomicBool::new(false);
         let context = AiChatContext {
             view: Some(json!({"kind": "photo"})),
@@ -2499,7 +2108,7 @@ mod tests {
     fn run_chat_reports_cancel_and_rejects_empty() {
         let repository = setup();
         // Reply arrives, but the cancel flag is already set: partial output.
-        let transport = MockTransport::new("未完成的回复", Vec::new());
+        let transport = MockTransport::new("未完成的回复");
         let cancel = AtomicBool::new(true);
         let outcome = run_chat(
             &repository,
@@ -2520,7 +2129,7 @@ mod tests {
         assert!(outcome.cancelled);
 
         // No user turn at all → rejected before any network call.
-        let transport = MockTransport::new("unused", Vec::new());
+        let transport = MockTransport::new("unused");
         let cancel = AtomicBool::new(false);
         let error = run_chat(
             &repository,

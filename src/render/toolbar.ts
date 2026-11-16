@@ -262,7 +262,7 @@ export function renderAdvancedFiltersInner(): string {
         : "";
     tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">管理</button></div>`;
   }
-  return `<div class="filter-group filter-group-semantic"><span class="filter-group-label">语义</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(searchUi.semantic)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="语义搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
+  return `<div class="filter-group filter-group-semantic"><span class="filter-group-label">AI</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(searchUi.semantic)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="AI 搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
 }
 
 export function renderRatingFilter(): string {
@@ -316,13 +316,11 @@ export function renderStatusBannerBase(): string {
   if (state.semanticSearch) {
     const meta = state.semanticMeta;
     const modeLabel =
-      state.semanticMode === "vector"
-        ? "向量检索"
-        : state.semanticMode === "text"
-          ? "描述/标签关键字"
-          : state.semanticMode === "structured"
-            ? "时间/类型条件"
-            : "检索中…";
+      state.semanticMode === "text"
+        ? "描述/标签关键字"
+        : state.semanticMode === "structured"
+          ? "时间/类型条件"
+          : "检索中…";
     const conditions: string[] = [];
     if (meta?.dateFrom || meta?.dateTo) {
       conditions.push(
@@ -334,8 +332,8 @@ export function renderStatusBannerBase(): string {
       );
     }
     if (meta?.kind) conditions.push(meta.kind === "photo" ? "照片" : meta.kind === "video" ? "视频" : "实况");
-    if (meta?.keywords) conditions.push(`语义「${meta.keywords}」`);
-    return `<div class="notice-banner is-info" role="status"><span class="notice-icon">✦</span><div><strong>语义搜索：${escapeHtml(state.semanticSearch)}</strong><span>${escapeHtml(`模式：${modeLabel}${conditions.length ? ` · 解析条件：${conditions.join("，")}` : ""}。结果由 AI 检索决定，不叠加其他筛选。`)}</span></div><button class="text-button" id="exit-semantic-search" type="button">退出语义搜索</button></div>`;
+    if (meta?.keywords) conditions.push(`关键词「${meta.keywords}」`);
+    return `<div class="notice-banner is-info" role="status"><span class="notice-icon">✦</span><div><strong>AI 搜索：${escapeHtml(state.semanticSearch)}</strong><span>${escapeHtml(`模式：${modeLabel}${conditions.length ? ` · 解析条件：${conditions.join("，")}` : ""}。结果由 AI 检索决定，不叠加其他筛选。`)}</span></div><button class="text-button" id="exit-semantic-search" type="button">退出 AI 搜索</button></div>`;
   }
   if (state.scanning && state.scanProgress) {
     const progress =
