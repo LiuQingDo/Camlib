@@ -573,14 +573,27 @@ export function updateSettingsPanel(options?: { animate?: boolean }): void {
     return;
   }
   content.innerHTML = settingsContentHtml();
-  if (options?.animate !== false) {
-    content.classList.remove("is-swap");
-    // Restart the fade so consecutive tab switches stay calm instead of popping.
-    void content.offsetWidth;
-    content.classList.add("is-swap");
-  }
+  if (options?.animate !== false) fadeSettingsContent(content);
   app.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.settingsSection === state.settingsSection);
   });
   bindSettingsEvents();
+}
+
+/** 上一次的分区切换动画：连切时先撤掉，避免多条动画叠在同一个元素上。 */
+let swapAnimation: Animation | null = null;
+
+/**
+ * 分区切换的淡入。
+ *
+ * 原来是「摘类 → 读一次 offsetWidth → 加类」重启 CSS 动画：那次 `offsetWidth`
+ * 读在 innerHTML 写入之后，等于逼浏览器当场同步回流一遍新内容。WAAPI 不碰布局，
+ * 动画由合成器直接跑，连切也只是把上一条动画换掉。
+ */
+function fadeSettingsContent(content: HTMLElement): void {
+  swapAnimation?.cancel();
+  swapAnimation = null;
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  if (reduce || typeof content.animate !== "function") return;
+  swapAnimation = content.animate([{ opacity: 0.55 }, { opacity: 1 }], { duration: 160, easing: "ease" });
 }

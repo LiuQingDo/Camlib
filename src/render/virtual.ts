@@ -364,6 +364,8 @@ export function paintGridWindow(): void {
   });
 
   let created = 0;
+  /** 本帧真正新建的卡片：缩略图排队只认这一批，不再全树重扫。 */
+  const createdCards: HTMLElement[] = [];
   let cursor: Element | null = topSpacer.nextElementSibling;
   for (const slice of plan.slices) {
     const box = gridBoxes[slice.box];
@@ -381,6 +383,7 @@ export function paintGridWindow(): void {
         grid,
         gridItems.slice(slice.firstIndex, slice.firstIndex + slice.count),
         slice.firstIndex,
+        createdCards,
       );
     }
     if (section === cursor) cursor = cursor.nextElementSibling;
@@ -392,7 +395,7 @@ export function paintGridWindow(): void {
   }
 
   // 只有真的换了卡片才需要重新排队取缩略图；换内容复用来的卡片自带新标记。
-  if (created) observePreviews();
+  if (created) observePreviews(createdCards);
 }
 
 /** 一帧内只重排一次；滚动事件本身比帧快得多。 */

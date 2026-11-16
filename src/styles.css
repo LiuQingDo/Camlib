@@ -1662,13 +1662,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   scrollbar-color:rgba(0,0,0,.22) transparent;
   scrollbar-width:thin;
 }
-.settings-content.is-swap {
-  animation:settings-swap .16s ease both;
-}
-@keyframes settings-swap {
-  from { opacity:.55; }
-  to { opacity:1; }
-}
 .settings-section-body {
   display:flex;
   flex-direction:column;
@@ -3468,3 +3461,55 @@ html.is-scrolling .preview-skeleton { animation: none !important; }
 
 /* 新挂载的缩略图淡入同理，滚动中每帧都在新建动画。 */
 html.is-scrolling .card-preview img { animation: none !important; }
+
+/* ==========================================================================
+   Overlay transitions（页面切换）
+   ==========================================================================
+   打开/关闭弹窗时只动合成属性（opacity / transform），并且：
+     - 退场也有了动画（原来是 innerHTML 直接清空，画面上是硬切）；
+     - 过渡窗口里 backdrop-filter 的 SVG 位移贴图由 render/overlay-transition.ts
+       摘掉，只留同档纯模糊——动画期每帧重采样一张位移图，是"打开面板顿一下"
+       的主要原因；
+     - 换图时 #modal-media 整块替换，新内容淡入、旧内容留到替换那一刻，
+       不会再先清成转圈。
+   ========================================================================== */
+
+@keyframes overlay-fade-out {
+  from { opacity:1; }
+  to { opacity:0; }
+}
+@keyframes overlay-panel-out {
+  from { opacity:1; transform:translateY(0) scale(1); }
+  to { opacity:0; transform:translateY(6px) scale(.99); }
+}
+
+/* 退场：容器淡出 + 面板轻微下沉；期间不吃点击。 */
+[data-overlay] > .is-leaving {
+  pointer-events:none;
+  animation:overlay-fade-out 140ms ease both;
+}
+[data-overlay] > .modal-backdrop.is-leaving > :first-child {
+  animation:overlay-panel-out 140ms ease both;
+}
+/* 抽屉没有遮罩层，自己滑出比原地淡出更贴近它的入场方向。 */
+@keyframes overlay-drawer-out {
+  from { opacity:1; transform:translateX(0); }
+  to { opacity:0; transform:translateX(18px); }
+}
+[data-overlay] > .ai-chat-drawer.is-leaving {
+  animation:overlay-drawer-out 140ms ease both;
+}
+
+/* 预览换图：新舞台淡入。旧节点在替换前一直留在画面上，所以看不到白屏。 */
+@keyframes modal-media-in {
+  from { opacity:0; }
+  to { opacity:1; }
+}
+.modal-media > .photo-stage,
+.modal-media > .video-stage,
+.modal-media > .live-preview {
+  animation:modal-media-in 180ms ease both;
+}
+
+/* 实况没有可编辑的源：按钮保留节点只隐藏（原地 patch 不重建节点）。 */
+.modal-actions [hidden] { display:none !important; }

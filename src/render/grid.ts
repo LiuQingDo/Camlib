@@ -183,7 +183,12 @@ export function recycleCardNode(card: HTMLElement, item: MediaItemDto, index: nu
 }
 
 /** 单日卡片列表 keyed reconcile；返回新建（含复用重写）的卡片数量。 */
-export function patchCardList(grid: HTMLElement, items: MediaItemDto[], startIndex: number): number {
+export function patchCardList(
+  grid: HTMLElement,
+  items: MediaItemDto[],
+  startIndex: number,
+  createdNodes?: HTMLElement[],
+): number {
   const existing = new Map<string, HTMLElement>();
   grid.querySelectorAll<HTMLElement>(":scope > .media-card").forEach((card) => {
     const id = card.dataset.id;
@@ -212,6 +217,7 @@ export function patchCardList(grid: HTMLElement, items: MediaItemDto[], startInd
         continue;
       }
       created += 1;
+      createdNodes?.push(card);
     }
     if (card === cursor) cursor = cursor.nextElementSibling;
     else grid.insertBefore(card, cursor);
@@ -268,8 +274,21 @@ export function markThumbnailRetryable(id: string): void {
 
 export let previewObserver: IntersectionObserver | null = null;
 
-export function observePreviews(): void {
-  const cards = [...app.querySelectorAll<HTMLElement>("[data-preview]")];
+/**
+ * 排队取缩略图。
+ *
+ * `cards` 传“本帧新建的卡片”（`.media-card` 或已经是 `.card-preview` 都行）时
+ * 只处理这一批：虚拟滚动每帧都在增删卡片，若每次都把整棵树拉出来、再对每张卡
+ * 读一次 rect，写入之后的读会当场触发一次强制同步回流——而其中绝大多数卡片早就
+ * 装载过，纯属白读。不传则退回全量扫描。
+ */
+export function observePreviews(cards?: readonly HTMLElement[]): void {
+  const nodes = cards
+    ? cards
+        .map((card) => (card.matches("[data-preview]") ? card : card.querySelector<HTMLElement>("[data-preview]")))
+        .filter((node): node is HTMLElement => node !== null)
+    : [...app.querySelectorAll<HTMLElement>("[data-preview]")];
+  if (!nodes.length) return;
   const load = (card: HTMLElement, highPriority = false) => {
     if (card.dataset.loaded === "true") return;
     card.dataset.loaded = "true";
@@ -284,7 +303,7 @@ export function observePreviews(): void {
   };
   // Start the actual viewport synchronously and put it ahead of work left over
   // from a previous filter/page. The observer then prefetches the next rows.
-  cards
+  nodes
     .filter((card) => {
       const rect = card.getBoundingClientRect();
       return rect.bottom >= 0 && rect.top <= window.innerHeight;
@@ -303,10 +322,10 @@ export function observePreviews(): void {
         }),
       { rootMargin: "320px" },
     );
-    cards.forEach((card) => {
+    nodes.forEach((card) => {
       if (card.dataset.loaded === "true" || card.dataset.io === "1") return;
       card.dataset.io = "1";
       previewObserver?.observe(card);
     });
-  } else cards.slice(0, 24).forEach((card) => load(card));
+  } else nodes.slice(0, 24).forEach((card) => load(card));
 }

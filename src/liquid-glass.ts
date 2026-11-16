@@ -299,6 +299,23 @@ let supported = false;
 let resizeBound = false;
 let syncQueued = false;
 
+/**
+ * 过渡窗口里为真：跳过 SVG 位移贴图，只写同尺寸的纯模糊。
+ * 由 render/overlay-transition.ts 在弹窗动画期间打开，结束后关闭并重新全量同步。
+ */
+let displacementPaused = false;
+
+/** 位移贴图的纯模糊替身：模糊半径与亮度都和 `filterValue()` 对齐，切进切出无跳变。 */
+function plainValue(style: GlassStyle, dark: boolean): string {
+  if (dark) return `blur(${Math.round(style.blur * 0.65)}px) saturate(1.1) contrast(1.02)`;
+  return `blur(${style.blur}px) saturate(${style.saturate}) contrast(${style.contrast}) brightness(${style.brightness})`;
+}
+
+/** 打开/关闭位移贴图的暂停开关；调用方负责在开关结束后再同步一次。 */
+export function setGlassDisplacementPaused(paused: boolean): void {
+  displacementPaused = paused;
+}
+
 function ensureRoot(): HTMLElement | null {
   if (root?.isConnected) return root;
   root = document.getElementById("liquid-glass-root");
@@ -346,10 +363,13 @@ export function syncLiquidGlass(): void {
   syncQueued = false;
   // Dark chrome: skip SVG displacement (noisy on low-contrast glass); CSS blur remains.
   const dark = document.documentElement.dataset.theme === "dark";
+  // 过渡窗口（弹窗开关动画）里同样跳过位移贴图：见 render/overlay-transition.ts。
+  const plain = dark || displacementPaused;
   for (const target of TARGETS) {
     const style = { ...DEFAULT_STYLE, ...target.style };
     const nodes = document.querySelectorAll<HTMLElement>(target.selector);
-    if (dark) {
+    if (plain) {
+      const value = plainValue(style, dark);
       for (const el of nodes) {
         if (el.dataset.liquidGlass === "off") {
           el.style.removeProperty("backdrop-filter");
@@ -362,7 +382,6 @@ export function syncLiquidGlass(): void {
           el.style.removeProperty("-webkit-backdrop-filter");
           continue;
         }
-        const value = `blur(${Math.round(style.blur * 0.65)}px) saturate(1.1) contrast(1.02)`;
         el.style.backdropFilter = value;
         el.style.setProperty("-webkit-backdrop-filter", value);
       }

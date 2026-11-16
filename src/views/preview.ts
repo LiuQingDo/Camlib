@@ -1,9 +1,9 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
-import { MediaPreviewDto, getMediaPreview } from "../api/media";
+import { MediaItemDto, MediaPreviewDto, getMediaPreview } from "../api/media";
 import { formatSize } from "../lib/format";
 import { syncLiquidGlass } from "../liquid-glass";
 import { loadModalThumbnail, previewAssetCache, previewPrefetchLimit, previewPrefetchQueue } from "../media/cache";
-import { app } from "../render/context";
+import { app, setText } from "../render/context";
 import { bindPreviewMetaEvents, render } from "../render/paint";
 import { escapeHtml, formatDate, kindLabel } from "../render/text";
 import { state } from "../state";
@@ -293,6 +293,41 @@ export function prefetchPreviewNeighbors(index: number): void {
   pumpPreviewPrefetch();
 }
 
+/** 底部标题的第二行：日期 · 体积 ·（连拍）。打开与换图共用同一份文案。 */
+function captionMeta(item: MediaItemDto): string {
+  return `${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}`;
+}
+
+/**
+ * 换图时的原地 patch：只改文字与按钮可见性，绝不重建外壳。
+ *
+ * `resetAssets` 为真表示换成的是另一张图（而不是同一张的结果集长度变化）：
+ * 这时把元信息面板退回占位——上一张的标签、评分、AI 描述不能挂在新图上，
+ * 真正的数据由 loadModalAsset 取回后填。
+ */
+export function patchPreviewFrame(item: MediaItemDto, index: number, resetAssets: boolean): void {
+  const frame = app.querySelector<HTMLElement>(".preview-modal");
+  if (!frame) return;
+  frame.setAttribute("aria-label", item.displayName);
+  setText(frame.querySelector(".modal-position"), `${index + 1} / ${state.page.items.length}`);
+  const copy = frame.querySelector(".modal-caption-copy");
+  if (copy) {
+    setText(copy.querySelector("strong"), item.displayName);
+    setText(copy.querySelector("span"), captionMeta(item));
+  }
+  // 实况没有可编辑的源：保留节点只隐藏，重建节点会把绑好的点击一起丢掉。
+  const edit = frame.querySelector<HTMLButtonElement>("#preview-edit");
+  if (edit) {
+    edit.hidden = item.kind === "live";
+    setText(edit, item.kind === "video" ? "剪辑" : "编辑");
+  }
+  const folder = frame.querySelector<HTMLElement>("#preview-open-folder");
+  if (folder) folder.dataset.openFolder = item.id;
+  if (!resetAssets) return;
+  const meta = frame.querySelector<HTMLElement>("#modal-meta");
+  if (meta && !meta.querySelector(".meta-placeholder")) meta.innerHTML = `<div class="meta-placeholder">加载中…</div>`;
+}
+
 export function renderPreview(): string {
   if (state.previewIndex === null) return "";
   const item = state.page.items[state.previewIndex];
@@ -306,10 +341,10 @@ export function renderPreview(): string {
       <aside class="modal-meta ${previewInfoOpen ? "" : "is-hidden"}" id="modal-meta" aria-label="媒体信息" aria-hidden="${previewInfoOpen ? "false" : "true"}"><div class="meta-placeholder">加载中…</div></aside>
     </div>
     <footer class="modal-caption">
-      <div class="modal-caption-copy"><strong>${escapeHtml(item.displayName)}</strong><span>${formatDate(item.captureDate)} · ${formatSize(item.totalSizeBytes)}${item.burstGroup ? " · 连拍" : ""}</span></div>
+      <div class="modal-caption-copy"><strong>${escapeHtml(item.displayName)}</strong><span>${captionMeta(item)}</span></div>
       <div class="modal-caption-tools">
         <div class="modal-actions">
-          ${item.kind !== "live" ? `<button class="outline-button modal-tool-button" id="preview-edit" type="button">${item.kind === "video" ? "剪辑" : "编辑"}</button>` : ""}
+          <button class="outline-button modal-tool-button" id="preview-edit" type="button"${item.kind === "live" ? " hidden" : ""}>${item.kind === "video" ? "剪辑" : "编辑"}</button>
           <button class="outline-button modal-tool-button" id="preview-info-toggle" type="button" aria-pressed="${previewInfoOpen}">信息</button>
           <button class="outline-button modal-tool-button" id="preview-fullscreen" type="button">全屏</button>
           <button class="outline-button modal-tool-button" id="preview-immersive" type="button" aria-pressed="${state.previewImmersive}">沉浸</button>
@@ -582,7 +617,7 @@ export function movePreview(delta: number): void {
     window.clearTimeout(liveHoldTimer);
     liveHoldTimer = null;
   }
-  // 换图会让预览容器按签名重建，重建钩子负责装载新图。
+  // 换图只改文字与 #modal-media：外壳不重建，由 patchPreviewFrame + 装载钩子接手。
   render();
 }
 

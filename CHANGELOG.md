@@ -17,6 +17,10 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Fixed
 
+- 修复预览里 ←/→ 换图的"卡一下、闪一下"：换图走的是整块签名重建，`.modal-backdrop` 连同全屏 `backdrop-filter: blur(18px)` 和面板一起被替换，入场动画重播、弹窗几何重算、媒体节点重新挂载。现在外壳只在打开时建一次，换图只改位置计数/标题/按钮可见性，`#modal-media` 由装载钩子交叉替换（旧图一直留到替换那一刻，不再先清成转圈）。12 次连续换图同条件实测：脚本耗时 −40%、样式重算 −11%、主线程繁忙 −17%，入场动画 `startTime` 不再重置
+- 修复关闭弹窗是硬切：原来是直接把容器 `innerHTML` 清空，画面上"闪没了"。现在先给根节点播 140ms 淡出再摘 DOM，退场期间 `pointer-events:none` 不吃点击；这 140ms 内重新打开同一个弹窗会撤掉定时器直接换新内容，不会清掉刚绘制的面板
+- 修复打开设置/预览时面板动画掉帧：liquid-glass 的位移贴图按元素当前尺寸生成，入场动画每帧都在改它的尺寸与位置，`url(#lg-filter-*)` 整条滤镜链要逐帧重放，同一时间观察器还会对刚插入的面板跑一次 canvas 生成 + `toDataURL()`。现在过渡窗口里摘掉位移贴图、只留同档纯模糊，动画结束补一次全量同步把折射带还回来（与滚动降级同一套思路）
+- 修复设置分区切换里的强制同步回流：原来靠「摘类 → 读一次 `offsetWidth` → 加类」重启 CSS 动画，那次读发生在 `innerHTML` 写入之后，等于逼浏览器当场把新内容回流一遍；改用 WAAPI 播放透明度，不碰布局，连切时也只是把上一条动画换掉
 - 修复主页（媒体库网格）滚动卡顿：两张原因叠在一起——每张卡片自带 3 个 `backdrop-filter`（选择/收藏按钮 + 类型角标 + 时长胶囊），窗口化滚动时同时挂着二三十张就是近百个每帧重采样的合成层；粘性工具条的 `url(#lg-filter-*)` 位移贴图又因为 `position:sticky` 落在滚动容器内，被每帧重放整条滤镜链。现在滚动期间临时降级玻璃质感（停手 180ms 自动恢复，静止画面逐像素不变），并断开液体玻璃观察器、停手后全量同步一次。同条件实测：脚本耗时 −61%、样式重算 −76%、主线程繁忙 −48%
 - 修复虚拟滚动每帧的无谓重排：`paintGridWindow()` 原先即使挂载的窗口一像素没变，也要走完整条 reconcile（读 rect → 写 spacer → keyed diff → 每张卡 6 次 `querySelector` + 无条件 `setAttribute` → 最后再读 N 次 rect 触发一次强制同步回流）。改为先算窗口签名，相同就直接返回；非滚动的变化由 `patchGrid()` 主动失效
 - 修复虚拟滚动与浏览器滚动锚定打架：顶部 spacer 改高度时，`overflow-anchor` 会把它当成「内容在视口上方长出来」并反向补偿 `scrollTop`，表现为滚动位置一抽一抽地对不上指针。`.content` 现为 `overflow-anchor:none`
@@ -26,6 +30,8 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Changed
 
+- 虚拟滚动的缩略图排队改为只处理本帧新建的卡片：原来每次挂载新行都要把整棵树拉出来、对每张卡读一次 `getBoundingClientRect`，而写入之后的读会当场触发一次强制同步回流——其中绝大多数卡片早就装载过，属于白读
+- 弹出层开关统一走 `render/overlay-transition.ts` 的过渡窗口，新增 `html.is-overlay-animating` 标记，进出场的动画只动 `opacity`/`transform` 两个合成属性
 - 滚动条改为常驻自定义样式：可拖拽热区 11px（透明 border 撑开，视觉仍是细条）、圆角拇指、hover/active 逐级加深，替换掉系统默认那条又窄又没有反馈的
 - 前端渲染层按职责拆分：`src/main.ts` 从 8443 行收敛到 84 行，渲染原语进 `src/render/`、界面进 `src/views/`、动作与事件绑定进 `src/app/`，`state` 单例独立成 `src/state.ts`；模块间零循环依赖，视图层通过 `render/paint.ts` 门面回调重绘，不再反向依赖动作层。行为、DOM 结构、CSS 类名与事件全部不变
 
