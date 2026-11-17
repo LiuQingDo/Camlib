@@ -6,6 +6,8 @@ import {
   findProvider,
   isPresetModel,
   modelSupportsVision,
+  pickActiveProfile,
+  profileLabel,
   resolveProviderId,
 } from "../lib/ai-providers";
 import { formatCaptureAt, formatCount, formatEtaSeconds, formatSize, formatSpeed, truncatePath } from "../lib/format";
@@ -285,14 +287,24 @@ export function renderSettingsAiSection(): string {
       : 0;
   const stats = state.aiStats;
   const testResult = state.aiTestResult;
-  const providerId = resolveProviderId(config.provider, config.chatBaseUrl);
+  const active = pickActiveProfile(config);
+  if (!active) {
+    return `<div class="settings-section-body"><div class="settings-status-card"><div class="settings-note">AI 配置缺少有效档案，请重新加载设置。</div></div></div>`;
+  }
+  const providerId = resolveProviderId(active.provider, active.baseUrl);
   const provider = findProvider(providerId);
-  const presetModel = isPresetModel(providerId, config.chatModel);
+  const presetModel = isPresetModel(providerId, active.model);
   const customModel = provider.custom || !presetModel;
-  const visionOk = modelSupportsVision(providerId, config.chatModel);
+  const visionOk = modelSupportsVision(providerId, active.model);
   const preview = state.aiPreview;
-  const keyField = `<label class="ai-field ai-field-key"><span>API Key</span><span class="ai-key-row"><input id="settings-ai-chat-key" type="${state.aiKeyVisible ? "text" : "password"}" value="${escapeHtml(config.chatApiKey)}" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(provider.keyPlaceholder)}" /><button class="text-button" type="button" id="settings-ai-key-toggle" aria-label="显示或隐藏 API Key">${state.aiKeyVisible ? "隐藏" : "显示"}</button></span></label>`;
-  const modelNameField = `<label class="ai-field ai-model-line"><span>模型名称</span><input id="settings-ai-model-custom" value="${escapeHtml(config.chatModel)}" spellcheck="false" placeholder="${provider.custom ? "例如 gpt-4o-mini / qwen-vl-max" : "手填服务商支持的模型 ID"}" /></label>`;
+  const profileOptions = config.profiles
+    .map(
+      (profile) =>
+        `<option value="${escapeHtml(profile.id)}" ${profile.id === active.id ? "selected" : ""}>${escapeHtml(profileLabel(profile))}</option>`,
+    )
+    .join("");
+  const keyField = `<label class="ai-field ai-field-key"><span>API Key</span><span class="ai-key-row"><input id="settings-ai-chat-key" type="${state.aiKeyVisible ? "text" : "password"}" value="${escapeHtml(active.apiKey)}" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(provider.keyPlaceholder)}" /><button class="text-button" type="button" id="settings-ai-key-toggle" aria-label="显示或隐藏 API Key">${state.aiKeyVisible ? "隐藏" : "显示"}</button></span></label>`;
+  const modelNameField = `<label class="ai-field ai-model-line"><span>模型名称</span><input id="settings-ai-model-custom" value="${escapeHtml(active.model)}" spellcheck="false" placeholder="${provider.custom ? "例如 gpt-6.1-terra / qwen4-max" : "手填服务商支持的模型 ID"}" /></label>`;
   const modeLabels: Record<AiRunMode, string> = {
     incremental: "增量处理（仅未处理过的照片）",
     full: "全量重跑（重新打标所有照片）",
@@ -310,6 +322,19 @@ export function renderSettingsAiSection(): string {
           <span class="ai-switch-track"><span class="ai-switch-thumb"></span></span>
         </label>
       </div>
+      <div class="ai-profile-bar">
+        <label class="ai-field ai-profile-select"><span>配置档案</span>
+          <select id="settings-ai-profile" aria-label="选择模型配置档案">${profileOptions}</select>
+        </label>
+        <label class="ai-field ai-profile-name"><span>备注名</span>
+          <input id="settings-ai-profile-name" value="${escapeHtml(active.name)}" spellcheck="false" placeholder="${escapeHtml(profileLabel(active))}" />
+        </label>
+        <div class="ai-profile-actions">
+          <button class="outline-button" type="button" id="settings-ai-profile-new">＋ 新建配置</button>
+          <button class="outline-button" type="button" id="settings-ai-profile-delete" ${config.profiles.length <= 1 ? "disabled" : ""}>删除</button>
+        </div>
+      </div>
+      <div class="ai-hint-inline ai-profile-hint">打标与对话都使用当前选中的一条。共 ${config.profiles.length} 条配置，每条各自保存 Key；同一服务商可建多条（例如打标用便宜模型、对话用强模型），切换不会串用或覆盖别条的 Key。</div>
       <div class="ai-provider-grid" role="radiogroup" aria-label="服务商">
         ${AI_PROVIDERS.map(
           (
@@ -323,7 +348,7 @@ export function renderSettingsAiSection(): string {
       ${
         provider.custom
           ? `<div class="ai-field-row">
-        <label class="ai-field"><span>接口地址</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>
+        <label class="ai-field"><span>接口地址</span><input id="settings-ai-chat-url" value="${escapeHtml(active.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>
         ${keyField}
       </div>
       ${modelNameField}`
@@ -334,7 +359,7 @@ export function renderSettingsAiSection(): string {
             ${provider.models
               .map(
                 (option) =>
-                  `<option value="${escapeHtml(option.id)}" ${option.id === config.chatModel.trim() ? "selected" : ""}>${escapeHtml(`${option.label}${option.note ? ` · ${option.note}` : ""}`)}</option>`,
+                  `<option value="${escapeHtml(option.id)}" ${option.id === active.model.trim() ? "selected" : ""}>${escapeHtml(`${option.label}${option.note ? ` · ${option.note}` : ""}`)}</option>`,
               )
               .join("")}
             <option value="${CUSTOM_MODEL_ID}" ${customModel ? "selected" : ""}>自定义模型…</option>
@@ -343,7 +368,7 @@ export function renderSettingsAiSection(): string {
         ${keyField}
       </div>
       ${customModel ? modelNameField : ""}
-      <div class="ai-endpoint">接口地址 <code>${escapeHtml(provider.baseUrl)}</code></div>`
+      <div class="ai-endpoint">接口地址 <code>${escapeHtml(active.baseUrl || provider.baseUrl)}</code></div>`
       }
       ${!visionOk ? `<div class="settings-note is-warning">当前模型不支持图片输入：助手对话与搜索解析可用，但自动打标会失败。需要打标请换用带视觉的模型。</div>` : ""}
       <div class="ai-actions-row">
@@ -358,7 +383,7 @@ export function renderSettingsAiSection(): string {
       <details class="ai-advanced">
         <summary>高级设置</summary>
         <div class="settings-form">
-          ${provider.custom ? "" : `<label><span>接口地址（Base URL）</span><input id="settings-ai-chat-url" value="${escapeHtml(config.chatBaseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>`}
+          ${provider.custom ? "" : `<label><span>接口地址（Base URL）</span><input id="settings-ai-chat-url" value="${escapeHtml(active.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>`}
           <label><span>并发请求数</span><select id="settings-ai-concurrency">
             ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
           </select></label>

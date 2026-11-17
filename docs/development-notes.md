@@ -68,8 +68,8 @@ JSON 字段使用 camelCase（Rust 内部 snake_case，`serde` 负责映射）�
 
 | Command | 说明 |
 | --- | --- |
-| `ai_get_config` / `ai_set_config` | AI 配置（存 SQLite `app_settings`，key=`ai_config`） |
-| `ai_test_connection` | 连通性测试（只测已保存的对话模型配置，未启用也可测） |
+| `ai_get_config` / `ai_set_config` | AI 配置（存 SQLite `app_settings`，key=`ai_config`）；多档案，每条含独立 API Key |
+| `ai_test_connection` | 连通性测试（只测已保存的当前档案，未启用也可测） |
 | `ai_stats` | 打标统计（已处理/待处理/失败） |
 | `ai_process_preview` / `ai_process_start` / `ai_process_cancel` | 批量打标预览/执行/取消；进度走 `ai-progress` 事件 |
 | `ai_process_item` | 单张打标（异步命令；打标与网络 I/O 在 `spawn_blocking` 上执行，不占命令线程） |

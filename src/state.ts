@@ -221,7 +221,7 @@ export interface AppState {
   mergeNotice: string | null;
   /** AI 增强（云端 API 自动打标 + 自然语言检索），配置/统计/任务进度。 */
   aiConfig: AiConfigDto | null;
-  /** 设置页 AI 表单草稿：改动先落这里，保存/测试时才提交后端。 */
+  /** 设置页 AI 表单草稿：改动先落这里，保存/测试时才提交后端；含多条配置档案。 */
   aiDraft: AiConfigDto | null;
   /** API Key 是否明文显示（仅 UI）。 */
   aiKeyVisible: boolean;

@@ -9,15 +9,32 @@ import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { MediaItemDto } from "./media";
 
-/** 与 Rust `AiConfig` 对齐；API key 明文存本地（个人应用，设置页回显）。 */
+/**
+ * 一条模型档案：服务商 + 接口地址 + 模型 + 它自己的 API Key。
+ *
+ * 档案之间互不共享 Key——同一服务商可以存多条（两个账号、打标用便宜模型 +
+ * 对话用强模型），切换时不会串用或覆盖别条档案的凭据。API key 明文存本地
+ * （个人应用，设置页可回显），与 Rust `AiProfile` 一一对应。
+ */
+export interface AiProfileDto {
+  /** 前端生成的稳定 id，重命名不改变它。 */
+  id: string;
+  /** 备注名；留空时界面显示「服务商 · 模型」。 */
+  name: string;
+  /** 服务商预设 id，仅用于回显卡片。 */
+  provider: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+}
+
+/** 与 Rust `AiConfig` 对齐。 */
 export interface AiConfigDto {
   enabled: boolean;
-  /** 设置页选中的服务商预设 id（只用于回显卡片，请求只用 baseUrl + model）。 */
-  provider: string;
-  chatBaseUrl: string;
-  chatModel: string;
-  chatApiKey: string;
   concurrency: number;
+  /** 当前生效的档案 id；保存时 Rust 会校正到存在的档案。 */
+  activeProfileId: string;
+  profiles: AiProfileDto[];
 }
 
 export interface AiTestResultDto {

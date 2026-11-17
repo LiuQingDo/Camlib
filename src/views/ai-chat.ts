@@ -1,6 +1,7 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { AiChatContextDto, AiChatPreviewDto, AiChatTurnDto, getAiConfig, streamAiChat } from "../api/ai";
 import { toUserMessage } from "../api/errors";
+import { pickActiveProfile } from "../lib/ai-providers";
 import { hasAnyFilter } from "../lib/filters";
 import { formatCount } from "../lib/format";
 import { app } from "../render/context";
@@ -50,7 +51,9 @@ export function renderAiSidebarSection(): string {
 /** 对话模型是否已配置完整（前端预检，与 Rust validate_config_for_run 对齐）。 */
 export function aiChatReady(): boolean {
   const config = state.aiConfig;
-  return !!config?.enabled && config.chatModel.trim().length > 0 && /^https?:\/\//.test(config.chatBaseUrl.trim());
+  if (!config?.enabled) return false;
+  const profile = pickActiveProfile(config);
+  return !!profile && profile.model.trim().length > 0 && /^https?:\/\//.test(profile.baseUrl.trim());
 }
 
 /** 助手当前能“看到”的照片：预览中者优先，其次预览里钉住的那张。 */

@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { ProfileLike } from "./ai-providers";
 import {
   AI_PROVIDERS,
   CUSTOM_PROVIDER_ID,
   findProvider,
   isPresetModel,
+  maskApiKey,
   modelSupportsVision,
+  newProfileId,
+  pickActiveProfile,
+  profileLabel,
+  providerApiKey,
   resolveProviderId,
 } from "./ai-providers";
 
@@ -30,17 +36,24 @@ describe("resolveProviderId", () => {
 
 describe("model helpers", () => {
   it("only reports preset models as preset", () => {
-    expect(isPresetModel("openai", "gpt-4o-mini")).toBe(true);
+    expect(isPresetModel("openai", "gpt-6.1-terra")).toBe(true);
     expect(isPresetModel("openai", "my-finetune-01")).toBe(false);
     expect(isPresetModel("openai", "   ")).toBe(false);
   });
 
   it("flags text-only presets without blocking custom models", () => {
-    expect(modelSupportsVision("deepseek", "deepseek-chat")).toBe(false);
-    expect(modelSupportsVision("openai", "gpt-4o-mini")).toBe(true);
+    expect(modelSupportsVision("deepseek", "deepseek-v4-pro")).toBe(false);
+    expect(modelSupportsVision("openai", "gpt-6.1-terra")).toBe(true);
     // 未收录的模型无法判断，按可用处理，不误伤自建接口。
     expect(modelSupportsVision("openai", "my-finetune-01")).toBe(true);
     expect(modelSupportsVision(CUSTOM_PROVIDER_ID, "anything")).toBe(true);
+  });
+
+  it("keeps provider ids unique and base urls distinct", () => {
+    const ids = AI_PROVIDERS.map((preset) => preset.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const urls = AI_PROVIDERS.filter((preset) => !preset.custom).map((preset) => preset.baseUrl);
+    expect(new Set(urls).size).toBe(urls.length);
   });
 
   it("gives every preset a usable base url except the custom card", () => {
@@ -56,5 +69,55 @@ describe("model helpers", () => {
 
   it("falls back to the custom card for unknown ids", () => {
     expect(findProvider("nope").id).toBe(CUSTOM_PROVIDER_ID);
+  });
+});
+
+function profile(overrides: Partial<ProfileLike>): ProfileLike {
+  return {
+    id: "p1",
+    name: "",
+    provider: "openai",
+    model: "gpt-6.1-terra",
+    apiKey: "sk-aaaa1111",
+    ...overrides,
+  };
+}
+
+describe("profile helpers", () => {
+  it("labels a profile by its note, else by provider and model", () => {
+    expect(profileLabel(profile({ name: "打标用" }))).toBe("打标用");
+    expect(profileLabel(profile({ name: "  " }))).toBe("OpenAI · gpt-6.1-terra");
+    expect(profileLabel(profile({ model: "" }))).toBe("OpenAI · 未选模型");
+  });
+
+  it("masks keys without hiding the parts that tell accounts apart", () => {
+    expect(maskApiKey("sk-1234567890abcd")).toBe("sk-…abcd");
+    expect(maskApiKey("  ")).toBe("无 Key");
+    expect(maskApiKey("short")).toBe("short");
+  });
+
+  it("reuses the newest key saved for the same provider only", () => {
+    const profiles = [
+      profile({ id: "a", provider: "openai", apiKey: "sk-old" }),
+      profile({ id: "b", provider: "deepseek", apiKey: "sk-ds" }),
+      profile({ id: "c", provider: "openai", apiKey: "sk-new" }),
+    ];
+    expect(providerApiKey(profiles, "openai")).toBe("sk-new");
+    expect(providerApiKey(profiles, "openai", "c")).toBe("sk-old");
+    expect(providerApiKey(profiles, "deepseek")).toBe("sk-ds");
+    // 没有该服务商的档案时返回空，调用方据此清空输入框而不是沿用旧 Key。
+    expect(providerApiKey(profiles, "moonshot")).toBe("");
+  });
+
+  it("picks the active profile and falls back to the first one", () => {
+    const profiles = [profile({ id: "a" }), profile({ id: "b" })];
+    expect(pickActiveProfile({ activeProfileId: "b", profiles })?.id).toBe("b");
+    expect(pickActiveProfile({ activeProfileId: "gone", profiles })?.id).toBe("a");
+    expect(pickActiveProfile({ activeProfileId: "a", profiles: [] })).toBeNull();
+  });
+
+  it("generates unique ids", () => {
+    const ids = new Set(Array.from({ length: 50 }, () => newProfileId()));
+    expect(ids.size).toBe(50);
   });
 });

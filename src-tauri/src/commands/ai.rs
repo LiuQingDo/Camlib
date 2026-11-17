@@ -76,7 +76,7 @@ pub fn ai_test_connection_blocking(config: &AiConfig) -> Result<AiTestResultDto,
     let latency = started.elapsed().as_millis() as u64;
     Ok(AiTestResultDto {
         ok: !reply.trim().is_empty(),
-        message: format!("模型 {} 已连通（{latency} ms）", config.chat_model),
+        message: format!("模型 {} 已连通（{latency} ms）", config.model()),
         latency_ms: latency,
     })
 }

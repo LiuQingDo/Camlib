@@ -75,6 +75,54 @@ static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
+/// Id given to the single profile synthesized from a pre-profile config.
+const LEGACY_PROFILE_ID: &str = "legacy-default";
+
+/// One saved endpoint: provider + base URL + model + **its own API key**.
+///
+/// Profiles are deliberately independent. The same provider can be saved
+/// several times (two accounts, a cheap tagging model next to a strong chat
+/// model), and each entry carries its own key — switching provider or model in
+/// the UI never silently reuses, or overwrites, another entry's credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiProfile {
+    /// Frontend-generated id; stable across renames so the active profile
+    /// reference survives edits.
+    pub id: String,
+    /// Optional user label; empty means the UI shows "provider · model".
+    pub name: String,
+    /// Provider preset id (`openai`, `deepseek`, `custom`, …). Only used by the
+    /// UI to restore the highlighted card; the request path reads
+    /// `base_url` + `model` only.
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+}
+
+impl AiProfile {
+    fn url_ok(url: &str) -> bool {
+        let trimmed = url.trim();
+        trimmed.starts_with("http://") || trimmed.starts_with("https://")
+    }
+
+    /// Whether this profile is complete enough to make a call.
+    pub fn ready(&self) -> bool {
+        !self.model.trim().is_empty() && Self::url_ok(&self.base_url)
+    }
+
+    fn normalized(mut self) -> Self {
+        self.id = self.id.trim().to_owned();
+        self.name = self.name.trim().to_owned();
+        self.provider = self.provider.trim().to_lowercase();
+        self.base_url = self.base_url.trim().trim_end_matches('/').to_owned();
+        self.model = self.model.trim().to_owned();
+        self.api_key = self.api_key.trim().to_owned();
+        self
+    }
+}
+
 /// Persisted in the `app_settings` table so worker threads (which open their
 /// own `Repository`) see the same configuration as the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,55 +130,93 @@ static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 pub struct AiConfig {
     /// Master switch. Off means no network call is ever made.
     pub enabled: bool,
-    /// Provider preset id picked in the settings page (`openai`, `deepseek`,
-    /// `custom`, …). Persisted so the UI restores the same card; the request
-    /// path itself only reads `chat_base_url` + `chat_model`.
-    pub provider: String,
-    pub chat_base_url: String,
-    pub chat_model: String,
-    pub chat_api_key: String,
     /// Parallel photo workers, clamped to 1..=4.
     pub concurrency: u32,
+    /// Profile used by every AI feature; normalized to an existing entry.
+    pub active_profile_id: String,
+    pub profiles: Vec<AiProfile>,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: String::new(),
-            chat_base_url: String::new(),
-            chat_model: String::new(),
-            chat_api_key: String::new(),
             concurrency: 2,
+            active_profile_id: String::new(),
+            profiles: Vec::new(),
         }
     }
 }
 
 impl AiConfig {
-    /// Whether the chat endpoint is complete enough for a call.
-    pub fn chat_ready(&self) -> bool {
-        !self.chat_model.trim().is_empty() && Self::url_ok(&self.chat_base_url)
+    /// The profile the app actually calls. Falls back to the first entry when
+    /// the stored id no longer matches (e.g. that profile was deleted).
+    pub fn active(&self) -> Option<&AiProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == self.active_profile_id)
+            .or_else(|| self.profiles.first())
     }
 
-    fn url_ok(url: &str) -> bool {
-        let trimmed = url.trim();
-        trimmed.starts_with("http://") || trimmed.starts_with("https://")
+    pub fn model(&self) -> &str {
+        self.active().map_or("", |profile| profile.model.as_str())
+    }
+
+    pub fn base_url(&self) -> &str {
+        self.active()
+            .map_or("", |profile| profile.base_url.as_str())
+    }
+
+    pub fn api_key(&self) -> &str {
+        self.active().map_or("", |profile| profile.api_key.as_str())
+    }
+
+    /// Whether the active endpoint is complete enough for a call.
+    pub fn chat_ready(&self) -> bool {
+        self.active().is_some_and(AiProfile::ready)
     }
 
     /// Trim inputs and enforce invariants. Returns the normalized copy.
     pub fn normalized(mut self) -> Result<Self, AppError> {
-        self.provider = self.provider.trim().to_lowercase();
-        self.chat_base_url = self.chat_base_url.trim().trim_end_matches('/').to_owned();
-        self.chat_model = self.chat_model.trim().to_owned();
-        self.chat_api_key = self.chat_api_key.trim().to_owned();
         self.concurrency = self.concurrency.clamp(1, 4);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for index in 0..self.profiles.len() {
+            let mut profile = std::mem::take(&mut self.profiles[index]).normalized();
+            if profile.id.is_empty() {
+                profile.id = format!("profile-{}", index + 1);
+            }
+            if !seen.insert(profile.id.clone()) {
+                // Ids come from the frontend, but a duplicated one would make
+                // "which profile is active" ambiguous — suffix until unique.
+                let base = profile.id.clone();
+                let mut suffix = 2;
+                while !seen.insert(format!("{base}-{suffix}")) {
+                    suffix += 1;
+                }
+                profile.id = format!("{base}-{suffix}");
+            }
+            self.profiles[index] = profile;
+        }
+        self.active_profile_id = self.active_profile_id.trim().to_owned();
+        if self.profiles.is_empty() {
+            self.active_profile_id.clear();
+        } else if !self
+            .profiles
+            .iter()
+            .any(|profile| profile.id == self.active_profile_id)
+        {
+            self.active_profile_id = self.profiles[0].id.clone();
+        }
         if self.enabled {
-            if !Self::url_ok(&self.chat_base_url) {
+            let active = self
+                .active()
+                .ok_or_else(|| AppError::invalid_argument("请先添加一个模型配置"))?;
+            if !AiProfile::url_ok(&active.base_url) {
                 return Err(AppError::invalid_argument(
-                    "对话模型接口地址无效，需以 http(s):// 开头（一般填到 /v1 这一级）",
+                    "接口地址无效，需以 http(s):// 开头（一般填到 /v1 这一级）",
                 ));
             }
-            if self.chat_model.is_empty() {
+            if active.model.is_empty() {
                 return Err(AppError::invalid_argument("请选择或填写对话模型名称"));
             }
         }
@@ -138,11 +224,64 @@ impl AiConfig {
     }
 }
 
+/// Deserialization shape that accepts both the profile schema and the
+/// pre-profile flat schema (`chatBaseUrl` / `chatModel` / `chatApiKey`), so an
+/// upgrade keeps the existing endpoint instead of resetting it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct StoredAiConfig {
+    enabled: bool,
+    concurrency: u32,
+    active_profile_id: String,
+    profiles: Vec<AiProfile>,
+    provider: String,
+    chat_base_url: String,
+    chat_model: String,
+    chat_api_key: String,
+}
+
+impl From<StoredAiConfig> for AiConfig {
+    fn from(stored: StoredAiConfig) -> Self {
+        let concurrency = if stored.concurrency == 0 {
+            2
+        } else {
+            stored.concurrency
+        };
+        if !stored.profiles.is_empty() {
+            return Self {
+                enabled: stored.enabled,
+                concurrency,
+                active_profile_id: stored.active_profile_id,
+                profiles: stored.profiles,
+            };
+        }
+        let mut config = Self {
+            enabled: stored.enabled,
+            concurrency,
+            ..Self::default()
+        };
+        // Old single-endpoint config → one profile, keeping the same key.
+        if !stored.chat_model.trim().is_empty() || !stored.chat_base_url.trim().is_empty() {
+            config.active_profile_id = LEGACY_PROFILE_ID.to_owned();
+            config.profiles.push(AiProfile {
+                id: LEGACY_PROFILE_ID.to_owned(),
+                name: String::new(),
+                provider: stored.provider,
+                base_url: stored.chat_base_url,
+                model: stored.chat_model,
+                api_key: stored.chat_api_key,
+            });
+        }
+        config
+    }
+}
+
 pub fn load_config(repository: &Repository) -> Result<AiConfig, AppError> {
-    Ok(repository
-        .get_app_setting::<AiConfig>(CONFIG_KEY)
+    let stored = repository
+        .get_app_setting::<StoredAiConfig>(CONFIG_KEY)
         .map_err(AppError::from)?
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok(AiConfig::from(stored))
 }
 
 pub fn save_config(repository: &Repository, config: AiConfig) -> Result<AiConfig, AppError> {
@@ -162,7 +301,7 @@ pub fn validate_config_for_run(config: &AiConfig) -> Result<(), AppError> {
     }
     if !config.chat_ready() {
         return Err(AppError::invalid_argument(
-            "对话模型未配置完整（接口地址与模型名称必填）",
+            "当前选中的模型配置不完整（接口地址与模型名称必填）",
         ));
     }
     Ok(())
@@ -274,6 +413,66 @@ impl UreqTransport {
             .timeout(AI_TOTAL_TIMEOUT)
             .build()
     }
+
+    /// 发一次 `/chat/completions` 请求，原样交出响应或传输层错误；参数兼容性
+    /// 的降级统一由 [`Self::send_chat`] 负责。
+    fn post_once(
+        agent: &ureq::Agent,
+        url: &str,
+        api_key: &str,
+        body: &serde_json::Value,
+        stream: bool,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let mut request = agent.post(url);
+        if stream {
+            request = request.set("Accept", "text/event-stream");
+        }
+        if let Some((name, value)) = authorization_header(api_key) {
+            request = request.set(name, &value);
+        }
+        request.send_json(body.clone())
+    }
+
+    /// 先按原参数发；若 400 明确点名采样参数不受支持，去掉它们再发一次。
+    /// 其余错误照旧映射成项目统一错误（含状态码与服务商原文）。
+    fn send_chat(
+        agent: &ureq::Agent,
+        url: &str,
+        api_key: &str,
+        body: &serde_json::Value,
+        stream: bool,
+    ) -> Result<ureq::Response, AppError> {
+        match Self::post_once(agent, url, api_key, body, stream) {
+            Ok(response) => Ok(response),
+            Err(ureq::Error::Status(400, response)) => {
+                let text = response.into_string().unwrap_or_default();
+                if !is_sampling_param_rejection(&text) {
+                    return Err(map_status_error("对话模型请求", 400, &text));
+                }
+                Self::post_once(agent, url, api_key, &without_sampling_params(body), stream)
+                    .map_err(|error| map_http_error("对话模型请求", error))
+            }
+            Err(error) => Err(map_http_error("对话模型请求", error)),
+        }
+    }
+}
+
+/// Map a provider error body onto the shared error contract. Kept separate from
+/// [`map_http_error`] because the request path sometimes has to read the body
+/// itself (to decide whether a 400 is worth a retry) before reporting.
+fn map_status_error(context: &str, code: u16, body: &str) -> AppError {
+    let snippet: String = body.chars().take(300).collect();
+    if (500..=599).contains(&code) || code == 429 {
+        AppError::io(format!("{context} 失败（HTTP {code}，可重试）: {snippet}"))
+    } else {
+        let hint = match code {
+            401 | 403 => "。请检查 API Key 是否正确、是否有该模型权限",
+            404 => "。请检查 Base URL（一般填到 /v1 这一级，不要带 /chat/completions）与模型名称",
+            400 => "。请检查模型名称是否正确、该模型是否支持当前请求",
+            _ => "",
+        };
+        AppError::invalid_argument(format!("{context} 失败（HTTP {code}）{hint}: {snippet}"))
+    }
 }
 
 /// Map HTTP/transport failures onto the shared error contract. 429/5xx and
@@ -284,25 +483,42 @@ fn map_http_error(context: &str, error: ureq::Error) -> AppError {
     match error {
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
-            let snippet: String = body.chars().take(300).collect();
-            if (500..=599).contains(&code) || code == 429 {
-                AppError::io(format!("{context} 失败（HTTP {code}，可重试）: {snippet}"))
-            } else {
-                let hint = match code {
-                    401 | 403 => "。请检查 API Key 是否正确、是否有该模型权限",
-                    404 => "。请检查 Base URL（一般填到 /v1 这一级，不要带 /chat/completions）与模型名称",
-                    400 => "。请检查模型名称是否正确、该模型是否支持当前请求",
-                    _ => "",
-                };
-                AppError::invalid_argument(format!(
-                    "{context} 失败（HTTP {code}）{hint}: {snippet}"
-                ))
-            }
+            map_status_error(context, code, &body)
         }
         ureq::Error::Transport(transport) => {
             AppError::io(format!("{context} 网络错误（可重试）: {transport}"))
         }
     }
+}
+
+/// 新版推理模型普遍收紧了采样参数：OpenAI 的 GPT-6 / o 系列、以及部分国产
+/// 推理模型会直接以 400 拒收 `temperature`、`max_tokens`（要求改用
+/// `max_completion_tokens` 或干脆不传）。这两个字段只是"让输出更短更稳"的
+/// 附加项，不该让整批打标失败，所以识别到这类报文时去掉它们重发一次。
+fn is_sampling_param_rejection(body: &str) -> bool {
+    let lowered = body.to_ascii_lowercase();
+    let names_param = lowered.contains("temperature")
+        || lowered.contains("max_tokens")
+        || lowered.contains("max_completion_tokens")
+        || lowered.contains("top_p");
+    let rejected = lowered.contains("unsupported")
+        || lowered.contains("not support")
+        || lowered.contains("unrecognized")
+        || lowered.contains("unknown field")
+        || lowered.contains("invalid value")
+        || body.contains("不支持");
+    names_param && rejected
+}
+
+/// 去掉采样参数后的请求体副本（`temperature` / `max_tokens` / `top_p`）。
+fn without_sampling_params(body: &serde_json::Value) -> serde_json::Value {
+    let mut relaxed = body.clone();
+    if let Some(object) = relaxed.as_object_mut() {
+        object.remove("temperature");
+        object.remove("max_tokens");
+        object.remove("top_p");
+    }
+    relaxed
 }
 
 /// `Authorization: Bearer …` only when a key is configured; local compatible
@@ -336,7 +552,7 @@ impl AiTransport for UreqTransport {
             None => json!(prompt),
         };
         let body = json!({
-            "model": config.chat_model,
+            "model": config.model(),
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
             "max_tokens": 800,
@@ -344,13 +560,8 @@ impl AiTransport for UreqTransport {
         // No per-request `.timeout()` here: it would replace the agent's
         // overall 120 s cap (ureq lets the request value win).
         let agent = Self::agent();
-        let mut request = agent.post(format!("{}/chat/completions", config.chat_base_url).as_str());
-        if let Some((name, value)) = authorization_header(&config.chat_api_key) {
-            request = request.set(name, &value);
-        }
-        let response = request
-            .send_json(body)
-            .map_err(|error| map_http_error("对话模型请求", error))?;
+        let url = format!("{}/chat/completions", config.base_url());
+        let response = Self::send_chat(&agent, &url, config.api_key(), &body, false)?;
         let value: serde_json::Value = response
             .into_json()
             .map_err(|error| AppError::io(format!("对话模型响应解析失败: {error}")))?;
@@ -389,7 +600,7 @@ impl AiTransport for UreqTransport {
             }
         }
         let body = json!({
-            "model": config.chat_model,
+            "model": config.model(),
             "messages": payload,
             "temperature": CHAT_TEMPERATURE,
             "max_tokens": CHAT_MAX_TOKENS,
@@ -403,15 +614,8 @@ impl AiTransport for UreqTransport {
             .timeout_connect(AI_CONNECT_TIMEOUT)
             .timeout_read(AI_READ_TIMEOUT)
             .build();
-        let mut request = agent
-            .post(format!("{}/chat/completions", config.chat_base_url).as_str())
-            .set("Accept", "text/event-stream");
-        if let Some((name, value)) = authorization_header(&config.chat_api_key) {
-            request = request.set(name, &value);
-        }
-        let response = request
-            .send_json(body)
-            .map_err(|error| map_http_error("对话模型请求", error))?;
+        let url = format!("{}/chat/completions", config.base_url());
+        let response = Self::send_chat(&agent, &url, config.api_key(), &body, true)?;
         let reader = std::io::BufReader::new(response.into_reader());
         let mut full = String::new();
         use std::io::BufRead;
@@ -627,7 +831,7 @@ pub fn process_item(
             media_item_id: &details.item.id,
             caption: Some(&description.caption),
             tags_json: Some(&tags_json),
-            ai_model: Some(config.chat_model.as_str()),
+            ai_model: Some(config.model()),
             status: "success",
             error_message: None,
             processed_at: Some(&now),
@@ -1521,11 +1725,16 @@ mod tests {
     fn ready_config() -> AiConfig {
         AiConfig {
             enabled: true,
-            provider: "openai".into(),
-            chat_base_url: "https://api.example.com/v1".into(),
-            chat_model: "vision-model".into(),
-            chat_api_key: "key".into(),
             concurrency: 2,
+            active_profile_id: "profile-a".into(),
+            profiles: vec![AiProfile {
+                id: "profile-a".into(),
+                name: String::new(),
+                provider: "openai".into(),
+                base_url: "https://api.example.com/v1".into(),
+                model: "vision-model".into(),
+                api_key: "key".into(),
+            }],
         }
     }
 
@@ -1658,24 +1867,68 @@ mod tests {
     }
 
     #[test]
+    fn sampling_param_rejections_are_recognised() {
+        // OpenAI GPT-6 / o 系列对 temperature 的典型报文。
+        assert!(is_sampling_param_rejection(
+            r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.","type":"invalid_request_error"}}"#
+        ));
+        assert!(is_sampling_param_rejection(
+            r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}"#
+        ));
+        assert!(is_sampling_param_rejection(
+            r#"{"error":{"message":"不支持的参数：temperature"}}"#
+        ));
+        // 与参数无关的 400 不能被当成兼容性问题重发。
+        assert!(!is_sampling_param_rejection(
+            r#"{"error":{"message":"Model not found: gpt-9"}}"#
+        ));
+        assert!(!is_sampling_param_rejection("temperature"));
+        assert!(!is_sampling_param_rejection(""));
+    }
+
+    #[test]
+    fn relaxed_body_drops_sampling_params_only() {
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "top_p": 1.0,
+            "stream": true,
+        });
+        let relaxed = without_sampling_params(&body);
+        assert!(relaxed.get("temperature").is_none());
+        assert!(relaxed.get("max_tokens").is_none());
+        assert!(relaxed.get("top_p").is_none());
+        assert_eq!(relaxed["model"], "m");
+        assert_eq!(relaxed["stream"], true);
+        // 原请求体不被就地修改，重发失败的路径仍能复用它。
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
     fn config_normalization_enforces_chat_requirements() {
         let config = AiConfig {
             enabled: true,
-            chat_base_url: "  https://api.example.com/v1/  ".into(),
+            active_profile_id: "p1".into(),
+            profiles: vec![AiProfile {
+                id: "p1".into(),
+                base_url: "  https://api.example.com/v1/  ".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         // Missing model name is rejected.
         assert!(config.clone().normalized().is_err());
         // Trailing slash trimmed and provider lower-cased once the model is set.
-        let normalized = AiConfig {
-            provider: "  OpenAI ".into(),
-            chat_model: "m".into(),
-            ..config
-        }
-        .normalized()
-        .unwrap();
-        assert_eq!(normalized.chat_base_url, "https://api.example.com/v1");
-        assert_eq!(normalized.provider, "openai");
+        let mut with_model = config.clone();
+        with_model.profiles[0].provider = "  OpenAI ".into();
+        with_model.profiles[0].model = "m".into();
+        with_model.profiles[0].api_key = " sk-1 ".into();
+        let normalized = with_model.normalized().unwrap();
+        assert_eq!(normalized.base_url(), "https://api.example.com/v1");
+        assert_eq!(normalized.active().unwrap().provider, "openai");
+        assert_eq!(normalized.api_key(), "sk-1");
         // Disabled configs are stored as-is without validation.
         let idle = AiConfig {
             enabled: false,
@@ -1683,9 +1936,105 @@ mod tests {
         }
         .normalized()
         .unwrap();
-        assert!(idle.chat_base_url.is_empty());
+        assert!(idle.base_url().is_empty());
+        assert!(idle.active().is_none());
         assert!(!AiConfig::default().enabled);
         assert_eq!(AiConfig::default().concurrency, 2);
+    }
+
+    #[test]
+    fn config_keeps_one_independent_key_per_profile() {
+        let mut config = AiConfig {
+            enabled: true,
+            concurrency: 2,
+            active_profile_id: "p2".into(),
+            profiles: vec![
+                AiProfile {
+                    id: "p1".into(),
+                    provider: "openai".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    model: "gpt-6-luna".into(),
+                    api_key: "sk-first".into(),
+                    ..Default::default()
+                },
+                AiProfile {
+                    id: "p2".into(),
+                    provider: "openai".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    model: "gpt-6.1-terra".into(),
+                    api_key: "sk-second".into(),
+                    ..Default::default()
+                },
+            ],
+        }
+        .normalized()
+        .unwrap();
+        // Same provider twice: the active profile decides which key is used.
+        assert_eq!(config.model(), "gpt-6.1-terra");
+        assert_eq!(config.api_key(), "sk-second");
+        config.active_profile_id = "p1".into();
+        assert_eq!(config.model(), "gpt-6-luna");
+        assert_eq!(config.api_key(), "sk-first");
+        // The other profile is untouched.
+        assert_eq!(config.profiles[1].api_key, "sk-second");
+    }
+
+    #[test]
+    fn config_normalizes_profile_ids_and_active_pointer() {
+        let config = AiConfig {
+            active_profile_id: "missing".into(),
+            profiles: vec![
+                AiProfile {
+                    model: "a".into(),
+                    base_url: "https://a.example/v1".into(),
+                    ..Default::default()
+                },
+                AiProfile {
+                    id: "dup".into(),
+                    model: "b".into(),
+                    ..Default::default()
+                },
+                AiProfile {
+                    id: "dup".into(),
+                    model: "c".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(config.profiles[0].id, "profile-1");
+        assert_eq!(config.profiles[1].id, "dup");
+        assert_eq!(config.profiles[2].id, "dup-2");
+        // Unknown active id falls back to the first profile.
+        assert_eq!(config.active_profile_id, "profile-1");
+        assert_eq!(config.model(), "a");
+    }
+
+    #[test]
+    fn legacy_flat_config_migrates_to_a_single_profile() {
+        let stored: StoredAiConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "provider": "deepseek",
+            "chatBaseUrl": "https://api.deepseek.com/v1/",
+            "chatModel": "deepseek-flash",
+            "chatApiKey": "sk-legacy",
+            "concurrency": 3,
+        }))
+        .unwrap();
+        let config = AiConfig::from(stored).normalized().unwrap();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.active_profile_id, LEGACY_PROFILE_ID);
+        assert_eq!(config.profiles[0].id, LEGACY_PROFILE_ID);
+        assert_eq!(config.api_key(), "sk-legacy");
+        assert_eq!(config.base_url(), "https://api.deepseek.com/v1");
+        assert!(config.chat_ready());
+        // A config without any endpoint stays empty instead of spawning one.
+        let empty = AiConfig::from(StoredAiConfig::default());
+        assert!(empty.profiles.is_empty());
+        assert!(empty.active_profile_id.is_empty());
+        assert_eq!(empty.concurrency, 2);
     }
 
     #[test]

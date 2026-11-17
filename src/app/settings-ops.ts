@@ -1,6 +1,7 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import {
   AiConfigDto,
+  AiProfileDto,
   cancelAiProcess,
   getAiConfig,
   getAiStats,
@@ -37,7 +38,14 @@ import {
   startLibraryScan,
   startThumbnailRebuild,
 } from "../api/media";
-import { CUSTOM_MODEL_ID, findProvider } from "../lib/ai-providers";
+import {
+  CUSTOM_MODEL_ID,
+  findProvider,
+  newProfileId,
+  pickActiveProfile,
+  profileLabel,
+  providerApiKey,
+} from "../lib/ai-providers";
 import { extensionsToInput, parseExtensionsInput } from "../lib/filters";
 import { formatCount } from "../lib/format";
 import { syncLiquidGlass } from "../liquid-glass";
@@ -294,35 +302,80 @@ export async function saveBackupDefaults(): Promise<void> {
 
 // ── AI 增强（设置页） ───────────────────────────────────────────────────────
 
-/**
- * 首次配置时给草稿垫一个默认服务商：卡片有选中项、地址与推荐模型都填好，
- * 用户只用粘一个 Key。已经配过的（任一字段有值）原样返回，不覆盖旧选择。
- */
-function initialAiDraft(config: AiConfigDto): AiConfigDto {
-  const draft: AiConfigDto = { ...config };
-  if (draft.provider.trim() || draft.chatBaseUrl.trim() || draft.chatModel.trim()) return draft;
-  const preset = findProvider("openai");
-  draft.provider = preset.id;
-  draft.chatBaseUrl = preset.baseUrl;
-  draft.chatModel = preset.models[0]?.id ?? "";
-  return draft;
+/** 深拷贝草稿：档案是可变对象，浅拷贝会让草稿与已保存配置互相污染。 */
+function cloneAiConfig(config: AiConfigDto): AiConfigDto {
+  return {
+    enabled: config.enabled,
+    concurrency: config.concurrency,
+    activeProfileId: config.activeProfileId,
+    profiles: config.profiles.map((profile) => ({ ...profile })),
+  };
+}
+
+/** 按服务商预设新建一条空白档案（地址与首个推荐模型已填好）。 */
+function blankProfile(providerId: string): AiProfileDto {
+  const preset = findProvider(providerId);
+  return {
+    id: newProfileId(),
+    name: "",
+    provider: preset.id,
+    baseUrl: preset.baseUrl,
+    model: preset.models[0]?.id ?? "",
+    apiKey: "",
+  };
+}
+
+/** 草稿的展示用名字（保存提示、删除提示里用）。 */
+function draftProfileLabel(config: AiConfigDto): string {
+  const profile = pickActiveProfile(config);
+  return profile ? profileLabel(profile) : "未命名配置";
 }
 
 /**
- * 把 DOM 上可能尚未提交的输入同步回草稿。切服务商、保存、测试连接前都要先
- * 调一次，否则刚敲完还没失焦的 Key / 手填模型名会丢。
+ * 首次配置时垫一条默认档案：卡片有选中项、地址与推荐模型都填好，用户只用粘
+ * 一个 Key。已有多条档案时只做拷贝与 active 校正，不覆盖旧选择。
+ */
+function initialAiDraft(config: AiConfigDto): AiConfigDto {
+  const draft = cloneAiConfig(config);
+  if (draft.profiles.length > 0) {
+    if (!draft.profiles.some((profile) => profile.id === draft.activeProfileId)) {
+      draft.activeProfileId = draft.profiles[0]?.id ?? "";
+    }
+    return draft;
+  }
+  const profile = blankProfile("openai");
+  draft.profiles = [profile];
+  draft.activeProfileId = profile.id;
+  return draft;
+}
+
+/** 切换服务商或档案后清掉上一次的测试结果，避免状态错位。 */
+function resetAiTestState(): void {
+  state.aiTestResult = null;
+}
+
+/**
+ * 把 DOM 上可能尚未提交的输入同步回草稿。切服务商、切档案、新建、保存、测试
+ * 连接前都要先调一次，否则刚敲完还没失焦的 Key / 手填模型名会丢。
+ *
+ * 写入目标是「当前档案」自己的字段，因此每条档案的 Key 天然隔离。
  */
 export function syncAiDraftFromDom(): void {
   const draft = state.aiDraft;
   if (!draft) return;
   const value = (selector: string): string | null =>
     app.querySelector<HTMLInputElement | HTMLSelectElement>(selector)?.value ?? null;
-  const key = value("#settings-ai-chat-key");
-  if (key !== null) draft.chatApiKey = key.trim();
-  const url = value("#settings-ai-chat-url");
-  if (url !== null) draft.chatBaseUrl = url.trim();
-  const customModel = value("#settings-ai-model-custom");
-  if (customModel !== null) draft.chatModel = customModel.trim();
+  const profile = pickActiveProfile(draft);
+  if (profile) {
+    const key = value("#settings-ai-chat-key");
+    if (key !== null) profile.apiKey = key.trim();
+    const url = value("#settings-ai-chat-url");
+    if (url !== null) profile.baseUrl = url.trim();
+    const customModel = value("#settings-ai-model-custom");
+    if (customModel !== null) profile.model = customModel.trim();
+    const name = value("#settings-ai-profile-name");
+    if (name !== null) profile.name = name.trim();
+  }
   const concurrency = Number.parseInt(value("#settings-ai-concurrency") ?? "", 10);
   if (Number.isFinite(concurrency)) draft.concurrency = concurrency;
   const enabled = app.querySelector<HTMLInputElement>("#settings-ai-enabled");
@@ -334,13 +387,23 @@ export function selectAiProvider(providerId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
+  const profile = pickActiveProfile(draft);
+  if (!profile) return;
   const preset = findProvider(providerId);
-  draft.provider = preset.id;
-  if (!preset.custom) {
-    draft.chatBaseUrl = preset.baseUrl;
-    draft.chatModel = preset.models[0]?.id ?? "";
+  const changed = profile.provider !== preset.id;
+  profile.provider = preset.id;
+  // 只有真的换了服务商才重置地址与模型：重复点当前卡片不该冲掉手调的配置。
+  if (changed && !preset.custom) {
+    profile.baseUrl = preset.baseUrl;
+    profile.model = preset.models[0]?.id ?? "";
   }
-  state.aiTestResult = null;
+  if (changed) {
+    // 每个服务商的 Key 各自保存：换服务商时带出该服务商已存的 Key（多条档案
+    // 取最近一条），没有就清空——绝不把上一个服务商的 Key 留在输入框里。
+    const stored = providerApiKey(draft.profiles, preset.id, profile.id);
+    profile.apiKey = stored || (preset.custom ? profile.apiKey : "");
+  }
+  resetAiTestState();
   updateSettingsPanel();
 }
 
@@ -349,8 +412,65 @@ export function selectAiModel(modelId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
-  draft.chatModel = modelId === CUSTOM_MODEL_ID ? "" : modelId;
-  state.aiTestResult = null;
+  const profile = pickActiveProfile(draft);
+  if (!profile) return;
+  profile.model = modelId === CUSTOM_MODEL_ID ? "" : modelId;
+  resetAiTestState();
+  updateSettingsPanel();
+}
+
+/** 切换当前档案：先把手上的输入落回旧档案，再切到目标档案。 */
+export function selectAiProfile(profileId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  if (!draft.profiles.some((profile) => profile.id === profileId)) return;
+  draft.activeProfileId = profileId;
+  resetAiTestState();
+  updateSettingsPanel();
+}
+
+/**
+ * 新建一条档案：沿用当前服务商与它的 Key，用户只需换个模型。
+ * 若旧档案没起名，顺手把「服务商 · 模型」固化下来，避免两条同名分不清。
+ */
+export function createAiProfile(): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const current = pickActiveProfile(draft);
+  const providerId = current?.provider || "openai";
+  const profile = blankProfile(providerId);
+  profile.apiKey = providerApiKey(draft.profiles, providerId);
+  if (current && !current.name.trim()) current.name = profileLabel(current);
+  draft.profiles.push(profile);
+  draft.activeProfileId = profile.id;
+  resetAiTestState();
+  state.settingsNotice = "已新增一条配置：选好模型后点「保存配置」";
+  updateSettingsPanel();
+}
+
+/** 删除当前档案（草稿内生效，保存后落库）。 */
+export function deleteAiProfile(): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const current = pickActiveProfile(draft);
+  if (!current) return;
+  const removedLabel = profileLabel(current);
+  const remaining = draft.profiles.filter((profile) => profile.id !== current.id);
+  if (remaining.length > 0) {
+    draft.profiles = remaining;
+    draft.activeProfileId = remaining[remaining.length - 1]?.id ?? "";
+    state.settingsNotice = `已删除「${removedLabel}」，保存后生效`;
+  } else {
+    // 至少留一条，否则页面没有可编辑的输入。
+    const fresh = blankProfile("openai");
+    draft.profiles = [fresh];
+    draft.activeProfileId = fresh.id;
+    state.settingsNotice = "已删除最后一条配置，已重置为空白配置";
+  }
+  resetAiTestState();
   updateSettingsPanel();
 }
 
@@ -369,8 +489,10 @@ export async function saveAiSettings(): Promise<void> {
   state.settingsError = null;
   try {
     state.aiConfig = await setAiConfig(draft);
-    state.aiDraft = { ...state.aiConfig };
-    state.settingsNotice = state.aiConfig.enabled ? "AI 配置已保存并启用" : "AI 配置已保存（功能保持关闭）";
+    state.aiDraft = initialAiDraft(state.aiConfig);
+    state.settingsNotice = state.aiConfig.enabled
+      ? `已保存并启用「${draftProfileLabel(state.aiConfig)}」`
+      : "AI 配置已保存（功能保持关闭）";
     if (state.library) state.aiStats = await getAiStats(state.library.id);
   } catch (error) {
     state.settingsError = toDetailedMessage(error, "保存 AI 配置失败");
@@ -391,7 +513,7 @@ export async function testAiConnectionNow(): Promise<void> {
   try {
     // 测试命令只读已保存的配置，所以先把草稿落库，避免「测的是 A、存的是 B」。
     state.aiConfig = await setAiConfig(draft);
-    state.aiDraft = { ...state.aiConfig };
+    state.aiDraft = initialAiDraft(state.aiConfig);
     state.aiTestResult = await testAiConnection();
   } catch (error) {
     state.aiTestResult = {

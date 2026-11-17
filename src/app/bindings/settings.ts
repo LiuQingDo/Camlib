@@ -18,6 +18,8 @@ import {
   cancelThumbnailRebuild,
   chooseThumbnailCacheFolder,
   closeSettings,
+  createAiProfile,
+  deleteAiProfile,
   loadSettingsSectionData,
   openDirectory,
   previewAiRun,
@@ -31,6 +33,7 @@ import {
   saveThemeSetting,
   saveThumbnailCacheDir,
   selectAiModel,
+  selectAiProfile,
   selectAiProvider,
   startAiRun,
   syncAiDraftFromDom,
@@ -229,12 +232,22 @@ export function bindSettingsBodyEvents(): void {
     // 选「自定义模型…」后把光标送到刚出现的输入框，省一次点击。
     app.querySelector<HTMLInputElement>("#settings-ai-model-custom")?.focus();
   });
+  // 配置档案：切换 / 新建 / 删除。每个档案自带 Key，切换时输入区整体换一份。
+  app.querySelector<HTMLSelectElement>("#settings-ai-profile")?.addEventListener("change", (event) => {
+    selectAiProfile((event.target as HTMLSelectElement).value);
+  });
+  app.querySelector<HTMLButtonElement>("#settings-ai-profile-new")?.addEventListener("click", () => createAiProfile());
+  app
+    .querySelector<HTMLButtonElement>("#settings-ai-profile-delete")
+    ?.addEventListener("click", () => deleteAiProfile());
   app
     .querySelector<HTMLButtonElement>("#settings-ai-key-toggle")
     ?.addEventListener("click", () => toggleAiKeyVisibility());
   // 未失焦的输入先同步进草稿，避免切换服务商/重新渲染时丢字。
   app
-    .querySelectorAll<HTMLInputElement>("#settings-ai-chat-key, #settings-ai-model-custom, #settings-ai-chat-url")
+    .querySelectorAll<HTMLInputElement>(
+      "#settings-ai-chat-key, #settings-ai-model-custom, #settings-ai-chat-url, #settings-ai-profile-name",
+    )
     .forEach((input) => input.addEventListener("input", () => syncAiDraftFromDom()));
   app
     .querySelector<HTMLSelectElement>("#settings-ai-concurrency")

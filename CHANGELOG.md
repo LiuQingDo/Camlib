@@ -15,8 +15,13 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ## [Unreleased]
 
+### Added
+
+- AI 配置支持多套档案：同一服务商可以保存多条（两个账号、打标用便宜模型 + 对话用强模型），每条档案**各自保存自己的 API Key**，切换、改名或删除某条不会串用或覆盖其它条的 Key；切换服务商时 Key 输入框自动换成该服务商已存的 Key（没有就留空），新建档案默认沿用当前服务商与它的 Key。旧版单条配置在读取时自动迁移成一条档案，原有 Key 与模型保持不变
+
 ### Fixed
 
+- 修复新版推理模型选好也打不了标：OpenAI GPT-6 系、部分国产推理模型会以 400 直接拒收请求体里的 `temperature` / `max_tokens`（要求改用 `max_completion_tokens` 或干脆不传），而传输层这两个字段是写死的。现在识别到 400 报文点名这些参数时，去掉 `temperature` / `max_tokens` / `top_p` 自动重发一次；其余错误仍按原样透出状态码与服务商原文，不会把"模型不存在"之类的真错误也重试一遍
 - 修复主页滚轮停下时整屏缩略图"闪一下"：入场淡入原来写成 `.card-preview img` 的常驻 `animation`，滚动降级期间被 `html.is-scrolling … { animation:none }` 摘掉，撤掉降级标记的那一刻浏览器把它当成新动画重放——所有已显示的缩略图一起从 `opacity:0` 淡回 1（实测停手后第 56ms，12 张可见图 `opacity` 全部归 0）。现在淡入只挂在真正到货的那张图上（`.card-preview img.is-fresh`，`render/grid.ts` 建 `<img>` 时按是否在滚动决定加不加），骨架 shimmer 的降级也从 `animation:none` 改成 `animation-play-state:paused`，暂停不重启动画
 - 修复预览里 ←/→ 换图的"卡一下、闪一下"：换图走的是整块签名重建，`.modal-backdrop` 连同全屏 `backdrop-filter: blur(18px)` 和面板一起被替换，入场动画重播、弹窗几何重算、媒体节点重新挂载。现在外壳只在打开时建一次，换图只改位置计数/标题/按钮可见性，`#modal-media` 由装载钩子交叉替换（旧图一直留到替换那一刻，不再先清成转圈）。12 次连续换图同条件实测：脚本耗时 −40%、样式重算 −11%、主线程繁忙 −17%，入场动画 `startTime` 不再重置
 - 修复关闭弹窗是硬切：原来是直接把容器 `innerHTML` 清空，画面上"闪没了"。现在先给根节点播 140ms 淡出再摘 DOM，退场期间 `pointer-events:none` 不吃点击；这 140ms 内重新打开同一个弹窗会撤掉定时器直接换新内容，不会清掉刚绘制的面板
@@ -31,6 +36,7 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Changed
 
+- AI 服务商清单按 2026-11 各家官方文档重核，服务商从 9 家扩到 14 家：新增豆包·方舟（`doubao-seed-2.1-pro/lite/turbo`）、百度千帆（`ernie-5.1`）、腾讯混元（`hy4`）、MiniMax（`MiniMax-M3`）、Google Gemini（`gemini-4-argon`，走 `v1beta/openai` 兼容层）、Grok（`grok-4.7`）。原有预设的模型也换成当前在售型号——OpenAI `gpt-6.1-terra/6-luna/6.1-sol/6-astra`、通义 `qwen4-max/qwen3.8-flash/qwen3-vl-plus`、GLM `glm-5.3-flash/glm-5v-turbo/glm-4.6v-flash`、Kimi `kimi-k3.1-pro/kimi-k2.6`、DeepSeek `deepseek-flash`（现已支持图片）、硅基流动 `Qwen3-VL-32B/30B-A3B/8B`、Ollama `qwen3-vl:8b/4b/30b-a3b`；清单只收能走 Chat Completions 且吃 `image_url` 的模型，`vision` 标记逐条核对，纯文本模型仍会被设置页提示
 - AI 增强取消 Embedding 模型与向量检索：模型配置从「对话 + embedding 两组」收成一套，语义检索改为对话模型解析出时间/类型条件 + 关键词，条件走 SQL、关键词匹配已生成的描述与标签后取交集；批量处理去掉「仅补算向量」。`media_ai` 的 `embedding` / `embedding_model` / `embedding_dim` 三列由迁移 `0009_ai_drop_embeddings.sql` 删除（schema v9）
 - AI 模型配置改为服务商卡片 + 模型下拉，不再要求手填 Base URL：OpenAI / 通义千问 / 智谱 GLM / Moonshot / DeepSeek / 硅基流动 / OpenRouter / Ollama / LM Studio 各带接口地址与常用模型，私有部署或清单外的模型走「自定义」；选中纯文本模型时提前提示打标不可用，配置改动先落草稿、保存或测试时才写库
 - 界面文案里的「语义搜索」统一改为「AI 搜索」，与"检索依据是描述与标签而不是向量"保持一致

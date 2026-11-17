@@ -2694,6 +2694,45 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   text-overflow:ellipsis;
   white-space:nowrap;
 }
+.ai-profile-bar {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:flex-end;
+  gap:10px;
+  margin-top:14px;
+  padding:10px 12px;
+  border:1px solid var(--border-soft);
+  border-radius:14px;
+  background:rgba(0,0,0,.02);
+}
+.ai-profile-select {
+  flex:1 1 210px;
+}
+.ai-profile-name {
+  flex:1 1 150px;
+}
+.ai-profile-bar select,
+.ai-profile-bar input {
+  width:100%;
+}
+.ai-profile-actions {
+  display:flex;
+  gap:8px;
+  padding-bottom:1px;
+}
+.ai-profile-actions .outline-button {
+  height:36px;
+}
+.ai-profile-actions .outline-button:disabled {
+  cursor:not-allowed;
+  opacity:.45;
+}
+.ai-profile-hint {
+  margin-top:8px;
+  color:#6b6b6b;
+  font-size:11px;
+  line-height:1.5;
+}
 .ai-field-row {
   display:grid;
   grid-template-columns:minmax(0,1fr) minmax(0,1.12fr);
@@ -2847,6 +2886,8 @@ details.ai-advanced .settings-form {
 [data-theme="dark"] .ai-switch-thumb { background: #f2f2f2; }
 [data-theme="dark"] .ai-provider-card { border-color: rgba(255,255,255,.1); background: rgba(255,255,255,.05); }
 [data-theme="dark"] .ai-provider-card:hover { border-color: rgba(255,255,255,.22); background: rgba(255,255,255,.1); }
+[data-theme="dark"] .ai-profile-bar { border-color: rgba(255,255,255,.1); background: rgba(255,255,255,.04); }
+[data-theme="dark"] .ai-profile-hint { color: var(--faint); }
 [data-theme="dark"] .ai-provider-card.is-active { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 [data-theme="dark"] .ai-provider-mark { color: var(--ink); background: rgba(255,255,255,.1); }
 [data-theme="dark"] .ai-provider-card.is-active .ai-provider-mark { color: #1a1a1a; background: var(--accent); }

@@ -223,7 +223,7 @@ CREATE TABLE media_ai_tags (
 - AI 标签**不写入** `media_tags`：`tag_detach` 等用户操作不会误删 AI 关联；同名标签复用 `tags` 表同一行（`tags.name` 唯一），`list_tags` 投影 `has_ai` 供筛选区加 AI 徽标。
 - `query_media` 的 `tag_ids` 过滤同时匹配 `media_tags` 与 `media_ai_tags`（AND 语义不变）。
 - 自然语言检索不存向量：`ai_search` 先把查询解析为时间/类型条件 + 关键词，条件走 SQL、关键词用 `LIKE` 匹配 `caption` 与 `tags_json`，两者取交集。v9 迁移（`0009_ai_drop_embeddings.sql`）删除了 v7 遗留的 `embedding` / `embedding_model` / `embedding_dim` 三列。
-- AI 配置存于 `app_settings` 表（key = `ai_config`）：总开关、服务商预设 id、接口地址、模型名、API Key、并发数；功能默认关闭。
+- AI 配置存于 `app_settings` 表（key = `ai_config`）：总开关、并发数、`activeProfileId` 与 `profiles` 数组。每条档案有自己的 `provider` / `baseUrl` / `model` / `apiKey`，因此同一服务商可保存多条且 Key 互不影响；旧版扁平配置（`chatBaseUrl` / `chatModel` / `chatApiKey`）读取时自动迁移成一条档案，无需 schema 迁移。功能默认关闭。
 
 ## 4. 索引与查询约定
 
