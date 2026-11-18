@@ -237,7 +237,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 .date-link,.day-link { display:flex; width:100%; align-items:center; justify-content:space-between; border:0; border-radius:9px; color:#555555; background:transparent; font-size:12px; text-align:left; }.date-link { min-height:32px; padding:0 8px; transition:color .18s ease,background .18s ease; }.date-link span:last-child,.day-link span:last-child { color:#9a9a9a; font-size:10px; font-variant-numeric:tabular-nums; }
 .date-link:hover,.day-link:hover { color:#111111; background:rgba(255,255,255,.5); }.date-link.is-selected,.day-link.is-selected { color:#111111; background:rgba(255,255,255,.78); box-shadow:inset 0 1px rgba(255,255,255,.86); }.date-link.is-selected span:last-child,.day-link.is-selected span:last-child { color:#666666; }
 .all-link { margin-bottom:7px; color:#333333; font-weight:750; }.year-group { margin-top:4px; }.year-link { color:#222222; font-weight:720; }.month-list { margin-left:13px; padding:1px 0 0 13px; border-left:1px solid rgba(0,0,0,.08); }.month-group { margin-bottom:7px; }.month-group + .month-group { margin-top:8px; padding-top:6px; border-top:1px solid rgba(0,0,0,.06); }.month-link { min-height:30px; color:#444444; font-weight:650; }.month-link:not(.is-selected) { background:rgba(255,255,255,.18); }.day-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px 3px; margin-left:5px; padding:0 0 4px 7px; border-left:1px solid rgba(0,0,0,.06); }.day-link { min-height:25px; padding:0 6px; font-size:11px; transition:color .18s ease,background .18s ease; }.nav-empty { padding:9px 10px; color:#8a8a8a; font-size:12px; }
-.sidebar-footer { display:flex; flex:0 0 auto; align-items:center; gap:7px; padding:14px 10px 0; border-top:1px solid rgba(0,0,0,.08); }.footer-dot { width:7px; height:7px; border-radius:50%; background:#333333; box-shadow:0 0 0 3px rgba(0,0,0,.06); }.sidebar-footer .icon-button { margin-left:auto; }.auto-scan-toggle { display:inline-flex; align-items:center; gap:4px; margin-left:4px; color:var(--muted); font-size:10px; white-space:nowrap; }.auto-scan-toggle input { margin:0; }
+/* 底部状态栏：状态独占一行、控件独占一行。272px 窄侧栏放不进单行，
+   挤在一起时「索引已连接」会被压成两行，基线全乱。 */
+.sidebar-footer { display:flex; flex:0 0 auto; flex-direction:column; gap:7px; padding:13px 10px 0; border-top:1px solid rgba(0,0,0,.08); }
+.footer-status { display:flex; min-width:0; align-items:center; gap:7px; }
+.footer-status-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.footer-dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%; background:#333333; box-shadow:0 0 0 3px rgba(0,0,0,.06); }
+.footer-controls { display:flex; align-items:center; gap:2px; }
+.footer-actions { display:flex; align-items:center; gap:2px; margin-left:auto; }
+.sidebar-footer .icon-button { margin-left:0; }
+.auto-scan-toggle { display:inline-flex; height:26px; align-items:center; gap:5px; padding:0 3px; border-radius:9px; color:var(--muted); font-size:10px; white-space:nowrap; transition:color .18s ease,background .18s ease; }
+.auto-scan-toggle:hover { color:#111111; background:rgba(255,255,255,.5); }
+.auto-scan-toggle input { margin:0; }
 
 /* No top padding on the scroller: sticky top:0 would otherwise leave a gap
    above the pinned tools where scrolled media cards still paint. */
@@ -2047,6 +2058,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 [data-theme="dark"] .date-link:hover, [data-theme="dark"] .day-link:hover { color: var(--ink); background: var(--nav-hover); }
 [data-theme="dark"] .date-link.is-selected, [data-theme="dark"] .day-link.is-selected { color: var(--ink); background: var(--nav-active); box-shadow: inset 0 1px rgba(255,255,255,.06); }
 [data-theme="dark"] .sidebar-footer { border-top-color: var(--border-hairline); }
+[data-theme="dark"] .auto-scan-toggle:hover { color: var(--ink); background: rgba(255,255,255,.08); }
 [data-theme="dark"] .footer-dot { background: #9a9a9a; box-shadow: 0 0 0 3px rgba(255,255,255,.06); }
 
 [data-theme="dark"] .search-box {
@@ -2409,20 +2421,24 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 
 /* ── 侧边栏 AI 区块 ─────────────────────────────────────────────────────── */
 .ai-section { flex:0 0 auto; }
+/* 区块内所有纵向间距统一 6px：标题→统计卡→操作行，别让某一段更松或更挤。 */
+.ai-section .section-label { padding-bottom:6px; }
 .ai-sidebar-stats {
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
   gap:6px;
-  margin:0 0 8px;
+  margin:0 0 6px;
 }
+/* 容器一律不用描边：靠白底 + 柔和投影分层，边缘不会在近白侧栏上切出一道灰线。 */
 .ai-sidebar-stats > div {
   display:flex;
   flex-direction:column;
   gap:2px;
-  padding:7px 9px;
-  border:1px solid rgba(255,255,255,.7);
+  padding:8px 10px;
+  border:0;
   border-radius:12px;
-  background:rgba(255,255,255,.4);
+  background:rgba(255,255,255,.78);
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 5px 12px rgba(0,0,0,.05);
 }
 .ai-sidebar-stats dt {
   color:#8a8a8a;
@@ -2447,18 +2463,46 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
   background:rgba(255,255,255,.3);
 }
 .ai-sidebar-actions {
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:0 2px;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:6px;
 }
-.ai-sidebar-actions .text-button { font-weight:700; }
-.ai-single-progress {
-  margin:0 0 8px;
+/* 浅色模式下 .text-button 是纯透明，AI 区块会散成几行没有容器的文字；
+   这里补上跟统计卡同款的白底 + 投影，深色模式再用下面的 rule 接回原样式。 */
+.ai-sidebar-actions .text-button {
+  min-width:0;
+  overflow:hidden;
   padding:8px 10px;
-  border:1px solid rgba(255,255,255,.7);
+  border:0;
+  border-radius:11px;
+  background:rgba(255,255,255,.78);
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 5px 12px rgba(0,0,0,.05);
+  font-weight:700;
+  text-align:left;
+  text-overflow:ellipsis;
+  transition:background .18s ease,box-shadow .18s ease;
+}
+.ai-sidebar-actions .text-button:hover {
+  background:rgba(255,255,255,.96);
+  box-shadow:0 2px 4px rgba(0,0,0,.05),0 8px 18px rgba(0,0,0,.08);
+}
+[data-theme="dark"] .ai-sidebar-actions .text-button {
+  background:rgba(255,255,255,.06);
+  box-shadow:0 1px 2px rgba(0,0,0,.4),0 6px 14px rgba(0,0,0,.3);
+}
+[data-theme="dark"] .ai-sidebar-actions .text-button:hover {
+  background:rgba(255,255,255,.12);
+  box-shadow:0 2px 5px rgba(0,0,0,.45),0 9px 20px rgba(0,0,0,.38);
+}
+/* 批量处理带待处理计数，独占一行；三项挤同一行会把「（317）」推到栏外。 */
+.ai-sidebar-actions .text-button:last-child { grid-column:1 / -1; }
+.ai-single-progress {
+  margin:0 0 6px;
+  padding:9px 11px;
+  border:0;
   border-radius:12px;
-  background:rgba(255,255,255,.4);
+  background:rgba(255,255,255,.78);
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 5px 12px rgba(0,0,0,.05);
 }
 .ai-single-copy {
   display:flex;
@@ -2492,8 +2536,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:foc
 
 [data-theme="dark"] .ai-sidebar-stats > div,
 [data-theme="dark"] .ai-single-progress {
-  border-color: var(--border-hairline);
+  border:0;
   background: var(--control-bg, rgba(255,255,255,.06));
+  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 14px rgba(0,0,0,.3);
 }
 [data-theme="dark"] .ai-sidebar-stats dt { color: var(--faint); }
 [data-theme="dark"] .ai-sidebar-stats dd { color: var(--ink); }
