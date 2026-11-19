@@ -81,6 +81,17 @@ pub fn ai_test_connection_blocking(config: &AiConfig) -> Result<AiTestResultDto,
     })
 }
 
+/// 拉取上游模型清单（设置页「获取模型」按钮）。
+///
+/// 收的是表单里的地址与密钥，而不是已保存的配置：用户通常刚粘完 Key 就想挑模型，
+/// 此时草稿还没落库。阻塞 HTTP 调用放到 blocking worker 上跑。
+#[tauri::command]
+pub async fn ai_list_models(base_url: String, api_key: String) -> Result<Vec<String>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || ai::list_models(&base_url, &api_key))
+        .await
+        .map_err(|error| AppError::internal(format!("获取模型清单异常结束: {error}")))?
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiStatsDto {

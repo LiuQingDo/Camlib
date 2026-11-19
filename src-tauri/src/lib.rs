@@ -150,6 +150,7 @@ pub fn run() {
             commands::ai::ai_get_config,
             commands::ai::ai_set_config,
             commands::ai::ai_test_connection,
+            commands::ai::ai_list_models,
             commands::ai::ai_stats,
             commands::ai::ai_process_preview,
             commands::ai::ai_process_start,

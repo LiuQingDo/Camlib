@@ -5,6 +5,7 @@ import {
   cancelAiProcess,
   getAiConfig,
   getAiStats,
+  listAiModels,
   previewAiProcess,
   setAiConfig,
   startAiProcess,
@@ -39,12 +40,14 @@ import {
   startThumbnailRebuild,
 } from "../api/media";
 import {
-  CUSTOM_MODEL_ID,
+  findProfile,
   findProvider,
   newProfileId,
   pickActiveProfile,
   profileLabel,
+  profileTitle,
   providerApiKey,
+  providerRegions,
 } from "../lib/ai-providers";
 import { extensionsToInput, parseExtensionsInput } from "../lib/filters";
 import { formatCount } from "../lib/format";
@@ -126,6 +129,11 @@ export async function loadSettingsSectionData(): Promise<void> {
       state.aiKeyVisible = false;
       state.aiConfirming = false;
       state.aiTestResult = null;
+      // 每次进入都从供应商列表开始：编辑态只属于上一次会话。
+      state.aiView = "list";
+      state.aiEditingId = "";
+      state.aiCreating = false;
+      state.aiPickerQuery = "";
       if (state.library) {
         state.aiStats = await getAiStats(state.library.id);
       } else {
@@ -312,7 +320,7 @@ function cloneAiConfig(config: AiConfigDto): AiConfigDto {
   };
 }
 
-/** 按服务商预设新建一条空白档案（地址与首个推荐模型已填好）。 */
+/** 按服务商预设新建一条空白档案：只带出地址，模型等用户点「获取模型」再挑。 */
 function blankProfile(providerId: string): AiProfileDto {
   const preset = findProvider(providerId);
   return {
@@ -320,7 +328,7 @@ function blankProfile(providerId: string): AiProfileDto {
     name: "",
     provider: preset.id,
     baseUrl: preset.baseUrl,
-    model: preset.models[0]?.id ?? "",
+    model: "",
     apiKey: "",
   };
 }
@@ -332,47 +340,62 @@ function draftProfileLabel(config: AiConfigDto): string {
 }
 
 /**
- * 首次配置时垫一条默认档案：卡片有选中项、地址与推荐模型都填好，用户只用粘
- * 一个 Key。已有多条档案时只做拷贝与 active 校正，不覆盖旧选择。
+ * 首次配置时只做拷贝与 active 校正，**不再凭空造一条空白档案**：供应商由用户
+ * 自己从「添加供应商」里选，空列表就显示空态，避免出现一条谁也没填过的配置。
  */
 function initialAiDraft(config: AiConfigDto): AiConfigDto {
   const draft = cloneAiConfig(config);
-  if (draft.profiles.length > 0) {
-    if (!draft.profiles.some((profile) => profile.id === draft.activeProfileId)) {
-      draft.activeProfileId = draft.profiles[0]?.id ?? "";
-    }
+  if (draft.profiles.length === 0) {
+    draft.activeProfileId = "";
+    draft.enabled = false;
     return draft;
   }
-  const profile = blankProfile("openai");
-  draft.profiles = [profile];
-  draft.activeProfileId = profile.id;
+  if (!draft.profiles.some((profile) => profile.id === draft.activeProfileId)) {
+    draft.activeProfileId = draft.profiles[0]?.id ?? "";
+  }
   return draft;
 }
 
-/** 切换服务商或档案后清掉上一次的测试结果，避免状态错位。 */
+/** 切换档案或重新加载后清掉上一次的测试结果，避免状态错位。 */
 function resetAiTestState(): void {
   state.aiTestResult = null;
 }
 
 /**
- * 把 DOM 上可能尚未提交的输入同步回草稿。切服务商、切档案、新建、保存、测试
- * 连接前都要先调一次，否则刚敲完还没失焦的 Key / 手填模型名会丢。
+ * 清掉已取回的模型清单。清单属于「这个地址 + 这把 Key」，换档案、换区域、
+ * 保存之后就都不再对应得上，留着只会让人误点一个上游不存在的名字。
+ */
+function resetAiModelState(): void {
+  state.aiModels = null;
+  state.aiModelsBusy = false;
+  state.aiModelsError = null;
+  state.aiModelQuery = "";
+}
+
+/** 编辑页指向的档案：aiEditingId 优先，失效时退回「使用中」的那条。 */
+function editingProfile(draft: AiConfigDto): AiProfileDto | null {
+  return findProfile(draft.profiles, state.aiEditingId) ?? pickActiveProfile(draft);
+}
+
+/**
+ * 把 DOM 上可能尚未提交的输入同步回草稿。返回列表、切页、保存、测试连接前都
+ * 要先调一次，否则刚敲完还没失焦的 Key / 手填模型名会丢。
  *
- * 写入目标是「当前档案」自己的字段，因此每条档案的 Key 天然隔离。
+ * 写入目标是「编辑中的那条档案」，因此每条档案的 Key 天然隔离。
  */
 export function syncAiDraftFromDom(): void {
   const draft = state.aiDraft;
   if (!draft) return;
   const value = (selector: string): string | null =>
     app.querySelector<HTMLInputElement | HTMLSelectElement>(selector)?.value ?? null;
-  const profile = pickActiveProfile(draft);
+  const profile = editingProfile(draft);
   if (profile) {
     const key = value("#settings-ai-chat-key");
     if (key !== null) profile.apiKey = key.trim();
     const url = value("#settings-ai-chat-url");
     if (url !== null) profile.baseUrl = url.trim();
-    const customModel = value("#settings-ai-model-custom");
-    if (customModel !== null) profile.model = customModel.trim();
+    const modelInput = value("#settings-ai-model");
+    if (modelInput !== null) profile.model = modelInput.trim();
     const name = value("#settings-ai-profile-name");
     if (name !== null) profile.name = name.trim();
   }
@@ -382,95 +405,194 @@ export function syncAiDraftFromDom(): void {
   if (enabled) draft.enabled = enabled.checked;
 }
 
-/** 切换服务商卡片：预设服务商自带接口地址与首个推荐模型。 */
-export function selectAiProvider(providerId: string): void {
+// ── 供应商面板：列表 / 添加 / 配置 三段式 ────────────────────────────────────
+
+/** 进入添加面板（厂商网格，只列模型厂商的 API）。 */
+export function openAiProviderPicker(): void {
+  syncAiDraftFromDom();
+  state.aiView = "picker";
+  state.aiPickerQuery = "";
+  state.aiCreating = false;
+  state.aiTestResult = null;
+  resetAiModelState();
+  updateSettingsPanel();
+}
+
+/** 搜索词只影响卡片网格，由 refreshAiPickerGrid 局部重绘，输入框不丢焦点。 */
+export function setAiPickerQuery(query: string): void {
+  state.aiPickerQuery = query;
+}
+
+/** 返回供应商列表（放弃未保存的编辑）。 */
+export function backToAiProviderList(): void {
+  syncAiDraftFromDom();
+  state.aiView = "list";
+  state.aiEditingId = "";
+  state.aiCreating = false;
+  state.aiPickerQuery = "";
+  state.aiTestResult = null;
+  resetAiModelState();
+  updateSettingsPanel();
+}
+
+/**
+ * 配置页的「取消」/「← 返回」：放弃这次编辑。
+ *
+ * 刚新建的档案要顺手删掉——取消之后列表里多出一条空配置，用户还得再删一次。
+ * 编辑已有档案时只回列表，草稿里的改动留给「保存配置」决定。
+ */
+export function cancelAiEditing(): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  const editingId = state.aiEditingId;
+  if (draft && state.aiCreating && editingId) {
+    draft.profiles = draft.profiles.filter((profile) => profile.id !== editingId);
+    if (draft.activeProfileId === editingId) draft.activeProfileId = draft.profiles[0]?.id ?? "";
+    if (draft.profiles.length === 0) draft.enabled = false;
+  }
+  backToAiProviderList();
+}
+
+/**
+ * 从添加面板选中一张厂商卡片：新建一条档案并直接进入配置页。
+ * 同一厂商已有存档时带出它的 Key，少粘一次；每条仍各存各的。
+ */
+export function addAiProvider(providerId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
-  const profile = pickActiveProfile(draft);
-  if (!profile) return;
   const preset = findProvider(providerId);
-  const changed = profile.provider !== preset.id;
-  profile.provider = preset.id;
-  // 只有真的换了服务商才重置地址与模型：重复点当前卡片不该冲掉手调的配置。
-  if (changed && !preset.custom) {
-    profile.baseUrl = preset.baseUrl;
-    profile.model = preset.models[0]?.id ?? "";
+  const profile = blankProfile(preset.id);
+  profile.apiKey = providerApiKey(draft.profiles, preset.id);
+  draft.profiles.push(profile);
+  // 第一条配置自动成为使用中的那条，「加完就能用」符合预期。
+  if (draft.profiles.length === 1) draft.activeProfileId = profile.id;
+  state.aiEditingId = profile.id;
+  state.aiView = "edit";
+  state.aiCreating = true;
+  state.aiTestResult = null;
+  resetAiModelState();
+  state.settingsNotice = null;
+  updateSettingsPanel();
+}
+
+/** 从列表进入某条供应商的配置页。 */
+export function editAiProvider(profileId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft || !findProfile(draft.profiles, profileId)) return;
+  state.aiEditingId = profileId;
+  state.aiView = "edit";
+  state.aiCreating = false;
+  state.aiTestResult = null;
+  resetAiModelState();
+  updateSettingsPanel();
+}
+
+/** 把某条档案设为使用中（打标与对话都用它）。 */
+export function setActiveAiProvider(profileId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const profile = findProfile(draft.profiles, profileId);
+  if (!profile) return;
+  draft.activeProfileId = profile.id;
+  resetAiTestState();
+  state.settingsNotice = `已把「${profileLabel(profile)}」设为使用中，保存后生效`;
+  updateSettingsPanel();
+}
+
+/** 删除某条供应商（草稿内生效，保存后落库）。 */
+export function removeAiProvider(profileId: string): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const target = findProfile(draft.profiles, profileId);
+  if (!target) return;
+  const label = profileTitle(target);
+  draft.profiles = draft.profiles.filter((profile) => profile.id !== profileId);
+  if (draft.activeProfileId === profileId) draft.activeProfileId = draft.profiles[0]?.id ?? "";
+  if (draft.profiles.length === 0) draft.enabled = false;
+  if (state.aiEditingId === profileId) {
+    state.aiEditingId = "";
+    state.aiView = "list";
+    state.aiCreating = false;
   }
-  if (changed) {
-    // 每个服务商的 Key 各自保存：换服务商时带出该服务商已存的 Key（多条档案
-    // 取最近一条），没有就清空——绝不把上一个服务商的 Key 留在输入框里。
-    const stored = providerApiKey(draft.profiles, preset.id, profile.id);
-    profile.apiKey = stored || (preset.custom ? profile.apiKey : "");
-  }
+  state.settingsNotice =
+    draft.profiles.length === 0 ? `已删除「${label}」，AI 增强已关闭，保存后生效` : `已删除「${label}」，保存后生效`;
   resetAiTestState();
   updateSettingsPanel();
 }
 
-/** 模型下拉：选「自定义模型…」时清空名称，露出可手填的输入框。 */
+/** 从取回的清单里点一个模型：写进输入框与草稿。手填同样走这条。 */
 export function selectAiModel(modelId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
-  const profile = pickActiveProfile(draft);
+  const profile = editingProfile(draft);
   if (!profile) return;
-  profile.model = modelId === CUSTOM_MODEL_ID ? "" : modelId;
-  resetAiTestState();
-  updateSettingsPanel();
-}
-
-/** 切换当前档案：先把手上的输入落回旧档案，再切到目标档案。 */
-export function selectAiProfile(profileId: string): void {
-  syncAiDraftFromDom();
-  const draft = state.aiDraft;
-  if (!draft) return;
-  if (!draft.profiles.some((profile) => profile.id === profileId)) return;
-  draft.activeProfileId = profileId;
+  profile.model = modelId.trim();
   resetAiTestState();
   updateSettingsPanel();
 }
 
 /**
- * 新建一条档案：沿用当前服务商与它的 Key，用户只需换个模型。
- * 若旧档案没起名，顺手把「服务商 · 模型」固化下来，避免两条同名分不清。
+ * 「获取模型」：拿表单里此刻的地址与 Key 问上游要清单。
+ *
+ * 先同步 DOM——用户常常刚粘完 Key 还没失焦就点这个按钮。失败不弹窗：模型本来
+ * 就能手填，把厂商原话留在这一栏里比打断流程更合适。
  */
-export function createAiProfile(): void {
+export async function fetchAiModels(): Promise<void> {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
-  if (!draft) return;
-  const current = pickActiveProfile(draft);
-  const providerId = current?.provider || "openai";
-  const profile = blankProfile(providerId);
-  profile.apiKey = providerApiKey(draft.profiles, providerId);
-  if (current && !current.name.trim()) current.name = profileLabel(current);
-  draft.profiles.push(profile);
-  draft.activeProfileId = profile.id;
-  resetAiTestState();
-  state.settingsNotice = "已新增一条配置：选好模型后点「保存配置」";
+  const profile = draft ? editingProfile(draft) : null;
+  if (!profile) return;
+  const baseUrl = profile.baseUrl.trim();
+  if (!baseUrl) {
+    state.aiModelsError = "先填接口地址，再获取模型";
+    updateSettingsPanel();
+    return;
+  }
+  state.aiModelsBusy = true;
+  state.aiModelsError = null;
+  state.aiModelQuery = "";
   updateSettingsPanel();
+  try {
+    const models = await listAiModels(baseUrl, profile.apiKey);
+    state.aiModels = models;
+    // 只有一条时直接选上；已选的模型若不在清单里，保留手填值不动。
+    if (models.length === 1 && models[0] && !profile.model.trim()) profile.model = models[0];
+    resetAiTestState();
+  } catch (error) {
+    state.aiModels = null;
+    state.aiModelsError = toDetailedMessage(error, "获取模型清单失败");
+  } finally {
+    state.aiModelsBusy = false;
+    updateSettingsPanel();
+  }
 }
 
-/** 删除当前档案（草稿内生效，保存后落库）。 */
-export function deleteAiProfile(): void {
+/** 清单过滤词：可能上百条，只重绘列表本身，输入框不丢焦点。 */
+export function setAiModelQuery(query: string): void {
+  state.aiModelQuery = query;
+}
+
+/**
+ * 切换接入区域：厂商在不同区域的端点不同，切换即改写这条档案的接口地址。
+ * 手改过的地址会被覆盖——区域是显式动作，按用户点的来。
+ */
+export function selectAiRegion(regionId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
-  const current = pickActiveProfile(draft);
-  if (!current) return;
-  const removedLabel = profileLabel(current);
-  const remaining = draft.profiles.filter((profile) => profile.id !== current.id);
-  if (remaining.length > 0) {
-    draft.profiles = remaining;
-    draft.activeProfileId = remaining[remaining.length - 1]?.id ?? "";
-    state.settingsNotice = `已删除「${removedLabel}」，保存后生效`;
-  } else {
-    // 至少留一条，否则页面没有可编辑的输入。
-    const fresh = blankProfile("openai");
-    draft.profiles = [fresh];
-    draft.activeProfileId = fresh.id;
-    state.settingsNotice = "已删除最后一条配置，已重置为空白配置";
-  }
+  const profile = editingProfile(draft);
+  if (!profile) return;
+  const preset = findProvider(profile.provider);
+  const region = providerRegions(preset).find((item) => item.id === regionId);
+  if (!region) return;
+  profile.baseUrl = region.baseUrl;
   resetAiTestState();
+  resetAiModelState();
   updateSettingsPanel();
 }
 
@@ -485,11 +607,24 @@ export async function saveAiSettings(): Promise<void> {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
+  if (draft.profiles.length === 0) {
+    state.settingsError = "请先添加一个供应商再保存";
+    updateSettingsPanel();
+    return;
+  }
+  // 模型不再预填：空着保存等于存了一条跑不起来的配置，当场拦住并说清楚怎么补。
+  const missingModel = draft.profiles.find((profile) => !profile.model.trim());
+  if (missingModel) {
+    state.settingsError = `「${profileTitle(missingModel)}」还没选模型：点「获取模型」挑一个，或手填模型 ID`;
+    updateSettingsPanel();
+    return;
+  }
   state.settingsBusy = true;
   state.settingsError = null;
   try {
     state.aiConfig = await setAiConfig(draft);
     state.aiDraft = initialAiDraft(state.aiConfig);
+    if (!findProfile(state.aiDraft.profiles, state.aiEditingId)) state.aiView = "list";
     state.settingsNotice = state.aiConfig.enabled
       ? `已保存并启用「${draftProfileLabel(state.aiConfig)}」`
       : "AI 配置已保存（功能保持关闭）";
@@ -502,10 +637,29 @@ export async function saveAiSettings(): Promise<void> {
   }
 }
 
+/**
+ * 面板上的「保存配置」：保存成功后，若还在编辑页就退回列表——配完一条就该看到
+ * 它在列表里的样子，而不是留在表单里猜有没有存上。失败时留在原页显示错误。
+ */
+export async function saveAiFromPanel(): Promise<void> {
+  await saveAiSettings();
+  if (state.settingsError || state.aiView !== "edit") return;
+  state.aiView = "list";
+  state.aiEditingId = "";
+  state.aiCreating = false;
+  resetAiModelState();
+  renderSettingsAware();
+}
+
 export async function testAiConnectionNow(): Promise<void> {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
+  if (draft.profiles.length === 0) {
+    state.settingsError = "请先添加一个供应商再测试";
+    updateSettingsPanel();
+    return;
+  }
   state.aiTestBusy = true;
   state.aiTestResult = null;
   state.settingsError = null;
@@ -514,6 +668,8 @@ export async function testAiConnectionNow(): Promise<void> {
     // 测试命令只读已保存的配置，所以先把草稿落库，避免「测的是 A、存的是 B」。
     state.aiConfig = await setAiConfig(draft);
     state.aiDraft = initialAiDraft(state.aiConfig);
+    // 已经落库了，这条档案不再算「新建中」：此时点取消不该把它从草稿里抹掉。
+    state.aiCreating = false;
     state.aiTestResult = await testAiConnection();
   } catch (error) {
     state.aiTestResult = {

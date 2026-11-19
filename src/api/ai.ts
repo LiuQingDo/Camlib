@@ -116,6 +116,16 @@ export function testAiConnection(): Promise<AiTestResultDto> {
   return invoke<AiTestResultDto>("ai_test_connection");
 }
 
+/**
+ * 按当前表单里的地址与密钥向上游拉模型清单（OpenAI 兼容的 `GET /models`）。
+ *
+ * 不读已保存的配置：用户常常刚粘完 Key 就想挑模型，此时还没保存。厂商若没有
+ * `/models` 接口，会以错误形式回来，界面提示手填模型 ID。
+ */
+export function listAiModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  return invoke<string[]>("ai_list_models", { baseUrl, apiKey });
+}
+
 export function getAiStats(libraryId: string): Promise<AiStatsDto> {
   return invoke<AiStatsDto>("ai_stats", { libraryId });
 }

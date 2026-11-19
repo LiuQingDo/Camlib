@@ -532,6 +532,70 @@ fn authorization_header(key: &str) -> Option<(&'static str, String)> {
     }
 }
 
+// ── 上游模型清单 ───────────────────────────────────────────────────────────
+
+/// 按厂商的 OpenAI 兼容 `GET /models` 拉可取用模型。
+///
+/// 模型名各厂商每月都在变，写死在预设里必然过期，所以设置页改成「按钮现取」：
+/// 用当前表单里的地址与密钥问一次上游，把结果直接列给用户挑。这里只做清单查询，
+/// 不参与打标链路，因此不挂在 [`AiTransport`] 上（那条 trait 需要模型名）。
+pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, AppError> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(AppError::invalid_argument("请先填写接口地址，再获取模型清单"));
+    }
+    let url = format!("{base}/models");
+    let agent = UreqTransport::agent();
+    let mut request = agent.get(&url);
+    if let Some((name, value)) = authorization_header(api_key) {
+        request = request.set(name, &value);
+    }
+    let response = request
+        .call()
+        .map_err(|error| map_http_error("获取模型清单", error))?;
+    let value: serde_json::Value = response
+        .into_json()
+        .map_err(|error| AppError::io(format!("模型清单解析失败: {error}")))?;
+    let models = parse_model_ids(&value);
+    if models.is_empty() {
+        return Err(AppError::invalid_argument(
+            "上游没有返回可用模型。该厂商可能不提供 /models 接口，手填模型 ID 即可",
+        ));
+    }
+    Ok(models)
+}
+
+/// 兼容三种常见的清单形态：`{"data":[{"id":…}]}`（OpenAI 与多数兼容实现）、
+/// `{"data":["…"]}`，以及裸数组。按上游顺序去重，不排序——厂商通常把新模型放前面。
+fn parse_model_ids(value: &serde_json::Value) -> Vec<String> {
+    let empty = Vec::new();
+    let entries: &Vec<serde_json::Value> = match value {
+        serde_json::Value::Array(items) => items,
+        _ => value
+            .get("data")
+            .and_then(|data| data.as_array())
+            .unwrap_or(&empty),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for entry in entries {
+        let raw = match entry {
+            serde_json::Value::String(text) => text.as_str(),
+            _ => entry
+                .get("id")
+                .or_else(|| entry.get("model"))
+                .and_then(|field| field.as_str())
+                .unwrap_or_default(),
+        };
+        let id = raw.trim();
+        if id.is_empty() || !seen.insert(id.to_owned()) {
+            continue;
+        }
+        ids.push(id.to_owned());
+    }
+    ids
+}
+
 impl AiTransport for UreqTransport {
     fn chat(
         &self,
@@ -2513,5 +2577,28 @@ mod tests {
         assert!(prompt.contains("2026-11-01"));
         assert!(prompt.contains("\"total\":12"));
         assert!(prompt.contains(CHAT_SEARCH_MARKER));
+    }
+
+    #[test]
+    fn parses_model_ids_from_the_common_shapes() {
+        // OpenAI 与多数兼容实现：data[].id
+        let openai = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "deepseek-flash", "object": "model" },
+                { "id": "deepseek-v4-pro", "object": "model" },
+            ]
+        });
+        assert_eq!(parse_model_ids(&openai), vec!["deepseek-flash", "deepseek-v4-pro"]);
+
+        // 有些实现只回字符串数组，或干脆是裸数组。
+        let strings = serde_json::json!({ "data": ["kimi-k3", "kimi-k3", " "] });
+        assert_eq!(parse_model_ids(&strings), vec!["kimi-k3"]);
+        let bare = serde_json::json!([{ "model": "glm-5.3" }]);
+        assert_eq!(parse_model_ids(&bare), vec!["glm-5.3"]);
+
+        // 什么都不认的响应不能变成一条空模型名。
+        assert!(parse_model_ids(&serde_json::json!({ "data": [{}] })).is_empty());
+        assert!(parse_model_ids(&serde_json::json!({})).is_empty());
     }
 }

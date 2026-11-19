@@ -17,10 +17,14 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Added
 
+- 供应商的模型改成「现取」：配置页不再预置模型清单，改用一个「获取模型」按钮，按当前地址与密钥向上游请求 `GET /models`，把厂商真实可用的模型列成可点选的网格（超过 8 条自动出现过滤框），选不中或厂商没提供该接口时仍可直接手填模型 ID。各家在售型号几个月换一轮，写死的清单迟早会给出过期答案
+- 「获取模型」按表单里**此刻**的地址与密钥请求（不要求先保存），失败不弹窗、只把厂商原话留在模型栏，手填照常可用；换档案、切区域或保存后自动丢弃旧清单，避免点到上游并不存在的名字
+
 - AI 配置支持多套档案：同一服务商可以保存多条（两个账号、打标用便宜模型 + 对话用强模型），每条档案**各自保存自己的 API Key**，切换、改名或删除某条不会串用或覆盖其它条的 Key；切换服务商时 Key 输入框自动换成该服务商已存的 Key（没有就留空），新建档案默认沿用当前服务商与它的 Key。旧版单条配置在读取时自动迁移成一条档案，原有 Key 与模型保持不变
 
 ### Fixed
 
+- 保存配置时拦截「还没选模型」的档案并指明是哪一条、怎么补——模型不再预填，空着保存等于存一条跑不起来的配置
 - 修复新版推理模型选好也打不了标：OpenAI GPT-6 系、部分国产推理模型会以 400 直接拒收请求体里的 `temperature` / `max_tokens`（要求改用 `max_completion_tokens` 或干脆不传），而传输层这两个字段是写死的。现在识别到 400 报文点名这些参数时，去掉 `temperature` / `max_tokens` / `top_p` 自动重发一次；其余错误仍按原样透出状态码与服务商原文，不会把"模型不存在"之类的真错误也重试一遍
 - 修复主页滚轮停下时整屏缩略图"闪一下"：入场淡入原来写成 `.card-preview img` 的常驻 `animation`，滚动降级期间被 `html.is-scrolling … { animation:none }` 摘掉，撤掉降级标记的那一刻浏览器把它当成新动画重放——所有已显示的缩略图一起从 `opacity:0` 淡回 1（实测停手后第 56ms，12 张可见图 `opacity` 全部归 0）。现在淡入只挂在真正到货的那张图上（`.card-preview img.is-fresh`，`render/grid.ts` 建 `<img>` 时按是否在滚动决定加不加），骨架 shimmer 的降级也从 `animation:none` 改成 `animation-play-state:paused`，暂停不重启动画
 - 修复预览里 ←/→ 换图的"卡一下、闪一下"：换图走的是整块签名重建，`.modal-backdrop` 连同全屏 `backdrop-filter: blur(18px)` 和面板一起被替换，入场动画重播、弹窗几何重算、媒体节点重新挂载。现在外壳只在打开时建一次，换图只改位置计数/标题/按钮可见性，`#modal-media` 由装载钩子交叉替换（旧图一直留到替换那一刻，不再先清成转圈）。12 次连续换图同条件实测：脚本耗时 −40%、样式重算 −11%、主线程繁忙 −17%，入场动画 `startTime` 不再重置
@@ -36,6 +40,13 @@ Release installers may bundle ffmpeg for video thumbnails; the **Git repository 
 
 ### Changed
 
+- 设置页 AI 区改成 magpie 那样的供应商面板，三段式替代原来的「卡片墙 + 档案下拉」：**已添加列表**（每行一个供应商，显示模型与掩码 Key、所属分类、是否使用中，可设为使用中 / 编辑 / 删除）→ **添加供应商**（顶部「订阅 / API 供应商 / 中转 / 本机」四个分类页签 + 搜索框 + 厂商卡片网格，本版本只接入 API 供应商，订阅页给空态说明）→ **单个供应商配置**（模型下拉、API Key、厂商控制台的「获取 Key ↗」跳转、备注名、接口地址与并发放折叠的高级设置）。原来「新建配置 / 删除」按钮与档案下拉被列表取代，同厂商加多条仍是「再点一次那张卡片」，每条各存 Key 的隔离性不变
+- 服务商预设增加分类、品牌色与「获取 Key」链接三个字段：厂商直连归 API 供应商，硅基流动 / OpenRouter 归中转，Ollama / LM Studio 归本机（能力不变，只是分到各自页签下）；卡片徽标改用各家品牌色做浅底，不再是统一的灰块
+- AI 供应商面板收敛成「只有模型厂商的 API」：去掉「订阅 / 中转 / 本机」分类页签，添加面板改成一屏三列厂商网格（19 家）。国内 DeepSeek / Kimi / 智谱 GLM / 通义千问 / 火山方舟 / MiniMax / 百度千帆 / 腾讯混元 / 阶跃星辰 / LongCat / 小米 MiMo 全在，海外是 OpenAI / Anthropic / Google Gemini / Grok / Mistral / Groq，加「自定义」。已添加过的中转与本机配置仍能凭预设回显，只是不再出现在添加面板里
+- 供应商配置页按厂商控制台的「添加供应商」弹窗重做：头部是厂商标识 + 控制台域名（可点开），字段依次为 API 密钥（显示/隐藏 + 获取密钥）、端点（按 OpenAI / Responses / Anthropic 三种协议各一行，应用只走 OpenAI 兼容那条，其余标「仅展示」）、区域（多区域厂商：Kimi 中国/国际、通义千问 中国/新加坡、智谱 GLM 国内/海外 z.ai、MiniMax 国内/国际）、模型（卡片单选，标出看图 / 仅文本）、备注名；接口地址与并发折进「高级」，底部是「测试连接 / 取消 / 添加（保存）」
+- 取消新建会连带丢弃那条空档案：原来从厂商网格点进配置页再返回，列表里会留一条谁也没填过、又不能用的配置
+- 供应商预设按官方文档重新核对（2026-11）：DeepSeek 的 base_url 改为 `https://api.deepseek.com`（并登记 Anthropic 端点），新增 Anthropic / Mistral / Groq，模型清单更新到当前在售（deepseek-flash、kimi-k3、glm-5.3、qwen4-max、doubao-seed-2.1、MiniMax-M3、ernie-5.1、hy4、step-5-preview、LongCat-2.0、mimo-v2.6、claude-opus-4-7、gemini-4-hydrogen、grok-4.7 等）
+- `findProvider()` 的兜底从「数组最后一项」改成显式找预设里的 `custom`：分组重排后最后一项变成了本机服务，未知厂商 id 会被静默指向 `127.0.0.1` 的 Ollama，已修正
 - AI 服务商清单按 2026-11 各家官方文档重核，服务商从 9 家扩到 14 家：新增豆包·方舟（`doubao-seed-2.1-pro/lite/turbo`）、百度千帆（`ernie-5.1`）、腾讯混元（`hy4`）、MiniMax（`MiniMax-M3`）、Google Gemini（`gemini-4-argon`，走 `v1beta/openai` 兼容层）、Grok（`grok-4.7`）。原有预设的模型也换成当前在售型号——OpenAI `gpt-6.1-terra/6-luna/6.1-sol/6-astra`、通义 `qwen4-max/qwen3.8-flash/qwen3-vl-plus`、GLM `glm-5.3-flash/glm-5v-turbo/glm-4.6v-flash`、Kimi `kimi-k3.1-pro/kimi-k2.6`、DeepSeek `deepseek-flash`（现已支持图片）、硅基流动 `Qwen3-VL-32B/30B-A3B/8B`、Ollama `qwen3-vl:8b/4b/30b-a3b`；清单只收能走 Chat Completions 且吃 `image_url` 的模型，`vision` 标记逐条核对，纯文本模型仍会被设置页提示
 - AI 增强取消 Embedding 模型与向量检索：模型配置从「对话 + embedding 两组」收成一套，语义检索改为对话模型解析出时间/类型条件 + 关键词，条件走 SQL、关键词匹配已生成的描述与标签后取交集；批量处理去掉「仅补算向量」。`media_ai` 的 `embedding` / `embedding_model` / `embedding_dim` 三列由迁移 `0009_ai_drop_embeddings.sql` 删除（schema v9）
 - AI 模型配置改为服务商卡片 + 模型下拉，不再要求手填 Base URL：OpenAI / 通义千问 / 智谱 GLM / Moonshot / DeepSeek / 硅基流动 / OpenRouter / Ollama / LM Studio 各带接口地址与常用模型，私有部署或清单外的模型走「自定义」；选中纯文本模型时提前提示打标不可用，配置改动先落草稿、保存或测试时才写库

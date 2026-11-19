@@ -1,13 +1,20 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
-import { AiRunMode } from "../api/ai";
+import { AiConfigDto, AiProfileDto, AiRunMode } from "../api/ai";
+import type { AiProviderPreset } from "../lib/ai-providers";
 import {
-  AI_PROVIDERS,
-  CUSTOM_MODEL_ID,
+  consoleHost,
+  filterProviderPresets,
+  findProfile,
   findProvider,
-  isPresetModel,
-  modelSupportsVision,
   pickActiveProfile,
+  pickerPresets,
   profileLabel,
+  profileSummary,
+  profileTitle,
+  protocolMeta,
+  providerEndpoints,
+  providerRegions,
+  regionForBaseUrl,
   resolveProviderId,
 } from "../lib/ai-providers";
 import { formatCaptureAt, formatCount, formatEtaSeconds, formatSize, formatSpeed, truncatePath } from "../lib/format";
@@ -273,7 +280,7 @@ export function renderSettingsBackupSection(): string {
   </div>`;
 }
 
-/** AI 增强（可选）：服务商/模型选择、连通性测试、批量处理入口。 */
+/** AI 增强（可选）：供应商面板（列表 / 添加 / 配置）、批量处理入口。 */
 export function renderSettingsAiSection(): string {
   const config = state.aiDraft ?? state.aiConfig;
   if (!config) {
@@ -286,30 +293,17 @@ export function renderSettingsAiSection(): string {
       ? Math.min(100, Math.max(0, Math.round((progress.processed / progress.total) * 100)))
       : 0;
   const stats = state.aiStats;
-  const testResult = state.aiTestResult;
-  const active = pickActiveProfile(config);
-  if (!active) {
-    return `<div class="settings-section-body"><div class="settings-status-card"><div class="settings-note">AI 配置缺少有效档案，请重新加载设置。</div></div></div>`;
-  }
-  const providerId = resolveProviderId(active.provider, active.baseUrl);
-  const provider = findProvider(providerId);
-  const presetModel = isPresetModel(providerId, active.model);
-  const customModel = provider.custom || !presetModel;
-  const visionOk = modelSupportsVision(providerId, active.model);
   const preview = state.aiPreview;
-  const profileOptions = config.profiles
-    .map(
-      (profile) =>
-        `<option value="${escapeHtml(profile.id)}" ${profile.id === active.id ? "selected" : ""}>${escapeHtml(profileLabel(profile))}</option>`,
-    )
-    .join("");
-  const keyField = `<label class="ai-field ai-field-key"><span>API Key</span><span class="ai-key-row"><input id="settings-ai-chat-key" type="${state.aiKeyVisible ? "text" : "password"}" value="${escapeHtml(active.apiKey)}" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(provider.keyPlaceholder)}" /><button class="text-button" type="button" id="settings-ai-key-toggle" aria-label="显示或隐藏 API Key">${state.aiKeyVisible ? "隐藏" : "显示"}</button></span></label>`;
-  const modelNameField = `<label class="ai-field ai-model-line"><span>模型名称</span><input id="settings-ai-model-custom" value="${escapeHtml(active.model)}" spellcheck="false" placeholder="${provider.custom ? "例如 gpt-6.1-terra / qwen4-max" : "手填服务商支持的模型 ID"}" /></label>`;
+  const active = pickActiveProfile(config);
   const modeLabels: Record<AiRunMode, string> = {
     incremental: "增量处理（仅未处理过的照片）",
     full: "全量重跑（重新打标所有照片）",
     retry: "仅重试失败项",
   };
+  const activePreset = active ? findProvider(active.provider) : null;
+  const statusLine = active
+    ? `${escapeHtml(profileLabel(active))}${config.enabled ? " · 已启用" : " · 未启用"}`
+    : "尚未添加供应商";
   return `<div class="settings-section-body">
     <div class="settings-status-card">
       <div class="ai-card-head">
@@ -317,89 +311,17 @@ export function renderSettingsAiSection(): string {
           <h3>AI 模型</h3>
           <p class="settings-note">可选增强，<strong>默认关闭</strong>。开启并执行处理后，照片缩略图（约 512px 压缩图，非原图）会发送到你选择的服务商；标签与描述只存在本地索引。</p>
         </div>
-        <label class="ai-switch" title="启用 AI 增强">
-          <input type="checkbox" id="settings-ai-enabled" ${config.enabled ? "checked" : ""} aria-label="启用 AI 增强" />
+        <label class="ai-switch" title="${config.profiles.length === 0 ? "请先添加供应商" : "启用 AI 增强"}">
+          <input type="checkbox" id="settings-ai-enabled" ${config.enabled ? "checked" : ""} ${config.profiles.length === 0 ? "disabled" : ""} aria-label="启用 AI 增强" />
           <span class="ai-switch-track"><span class="ai-switch-thumb"></span></span>
         </label>
       </div>
-      <div class="ai-profile-bar">
-        <label class="ai-field ai-profile-select"><span>配置档案</span>
-          <select id="settings-ai-profile" aria-label="选择模型配置档案">${profileOptions}</select>
-        </label>
-        <label class="ai-field ai-profile-name"><span>备注名</span>
-          <input id="settings-ai-profile-name" value="${escapeHtml(active.name)}" spellcheck="false" placeholder="${escapeHtml(profileLabel(active))}" />
-        </label>
-        <div class="ai-profile-actions">
-          <button class="outline-button" type="button" id="settings-ai-profile-new">＋ 新建配置</button>
-          <button class="outline-button" type="button" id="settings-ai-profile-delete" ${config.profiles.length <= 1 ? "disabled" : ""}>删除</button>
-        </div>
+      <div class="ai-current-bar">
+        <span class="ai-current-dot ${active && config.enabled ? "is-on" : ""}" aria-hidden="true"></span>
+        <span class="ai-current-copy"><span>当前使用</span><strong>${statusLine}</strong></span>
+        ${activePreset ? `<span class="ai-provider-mark is-chip" style="--mark:${activePreset.tint}">${escapeHtml(activePreset.mark)}</span>` : ""}
       </div>
-      <div class="ai-hint-inline ai-profile-hint">打标与对话都使用当前选中的一条。共 ${config.profiles.length} 条配置，每条各自保存 Key；同一服务商可建多条（例如打标用便宜模型、对话用强模型），切换不会串用或覆盖别条的 Key。</div>
-      <div class="ai-provider-grid" role="radiogroup" aria-label="服务商">
-        ${AI_PROVIDERS.map(
-          (
-            item,
-          ) => `<button type="button" class="ai-provider-card ${item.id === providerId ? "is-active" : ""}" role="radio" aria-checked="${item.id === providerId}" data-ai-provider="${item.id}">
-          <span class="ai-provider-mark">${escapeHtml(item.mark)}</span>
-          <span class="ai-provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.hint)}</span></span>
-        </button>`,
-        ).join("")}
-      </div>
-      ${
-        provider.custom
-          ? `<div class="ai-field-row">
-        <label class="ai-field"><span>接口地址</span><input id="settings-ai-chat-url" value="${escapeHtml(active.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>
-        ${keyField}
-      </div>
-      ${modelNameField}`
-          : `<div class="ai-field-row">
-        <label class="ai-field">
-          <span>模型</span>
-          <select id="settings-ai-model">
-            ${provider.models
-              .map(
-                (option) =>
-                  `<option value="${escapeHtml(option.id)}" ${option.id === active.model.trim() ? "selected" : ""}>${escapeHtml(`${option.label}${option.note ? ` · ${option.note}` : ""}`)}</option>`,
-              )
-              .join("")}
-            <option value="${CUSTOM_MODEL_ID}" ${customModel ? "selected" : ""}>自定义模型…</option>
-          </select>
-        </label>
-        ${keyField}
-      </div>
-      ${customModel ? modelNameField : ""}
-      <div class="ai-endpoint">接口地址 <code>${escapeHtml(active.baseUrl || provider.baseUrl)}</code></div>`
-      }
-      ${!visionOk ? `<div class="settings-note is-warning">当前模型不支持图片输入：助手对话与搜索解析可用，但自动打标会失败。需要打标请换用带视觉的模型。</div>` : ""}
-      <div class="ai-actions-row">
-        <button class="primary-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存配置"}</button>
-        <button class="outline-button" type="button" id="settings-ai-test" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy ? "测试中…" : "测试连接"}</button>
-        ${
-          testResult
-            ? `<span class="ai-test-pill ${testResult.ok ? "is-ok" : "is-error"}">${escapeHtml(testResult.message)}</span>`
-            : `<span class="ai-hint-inline">${config.enabled ? "配置已保存并启用" : "保存后需打开上方开关才会启用"}</span>`
-        }
-      </div>
-      <details class="ai-advanced">
-        <summary>高级设置</summary>
-        <div class="settings-form">
-          ${provider.custom ? "" : `<label><span>接口地址（Base URL）</span><input id="settings-ai-chat-url" value="${escapeHtml(active.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>`}
-          <label><span>并发请求数</span><select id="settings-ai-concurrency">
-            ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
-          </select></label>
-        </div>
-        <div class="settings-note">接口地址一般填到 /v1 这一级，不要带 /chat/completions。切换服务商会自动填好地址；自定义服务商必须自己填。</div>
-      </details>
-      ${
-        stats
-          ? `<dl class="settings-kv ai-stats">
-        <div><dt>可处理照片</dt><dd>${formatCount(stats.totalPhotos)}</dd></div>
-        <div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div>
-        <div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div>
-        <div><dt>失败</dt><dd class="${stats.failed > 0 ? "is-danger" : ""}">${formatCount(stats.failed)}</dd></div>
-      </dl>`
-          : `<div class="settings-note">统计需要已配置的媒体库。</div>`
-      }
+      ${renderAiProviderPanel(config)}
     </div>
     <div class="settings-status-card">
       <h3>批量处理</h3>
@@ -409,7 +331,7 @@ export function renderSettingsAiSection(): string {
         </select></label>
         <div class="settings-actions">
           <button class="outline-button" type="button" id="settings-ai-preview" ${!state.library || running || state.aiPreviewLoading ? "disabled" : ""}>${state.aiPreviewLoading ? "统计中…" : "生成预览"}</button>
-          <button class="outline-button" type="button" id="settings-ai-start" ${!state.library || running || !preview || preview.estimatedCalls === 0 ? "disabled" : ""}>开始处理</button>
+          <button class="outline-button" type="button" id="settings-ai-start" ${!state.library || running || !active || !preview || preview.estimatedCalls === 0 ? "disabled" : ""}>开始处理</button>
           ${running ? `<button class="outline-button" type="button" id="settings-ai-cancel">取消</button>` : ""}
         </div>
       </div>
@@ -444,7 +366,332 @@ export function renderSettingsAiSection(): string {
       ${!running && state.aiStats && state.aiStats.failed > 0 ? `<div class="settings-note">有 ${formatCount(state.aiStats.failed)} 个失败项，可用「仅重试失败项」重新处理。</div>` : ""}
       <div class="settings-note">处理只读缩略图缓存与索引，不修改原始文件；完成后可关闭窗口，任务不会自动续跑。</div>
     </div>
+    ${
+      stats
+        ? `<div class="settings-status-card">
+      <h3>处理统计</h3>
+      <dl class="settings-kv ai-stats">
+        <div><dt>可处理照片</dt><dd>${formatCount(stats.totalPhotos)}</dd></div>
+        <div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div>
+        <div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div>
+        <div><dt>失败</dt><dd class="${stats.failed > 0 ? "is-danger" : ""}">${formatCount(stats.failed)}</dd></div>
+      </dl>
+    </div>`
+        : ""
+    }
   </div>`;
+}
+
+/** 供应商面板：三段式视图的入口。 */
+function renderAiProviderPanel(config: AiConfigDto): string {
+  if (state.aiView === "picker") return renderAiProviderPicker();
+  const editing = findProfile(config.profiles, state.aiEditingId);
+  if (state.aiView === "edit" && editing) return renderAiProviderEditor(config, editing);
+  return renderAiProviderList(config);
+}
+
+function providerMarkHtml(preset: AiProviderPreset, extraClass = ""): string {
+  return `<span class="ai-provider-mark ${extraClass}" style="--mark:${preset.tint}">${escapeHtml(preset.mark)}</span>`;
+}
+
+/** 草稿与已保存配置是否不一致：决定列表页要不要露出「保存配置」。 */
+function aiDraftDirty(config: AiConfigDto): boolean {
+  const saved = state.aiConfig;
+  if (!saved) return true;
+  return JSON.stringify(config) !== JSON.stringify(saved);
+}
+
+/** 视图一：已添加的供应商列表（面板主视图）。 */
+function renderAiProviderList(config: AiConfigDto): string {
+  const active = pickActiveProfile(config);
+  const dirty = aiDraftDirty(config);
+  if (config.profiles.length === 0) {
+    return `<div class="ai-provider-panel">
+      <div class="ai-panel-head">
+        <div class="ai-panel-title"><h4>供应商</h4><p>自动打标与对话都需要至少一个供应商。</p></div>
+      </div>
+      <div class="ai-empty">
+        <strong>先添加一个供应商</strong>
+        <span>选 <em>模型厂商的 API</em>、粘贴密钥即可。国内厂商直连可用，海外厂商需要你的网络能访问其服务。</span>
+        <button class="primary-button" type="button" id="settings-ai-add">＋ 添加供应商</button>
+      </div>
+    </div>`;
+  }
+  const rows = config.profiles
+    .map((profile) => {
+      const preset = findProvider(profile.provider);
+      const isActive = profile.id === active?.id;
+      const summary = profileSummary(profile);
+      return `<div class="ai-provider-row ${isActive ? "is-active" : ""}">
+        ${providerMarkHtml(preset)}
+        <div class="ai-provider-row-main">
+          <div class="ai-provider-row-title">
+            <strong>${escapeHtml(profileTitle(profile))}</strong>
+            ${isActive ? `<span class="ai-usage-pill">使用中</span>` : ""}
+          </div>
+          <span class="ai-provider-row-sub" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span>
+        </div>
+        <div class="ai-provider-row-actions">
+          ${isActive ? "" : `<button class="text-button" type="button" data-ai-activate="${escapeHtml(profile.id)}">设为使用中</button>`}
+          <button class="text-button" type="button" data-ai-edit="${escapeHtml(profile.id)}">编辑</button>
+          <button class="text-button is-danger" type="button" data-ai-remove="${escapeHtml(profile.id)}">删除</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  return `<div class="ai-provider-panel">
+    <div class="ai-panel-head">
+      <div class="ai-panel-title">
+        <h4>供应商</h4>
+        <p>已添加 ${config.profiles.length} 个。打标与对话都用标着「使用中」的那一个；同一厂商可以加多条（两个账号、或成本低的模型 + 效果好的模型），各自独立保存 Key。</p>
+      </div>
+      <div class="ai-panel-actions">
+        ${dirty ? `<button class="outline-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存配置"}</button>` : ""}
+        <button class="primary-button" type="button" id="settings-ai-add">＋ 添加供应商</button>
+      </div>
+    </div>
+    ${dirty ? `<div class="ai-dirty-hint">有未保存的改动，点「保存配置」写入本地设置后才生效。</div>` : ""}
+    <div class="ai-provider-list">${rows}</div>
+  </div>`;
+}
+
+/** 视图二：添加供应商——只列模型厂商的 API，搜索 + 三列卡片网格。 */
+function renderAiProviderPicker(): string {
+  const presets = filterProviderPresets(pickerPresets(), state.aiPickerQuery);
+  const head = `<div class="ai-panel-head">
+    <div class="ai-panel-title">
+      <button class="ai-back" type="button" data-ai-back>← 返回</button>
+      <h4>添加供应商</h4>
+      <p>模型厂商的 API。国内厂商直连可用；海外厂商需要你的网络能访问其服务。地址与模型清单核对自各家官方文档（2026-11）。</p>
+    </div>
+  </div>`;
+  return `<div class="ai-provider-panel">
+    ${head}
+    <input id="settings-ai-search" class="ai-picker-search" value="${escapeHtml(state.aiPickerQuery)}" spellcheck="false" placeholder="搜索厂商或模型，例如 deepseek / glm / 视觉" aria-label="搜索厂商" />
+    <div class="ai-provider-grid" id="ai-picker-grid">${renderAiProviderCards(presets)}</div>
+    <div class="ai-picker-foot"><span>共 ${presets.length} 家</span><span>找不到？选「自定义」填自己的 Base URL</span></div>
+  </div>`;
+}
+
+/** 卡片网格单独抽出来：搜索时只换这一块，输入框不丢焦点。 */
+export function renderAiProviderCards(presets: readonly AiProviderPreset[]): string {
+  if (presets.length === 0) {
+    return `<div class="ai-grid-empty">没有匹配的厂商，换个关键词试试。</div>`;
+  }
+  return presets
+    .map(
+      (item) => `<button type="button" class="ai-provider-card" data-ai-add="${item.id}">
+      ${providerMarkHtml(item)}
+      <span class="ai-provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.hint)}</span></span>
+    </button>`,
+    )
+    .join("");
+}
+
+/**
+ * 视图三：单个供应商的配置。
+ *
+ * 版式照着厂商控制台的「添加供应商」弹窗做：头部是厂商标识与控制台域名，下面依次是
+ * 密钥、端点、区域、模型，最后是「取消 / 添加」。端点按协议逐行列出——应用只走
+ * OpenAI 兼容协议，其余两个协议标「仅展示」，免得用户以为填了就能用。
+ */
+function renderAiProviderEditor(config: AiConfigDto, profile: AiProfileDto): string {
+  const providerId = resolveProviderId(profile.provider, profile.baseUrl);
+  const provider = findProvider(providerId);
+  const regions = providerRegions(provider);
+  const region = regionForBaseUrl(provider, profile.baseUrl);
+  const endpoints = provider.custom ? [] : providerEndpoints(provider, region.id);
+  const isActive = profile.id === pickActiveProfile(config)?.id;
+  const isNew = state.aiCreating;
+  const testResult = state.aiTestResult;
+  const host = consoleHost(provider.keyUrl);
+
+  const keyRow = `<div class="ai-config-row">
+    <span class="ai-config-label">API 密钥${provider.keyOptional ? "（可选）" : ""}</span>
+    <div class="ai-key-line">
+      <input id="settings-ai-chat-key" type="${state.aiKeyVisible ? "text" : "password"}" value="${escapeHtml(profile.apiKey)}" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(provider.keyPlaceholder)}" />
+      <button class="text-button" type="button" id="settings-ai-key-toggle" aria-label="显示或隐藏 API 密钥">${state.aiKeyVisible ? "隐藏" : "显示"}</button>
+      ${provider.keyUrl ? `<button class="ai-key-link" type="button" data-ai-open-url="${escapeHtml(provider.keyUrl)}">获取密钥 ↗</button>` : ""}
+    </div>
+  </div>`;
+
+  const urlRow = provider.custom
+    ? `<div class="ai-config-row">
+    <span class="ai-config-label">接口地址</span>
+    <input id="settings-ai-chat-url" class="ai-config-input" value="${escapeHtml(profile.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" />
+  </div>`
+    : "";
+
+  const endpointRow = provider.custom
+    ? ""
+    : `<div class="ai-config-row is-top">
+    <span class="ai-config-label">端点</span>
+    <div class="ai-endpoint-list">
+      ${endpoints
+        .map((endpoint) => {
+          const meta = protocolMeta(endpoint.protocol);
+          const using = endpoint.protocol === "openai";
+          return `<div class="ai-endpoint-row ${using ? "is-using" : ""}" title="${escapeHtml(meta.note)}">
+            <span class="ai-endpoint-proto">${escapeHtml(meta.label)}</span>
+            <code>${escapeHtml(endpoint.url)}</code>
+            <span class="ai-endpoint-tag ${using ? "" : "is-muted"}">${using ? "使用中" : "仅展示"}</span>
+          </div>`;
+        })
+        .join("")}
+    </div>
+  </div>`;
+
+  const regionRow =
+    regions.length > 1
+      ? `<div class="ai-config-row">
+    <span class="ai-config-label">区域</span>
+    <div class="ai-region-tabs" role="tablist" aria-label="接入区域">
+      ${regions
+        .map(
+          (item) =>
+            `<button class="ai-region-tab ${item.id === region.id ? "is-active" : ""}" type="button" role="tab" aria-selected="${item.id === region.id}" data-ai-region="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`,
+        )
+        .join("")}
+    </div>
+  </div>`
+      : "";
+
+  const modelRow = `<div class="ai-config-row is-top">
+    <span class="ai-config-label">模型</span>
+    <div class="ai-model-picker">
+      <div class="ai-model-line">
+        <input id="settings-ai-model" class="ai-model-input" value="${escapeHtml(profile.model)}" spellcheck="false" autocomplete="off" placeholder="点「获取模型」挑一个，或手填模型 ID" />
+        <button class="outline-button" type="button" id="settings-ai-fetch-models" ${state.aiModelsBusy ? "disabled" : ""}>${state.aiModelsBusy ? "获取中…" : state.aiModels ? "重新获取" : "获取模型"}</button>
+      </div>
+      ${renderAiModelResults(profile)}
+    </div>
+  </div>`;
+
+  const nameRow = `<div class="ai-config-row">
+    <span class="ai-config-label">备注名</span>
+    <input id="settings-ai-profile-name" class="ai-config-input" value="${escapeHtml(profile.name)}" spellcheck="false" placeholder="可选，例如「打标用」" />
+  </div>`;
+
+  const advanced = `<details class="ai-advanced ai-config-advanced">
+    <summary>高级</summary>
+    <div class="settings-form">
+      ${provider.custom ? "" : `<label><span>接口地址</span><input id="settings-ai-chat-url" value="${escapeHtml(profile.baseUrl)}" spellcheck="false" placeholder="https://your-host/v1" /></label>`}
+      <label><span>并发请求数</span><select id="settings-ai-concurrency">
+        ${[1, 2, 3, 4].map((value) => `<option value="${value}" ${config.concurrency === value ? "selected" : ""}>${value} 个并行</option>`).join("")}
+      </select></label>
+    </div>
+    <div class="settings-note">接口地址填到 SDK 的 base_url 那一级，应用自己在后面拼 /chat/completions。切换区域会覆盖这里手改过的地址。</div>
+  </details>`;
+
+  return `<div class="ai-provider-panel">
+    <div class="ai-panel-head">
+      <div class="ai-panel-title">
+        <button class="ai-back" type="button" data-ai-cancel>← 返回</button>
+        <h4>${isNew ? "添加供应商" : "配置供应商"}</h4>
+        <p>${escapeHtml(provider.hint)}${
+          provider.docsUrl
+            ? ` · <button class="ai-doc-link" type="button" data-ai-open-url="${escapeHtml(provider.docsUrl)}">官方文档 ↗</button>`
+            : ""
+        }</p>
+      </div>
+    </div>
+    <div class="ai-config-card">
+      <header class="ai-config-head">
+        ${providerMarkHtml(provider, "is-large")}
+        <div class="ai-config-head-copy">
+          <strong>${escapeHtml(provider.name)}</strong>
+          <span>${escapeHtml(provider.hint)}</span>
+        </div>
+        ${
+          isActive
+            ? `<span class="ai-usage-pill">使用中</span>`
+            : `<button class="text-button" type="button" data-ai-activate="${escapeHtml(profile.id)}">设为使用中</button>`
+        }
+        ${
+          provider.keyUrl && host
+            ? `<button class="ai-console-link" type="button" data-ai-open-url="${escapeHtml(provider.keyUrl)}">${escapeHtml(host)} ↗</button>`
+            : ""
+        }
+      </header>
+      <div class="ai-config-body">
+        ${keyRow}
+        ${urlRow}
+        ${endpointRow}
+        ${regionRow}
+        ${modelRow}
+        ${nameRow}
+        ${advanced}
+      </div>
+      <footer class="ai-config-foot">
+        <button class="text-button" type="button" id="settings-ai-test" ${state.aiTestBusy || state.settingsBusy ? "disabled" : ""}>${state.aiTestBusy ? "测试中…" : "测试连接"}</button>
+        ${
+          testResult
+            ? `<span class="ai-test-pill ${testResult.ok ? "is-ok" : "is-error"}">${escapeHtml(testResult.message)}</span>`
+            : `<span class="ai-config-hint">测试会先按当前表单保存一次</span>`
+        }
+        <span class="ai-config-foot-spacer"></span>
+        <button class="outline-button" type="button" data-ai-cancel>取消</button>
+        <button class="primary-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : isNew ? "添加" : "保存"}</button>
+      </footer>
+    </div>
+  </div>`;
+}
+
+/**
+ * 「获取模型」下方的结果区：未取 / 取中 / 失败 / 已取回 四态。
+ *
+ * 清单最多可能上百条，超过一屏才给一个过滤框；过滤只重绘这一块（绑定层调
+ * `renderAiModelResults`），输入框不丢焦点。
+ */
+export function renderAiModelResults(profile: AiProfileDto): string {
+  if (state.aiModelsBusy) {
+    return `<div class="ai-model-status">正在向上游请求模型清单…</div>`;
+  }
+  if (state.aiModelsError) {
+    return `<div class="ai-model-status is-error">${escapeHtml(state.aiModelsError)}</div>
+      <span class="ai-config-hint">拿不到清单不影响使用：直接在上面手填厂商文档里的模型 ID 即可。</span>`;
+  }
+  if (!state.aiModels) {
+    return `<span class="ai-config-hint">模型不预置：点「获取模型」按当前地址与密钥向厂商拉取可用清单，也可以直接手填模型 ID。</span>`;
+  }
+  const filter =
+    state.aiModels.length > 8
+      ? `<input id="settings-ai-model-filter" class="ai-model-filter" value="${escapeHtml(state.aiModelQuery)}" spellcheck="false" placeholder="过滤模型名" aria-label="过滤模型" />`
+      : "";
+  return `<div class="ai-model-results">
+    ${filter}
+    <div class="ai-model-list" id="ai-model-list" role="radiogroup" aria-label="上游模型">${renderAiModelList(profile)}</div>
+    <span class="ai-config-hint" id="ai-model-count">${aiModelCountHint()}</span>
+  </div>`;
+}
+
+/**
+ * 清单本体。过滤时只换这一块（连同下面的计数），过滤输入框留在原地——
+ * 整块替换会把正在输入的那个框换掉，光标和焦点一起丢。
+ */
+export function renderAiModelList(profile: AiProfileDto): string {
+  if (!state.aiModels) return "";
+  const query = state.aiModelQuery.trim().toLowerCase();
+  const matched = query ? state.aiModels.filter((id) => id.toLowerCase().includes(query)) : state.aiModels;
+  const selected = profile.model.trim();
+  if (matched.length === 0) return `<div class="ai-model-status">没有匹配的模型</div>`;
+  return matched
+    .map(
+      (
+        id,
+      ) => `<button type="button" class="ai-model-choice ${id === selected ? "is-active" : ""}" role="radio" aria-checked="${id === selected}" data-ai-model="${escapeHtml(id)}">
+        <span class="ai-model-choice-name">${escapeHtml(id)}</span>
+      </button>`,
+    )
+    .join("");
+}
+
+/** 列表下方的计数说明；过滤时与列表一起刷新。 */
+export function aiModelCountHint(): string {
+  if (!state.aiModels) return "";
+  const query = state.aiModelQuery.trim().toLowerCase();
+  const matched = query ? state.aiModels.filter((id) => id.toLowerCase().includes(query)) : state.aiModels;
+  return `上游共 ${state.aiModels.length} 个可用模型${query ? `，匹配 ${matched.length} 个` : ""}。自动打标需要支持图片输入的模型。`;
 }
 
 export function renderSettingsAboutSection(): string {

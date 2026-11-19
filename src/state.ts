@@ -44,6 +44,7 @@ import {
   VideoMergeMode,
   VideoMergeProgressDto,
 } from "./api/media";
+import type { AiPanelView } from "./lib/ai-providers";
 
 export type SortMode = UiSortMode;
 
@@ -225,6 +226,14 @@ export interface AppState {
   aiDraft: AiConfigDto | null;
   /** API Key 是否明文显示（仅 UI）。 */
   aiKeyVisible: boolean;
+  /** 供应商面板当前视图：列表 / 添加（厂商网格）/ 单个供应商配置。 */
+  aiView: AiPanelView;
+  /** 添加面板的搜索词。 */
+  aiPickerQuery: string;
+  /** 正在编辑的供应商档案 id（编辑页只认它，不跟着「使用中」跑）。 */
+  aiEditingId: string;
+  /** 这条档案是不是刚从厂商网格新建的：决定「取消」要不要把它丢掉。 */
+  aiCreating: boolean;
   aiStats: AiStatsDto | null;
   aiPreview: AiProcessPreviewDto | null;
   aiPreviewLoading: boolean;
@@ -234,6 +243,12 @@ export interface AppState {
   aiConfirming: boolean;
   aiTestBusy: boolean;
   aiTestResult: AiTestResultDto | null;
+  /** 「获取模型」拉回来的上游清单；null 表示这次编辑还没取过。 */
+  aiModels: string[] | null;
+  aiModelsBusy: boolean;
+  aiModelsError: string | null;
+  /** 已取回清单时的过滤词（清单可能上百条）。 */
+  aiModelQuery: string;
   /** 激活的语义搜索查询（null = 常规筛选模式）。 */
   semanticSearch: string | null;
   semanticDraft: string;
@@ -386,6 +401,10 @@ export const state: AppState = {
   aiConfig: null,
   aiDraft: null,
   aiKeyVisible: false,
+  aiView: "list",
+  aiPickerQuery: "",
+  aiEditingId: "",
+  aiCreating: false,
   aiStats: null,
   aiPreview: null,
   aiPreviewLoading: false,
@@ -395,6 +414,10 @@ export const state: AppState = {
   aiConfirming: false,
   aiTestBusy: false,
   aiTestResult: null,
+  aiModels: null,
+  aiModelsBusy: false,
+  aiModelsError: null,
+  aiModelQuery: "",
   semanticSearch: null,
   semanticDraft: "",
   semanticMeta: null,
