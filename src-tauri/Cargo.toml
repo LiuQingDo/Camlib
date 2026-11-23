@@ -6,7 +6,6 @@ authors = ["LiuQingDo"]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/LiuQingDo/Camlib"
-homepage = "https://github.com/LiuQingDo/Camlib"
 readme = "../README.md"
 keywords = ["camera", "media-library", "photo", "backup", "tauri"]
 categories = ["multimedia::images", "filesystem"]

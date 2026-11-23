@@ -31,9 +31,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # 版本与根目录 rust-toolchain.toml 保持一致；不用 @stable，
+      # 避免新版本自带的 rustfmt/clippy 规则让 CI 突然变红。
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Cache cargo

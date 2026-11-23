@@ -1,0 +1,7 @@
+# 本地与 CI 共用的 Rust 版本：rustfmt 的排版、clippy 的 lint 集合随版本变化，
+# 不同版本会出现「本地 fmt 通过、CI fmt 失败」这类漂移。
+# 升级时同步修改 .github/workflows/ci.yml 里的 Setup Rust 版本，两边必须一致。
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

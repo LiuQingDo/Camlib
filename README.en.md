@@ -87,7 +87,7 @@ To import `.dng` / `.lrv`, remove those extensions in settings and run backup ag
 | --- | --- |
 | OS | Windows 10 / 11 |
 | Node.js | 20+ with [pnpm](https://pnpm.io/) |
-| Rust | stable ([rustup](https://rustup.rs/)) |
+| Rust | 1.100.0 ([rustup](https://rustup.rs/)), pinned in `rust-toolchain.toml` |
 | ffmpeg (optional) | Video thumbnails; PATH or `CAMLIB_FFMPEG_PATH` |
 
 ### Run from source

@@ -97,7 +97,7 @@ AI 自动打标与自然语言检索属于**可选增强**，默认关闭，不�
 | -------------- | --------------------------------------------- |
 | 操作系统       | Windows 10 / 11                               |
 | Node.js        | 20+，包管理器 [pnpm](https://pnpm.io/)        |
-| Rust           | stable（[rustup](https://rustup.rs/)）        |
+| Rust           | 1.100.0（[rustup](https://rustup.rs/)，见 `rust-toolchain.toml`） |
 | ffmpeg（可选） | 视频缩略图；本机 PATH 或 `CAMLIB_FFMPEG_PATH` |
 
 ### 从源码运行

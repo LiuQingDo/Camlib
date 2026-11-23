@@ -16,7 +16,7 @@ Thanks for your interest. Camlib is early (v0.1.x) — Issues and PRs are welcom
 | --- | --- |
 | OS | Windows 10 / 11 (primary target) |
 | Node.js | 20+ with [pnpm](https://pnpm.io/) |
-| Rust | stable via [rustup](https://rustup.rs/) |
+| Rust | 1.100.0 via [rustup](https://rustup.rs/) — pinned in [`rust-toolchain.toml`](rust-toolchain.toml); rustup installs it on first `cargo` run |
 | ffmpeg (optional) | Video thumbnails; PATH or `CAMLIB_FFMPEG_PATH` |
 
 ```powershell
