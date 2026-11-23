@@ -44,9 +44,17 @@ export function hasAnyFilter(state: FilterState): boolean {
   return Boolean(state.search || state.kind || state.datePrefix || state.dateFrom || state.dateTo || state.favoriteOnly || state.burstOnly || state.firstSeenFrom || state.tagIds.size || state.ratingEq !== null || state.ratingMin !== null || state.semanticSearch);
 }
 
-/** Secondary toolbar conditions live under the collapsible「筛选」panel. */
+/**
+ * Conditions summarized next to the「筛选」toggle. Includes 收藏 / 连拍:
+ * they render as primary-row chips, but they are still ordinary AND filters,
+ * so they must be counted or the badge under-reports the real query.
+ */
 export function secondaryFilterParts(state: FilterState): string[] {
   const parts: string[] = [];
+  // 收藏 / 连拍 是普通 chip，不是互斥的「次级标签页」。它们也要进摘要，
+  // 否则「筛选 (n)」会漏计，n 与真实查询条件对不上。
+  if (state.favoriteOnly) parts.push("收藏");
+  if (state.burstOnly) parts.push("连拍");
   if (state.semanticSearch) parts.push("AI 搜索");
   if (state.tagIds.size) parts.push(`标签×${state.tagIds.size}`);
   if (state.datePrefix || state.dateFrom || state.dateTo) parts.push("日期");

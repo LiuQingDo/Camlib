@@ -123,9 +123,8 @@ export function updateFavoriteButton(id: string): void {
 }
 
 export function renderPrimaryFilters(): string {
-  // Type tabs are exclusive with 收藏/连拍 secondary filters, matching the
-  // original 收藏 rule so switching tabs always replaces the whole filter set.
-  const secondaryActive = state.favoriteOnly || state.burstOnly;
+  // 类型 chip 是普通 AND 条件，高亮必须严格等于 state.kind。
+  // 收藏 / 连拍 不再影响这里：它们可以和类型同时生效，也不会偷偷改查询。
   const kinds = [
     { value: undefined, label: "全部" },
     { value: "photo" as MediaKind, label: "照片" },
@@ -134,7 +133,7 @@ export function renderPrimaryFilters(): string {
   ]
     .map(
       (filter) =>
-        `<button class="filter-chip ${state.kind === filter.value && !secondaryActive ? "is-active" : ""}" type="button" data-action="filter-kind" data-kind="${filter.value ?? ""}">${filter.label}</button>`,
+        `<button class="filter-chip ${state.kind === filter.value ? "is-active" : ""}" type="button" data-action="filter-kind" data-kind="${filter.value ?? ""}">${filter.label}</button>`,
     )
     .join("");
   const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter" data-action="filter-favorites">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter" data-action="filter-burst">连拍</button>`;

@@ -49,31 +49,20 @@ export function clearAllFilters(): void {
  * data-action 调用，state 变更顺序与原实现逐条一致。
  */
 export function setKindFilter(kind: string): void {
-  // Type tabs replace the whole filter set rather than stacking with 收藏/连拍.
-  // Without resetting these flags, switching away kept querying only the
-  // secondary subset and made the other tabs appear unresponsive.
+  // 筛选是 AND 集合：切换类型只改 kind，不能顺手清掉收藏/连拍。
+  // 旧实现会重置这两项，导致「只看收藏的视频」无法表达，也让 chip 与查询不同步。
   state.kind = (kind || undefined) as MediaKind | undefined;
-  state.favoriteOnly = false;
-  state.burstOnly = false;
   void refreshMedia();
 }
 
 export function toggleFavoriteOnlyFilter(): void {
-  // 收藏 / 连拍 are exclusive secondary tabs: selecting one clears the other.
-  if (state.favoriteOnly) state.favoriteOnly = false;
-  else {
-    state.favoriteOnly = true;
-    state.burstOnly = false;
-  }
+  // 收藏与连拍各自独立切换，可以与类型、标签等条件任意叠加。
+  state.favoriteOnly = !state.favoriteOnly;
   void refreshMedia();
 }
 
 export function toggleBurstOnlyFilter(): void {
-  if (state.burstOnly) state.burstOnly = false;
-  else {
-    state.burstOnly = true;
-    state.favoriteOnly = false;
-  }
+  state.burstOnly = !state.burstOnly;
   void refreshMedia();
 }
 
@@ -99,7 +88,10 @@ export function applyDateRangeInputs(): void {
   state.dateFrom = from || undefined;
   state.dateTo = to || undefined;
   if (state.dateFrom || state.dateTo) {
-    // Range wins over sidebar prefix so the two cannot fight in the title.
+    // 日期前缀（年/月/日）与区间是唯一允许互斥的一对：primaryDateLabel()
+    // 只能把一种日期条件写进标题，两者叠加会让标题在「2025-03」和
+    // 「2025-03-01 ~ 2025-03-31」之间二选一，产生歧义。
+    // 其余筛选（类型 / 收藏 / 连拍 / 标签 / 评分…）一律 AND 叠加。
     state.datePrefix = undefined;
   }
   void refreshMedia();
@@ -133,6 +125,7 @@ export function applyDateRangePreset(preset: string | undefined): void {
   } else {
     return;
   }
+  // 预设区间同样清掉日期前缀：前缀 vs 区间是唯一合法互斥（见 applyDateRangeInputs）。
   state.datePrefix = undefined;
   void refreshMedia();
 }

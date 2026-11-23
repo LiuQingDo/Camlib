@@ -113,7 +113,28 @@ describe("secondaryFilterParts", () => {
     expect(secondaryFilterParts(baseState({ tagIds: new Set(["a"]) }))).toEqual(["标签×1"]);
   });
 
-  it("ignores conditions that live outside the collapsible panel", () => {
-    expect(secondaryFilterParts(baseState({ search: "x", kind: "photo", favoriteOnly: true }))).toEqual([]);
+  it("lists 收藏 / 连拍 so the 筛选 count matches the real query", () => {
+    expect(secondaryFilterParts(baseState({ favoriteOnly: true }))).toEqual(["收藏"]);
+    expect(secondaryFilterParts(baseState({ burstOnly: true }))).toEqual(["连拍"]);
+    expect(secondaryFilterParts(baseState({ favoriteOnly: true, burstOnly: true }))).toEqual(["收藏", "连拍"]);
+  });
+
+  it("reads as an AND combination with the primary kind filter", () => {
+    const combo = baseState({
+      kind: "video",
+      favoriteOnly: true,
+      tagIds: new Set(["a", "b"]),
+      ratingMin: 3,
+    });
+    const parts = secondaryFilterParts(combo);
+    expect(parts).toEqual(["收藏", "标签×2", "评分"]);
+    expect(parts).toHaveLength(3);
+    expect(hasAnyFilter(combo)).toBe(true);
+    // kind 由主行的类型 chip 表达，不重复计入「筛选 (n)」。
+    expect(parts).not.toContain("视频");
+  });
+
+  it("keeps search and kind out of the collapsible-panel summary", () => {
+    expect(secondaryFilterParts(baseState({ search: "x", kind: "photo" }))).toEqual([]);
   });
 });

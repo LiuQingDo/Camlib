@@ -60,7 +60,9 @@ export function bindSidebarEvents(): void {
   bindAll("[data-prefix]", "click", (event) => {
     const prefix = (event.currentTarget as HTMLElement).dataset.prefix || undefined;
     state.datePrefix = prefix;
-    // Prefix and range are exclusive in the UI so the title stays unambiguous.
+    // 日期前缀与区间是唯一合法互斥的一对：标题只能呈现一种日期条件，
+    // 两者并存会让 primaryDateLabel() 二选一、标题失去确定性。
+    // 其他筛选（类型 / 收藏 / 连拍 / 标签…）都按 AND 叠加，不要在这里顺手清。
     state.dateFrom = undefined;
     state.dateTo = undefined;
     if (prefix) {
