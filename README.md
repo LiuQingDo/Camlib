@@ -200,7 +200,7 @@ Camlib/
 │  │  ├─ deletion.rs       # 回收站删除
 │  │  └─ db/               # SQLite 迁移与查询
 │  └─ resources/ffmpeg/    # 本地放置 ffmpeg（不进 Git）
-├─ docs/                   # 需求、架构、数据模型、开发合约、发布清单
+├─ docs/                   # 需求、架构、数据模型、开发合约、发布清单、UI/UX 路线
 └─ package.json
 ```
 
@@ -213,6 +213,9 @@ Camlib/
 | [`docs/data-model.md`](docs/data-model.md)               | SQLite 数据模型（以 migrations 为准）     |
 | [`docs/development-notes.md`](docs/development-notes.md) | Command API、错误契约、路径安全、测试合约 |
 | [`docs/release-checklist.md`](docs/release-checklist.md) | 发布前检查清单                            |
+| [`docs/glossary.md`](docs/glossary.md) | 界面术语表（同一概念只用一种叫法） |
+| [`docs/ui-ux/README.md`](docs/ui-ux/README.md) | UI/UX 修复路线：14 步、依赖顺序、提示词 |
+| [`docs/ui-ux/diagnosis.md`](docs/ui-ux/diagnosis.md) | UI/UX 问题基线（14 个维度、编号 1.1–14.4） |
 | [`CHANGELOG.md`](CHANGELOG.md)                           | 版本变更记录                              |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md)                     | 贡献指南（环境、检查项、硬性约束）        |
 | [`SECURITY.md`](SECURITY.md)                             | 漏洞报告渠道与安全边界                    |
@@ -221,7 +224,7 @@ Camlib/
 
 ## 贡献
 
-项目处于早期（v0.1.x），欢迎 Issue 与 PR。完整说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。摘要：
+项目处于早期（v0.6.x），欢迎 Issue 与 PR。完整说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。摘要：
 
 1. 大改动先开 Issue 对齐意图，避免方向跑偏
 2. 涉及文件系统 / 删除 / 备份的改动请补充或更新测试

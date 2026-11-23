@@ -205,6 +205,8 @@ Camlib/
 | [`docs/data-model.md`](docs/data-model.md) | SQLite model (migrations win on conflict) (Chinese) |
 | [`docs/development-notes.md`](docs/development-notes.md) | Command API, errors, path safety, test contracts (Chinese) |
 | [`docs/release-checklist.md`](docs/release-checklist.md) | Pre-release checklist (Chinese) |
+| [`docs/glossary.md`](docs/glossary.md) | UI terminology, one name per concept (Chinese) |
+| [`docs/ui-ux/README.md`](docs/ui-ux/README.md) | UI/UX remediation roadmap: 14 ordered steps with prompts (Chinese) |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting |
