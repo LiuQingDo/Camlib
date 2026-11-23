@@ -54,8 +54,10 @@ export function renderLibrarySwitcher(): string {
 export const SHELL_HTML = `<div class="shell"><aside class="sidebar" aria-label="媒体库导航">
     <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/camlib-icon.png" alt="" width="37" height="37" /></span><div><strong>Camlib</strong><span>媒体库</span></div><button class="icon-button brand-settings" type="button" id="settings-button-top" title="设置" aria-label="打开设置">⚙</button></div>
     <div class="sidebar-section library-section" data-region="sidebar-library"></div>
+    <nav class="sidebar-section import-section" aria-label="导入"><button class="sidebar-nav-item" type="button" data-nav="import" aria-haspopup="dialog"><span class="sidebar-nav-icon" aria-hidden="true">＋</span><span>导入照片…</span></button></nav>
     <nav class="sidebar-section date-section" aria-label="按日期浏览" data-region="sidebar-dates"></nav>
     <div data-region="sidebar-ai"></div>
+    <div class="sidebar-section recent-section" data-region="sidebar-recent"></div>
     <div class="sidebar-footer" data-region="sidebar-footer"></div>
   </aside><main class="content">
     <header class="topbar"><div class="title-block" data-region="topbar-title"></div><div class="top-actions"><div data-region="task-pill"></div><div class="search-box"><span aria-hidden="true">⌕</span><input id="search-input" value="" placeholder="搜索文件名" aria-label="搜索文件名" /><kbd>/</kbd><button class="search-button" id="search-button" type="button">搜索</button></div><button class="outline-button" id="scan-top-button" type="button"></button></div></header>
@@ -63,7 +65,7 @@ export const SHELL_HTML = `<div class="shell"><aside class="sidebar" aria-label=
     <div data-region="status"></div>
     <div class="sticky-controls"><div class="toolbar"><div class="filter-column"><div class="filter-row" data-region="filter-row"></div><div class="advanced-filters" id="advanced-filters" data-region="advanced" hidden></div></div><div class="toolbar-right" data-region="toolbar-right"></div></div><div data-region="selection"></div></div>
     <section class="media-area" aria-live="polite" data-region="media"></section></main></div>
-<div id="overlay-host"><div data-overlay="preview"></div><div data-overlay="confirm"></div><div data-overlay="tag-manager"></div><div data-overlay="editor"></div><div data-overlay="merge"></div><div data-overlay="settings"></div><div data-overlay="ai-chat"></div></div>
+<div id="overlay-host"><div data-overlay="preview"></div><div data-overlay="confirm"></div><div data-overlay="tag-manager"></div><div data-overlay="editor"></div><div data-overlay="merge"></div><div data-overlay="settings"></div><div data-overlay="ai-chat"></div><div data-overlay="backup"></div></div>
 <div id="toast-host" aria-live="polite"></div>`;
 
 export function renderShell(force = false): void {
@@ -91,6 +93,15 @@ export function sidebarFooterHtml(): string {
   return `<div class="footer-status"><span class="footer-dot"></span><span class="footer-status-text">${status}</span></div><div class="footer-controls"><label class="auto-scan-toggle" title="启动时自动增量扫描"><input id="auto-scan-toggle" type="checkbox" ${state.autoScanOnStartup ? "checked" : ""} aria-label="启动时自动扫描" /><span>启动扫描</span></label><span class="footer-actions"><button class="icon-button" title="${state.availability === "available" ? "扫描媒体库" : "媒体库不可用"}" id="scan-button" aria-label="扫描媒体库" ${scanDisabled}>⟳</button><button class="icon-button theme-toggle" type="button" title="${themeLabel}" id="theme-toggle" aria-label="${themeLabel}" aria-pressed="${state.theme === "dark"}">${state.theme === "dark" ? "☀" : "☾"}</button><button class="icon-button" title="设置" id="settings-button" aria-label="打开设置">⚙</button></span></div>`;
 }
 
+/**
+ * 「最近导入」常驻入口：复用 firstSeenFrom 的新导入筛选，不另建页面。
+ * 没有媒体库时隐藏——此时「新导入」没有可查询的对象。
+ */
+export function sidebarRecentHtml(): string {
+  if (!state.library) return "";
+  return `<button class="sidebar-nav-item" type="button" data-nav="recent-imports"><span class="sidebar-nav-icon" aria-hidden="true">↺</span><span>最近导入</span></button>`;
+}
+
 export function patchSidebar(): void {
   let changed = setRegionHtml(region("sidebar-library"), sidebarLibraryHtml());
   changed =
@@ -99,6 +110,7 @@ export function patchSidebar(): void {
       `<div class="section-label"><span>按日期浏览</span></div>${renderDateNavigation()}`,
     ) || changed;
   changed = setRegionHtml(region("sidebar-ai"), renderAiSidebarSection()) || changed;
+  changed = setRegionHtml(region("sidebar-recent"), sidebarRecentHtml()) || changed;
   changed = setRegionHtml(region("sidebar-footer"), sidebarFooterHtml()) || changed;
   if (changed) bindSidebarEvents();
 }

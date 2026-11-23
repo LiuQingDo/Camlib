@@ -5,7 +5,6 @@ import { MediaKind, MediaQueryInput, ScanProgressDto, TagDto } from "../api/medi
 import { hasAnyFilter, secondaryFilterParts } from "../lib/filters";
 import { formatCount, formatRangeLabel } from "../lib/format";
 import { SortMode, state } from "../state";
-import { renderBackupPanel } from "../views/backup";
 import { app, region, setRegionHtml, setText } from "./context";
 import { bindStatusEvents, bindToolbarEvents, refreshMedia } from "./paint";
 import { escapeHtml, formatDate, groupedFacets } from "./text";
@@ -432,6 +431,7 @@ function taskRowHtml(task: Task): string {
  */
 export function renderTaskPill(): string {
   syncScanTask();
+  syncBackupTask();
   const tasks = listTasks();
   if (!tasks.length) {
     taskPillExpanded = false;
@@ -464,6 +464,28 @@ function syncScanTask(): void {
     detail: progress?.current ? `${phase} · ${progress.current}` : phase,
     done: progress?.processed,
     total: progress?.total,
+  });
+}
+
+/**
+ * 备份也是后台任务：抽屉关掉后进度不能跟着消失。
+ * 这里只登记进度，取消仍走抽屉里的按钮（备份的取消语义比任务表更重）。
+ */
+function syncBackupTask(): void {
+  const progress = state.backupProgress;
+  const terminal = Boolean(progress && progress.state !== "running");
+  const running = !terminal && (Boolean(state.backupJobId) || progress?.state === "running");
+  if (!running) {
+    finishTask("backup");
+    return;
+  }
+  const phase = progress?.phase === "merging" ? "合并分段" : "复制文件";
+  upsertTask({
+    id: "backup",
+    title: "正在导入照片",
+    detail: progress?.currentFile ? `${phase} · ${progress.currentFile}` : progress ? phase : "准备中",
+    done: progress?.fileProcessed,
+    total: progress?.fileTotal,
   });
 }
 
@@ -646,15 +668,15 @@ export function titleBlockHtml(): string {
   return `<div class="eyebrow">${label ? `筛选 · ${label}` : "媒体总览"}</div><h1>${label || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${clear}`;
 }
 
-/** 顶栏下方的横幅区：新导入提示 / 状态横幅 / 删除反馈 / 备份面板。 */
-/** 顶栏下方的查询状态区：新导入提示 / AI 搜索条件 / 备份入口与面板（原位置）。 */
+/**
+ * 顶栏下方的查询状态区：新导入提示 / AI 搜索条件。
+ * 备份入口已迁到侧栏、面板迁到 overlay，这里不再随内容流渲染任何备份 DOM。
+ */
 export function statusRegionHtml(): string {
   const firstSeen = state.firstSeenFrom
     ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>`
     : "";
-  // 备份面板暂时留在原位：它不属于三通道中的任何一条，后续步骤再单独安置。
-  const backup = `${state.backupOpen ? "" : `<div class="backup-launcher-row"><button class="outline-button" id="backup-open-button" type="button">相机备份预览</button></div>`}${renderBackupPanel()}`;
-  return `${firstSeen}${renderStatusBanner()}${backup}`;
+  return `${firstSeen}${renderStatusBanner()}`;
 }
 
 /**

@@ -9,14 +9,17 @@ import { patchToolbar, resetSidebarExpansionForSelection, searchUi, toggleTaskPi
 import { onGridScroll } from "../../render/virtual";
 import { state } from "../../state";
 import { dismissNotice, runNoticeAction } from "../notices";
-import { patchErrorBar, patchTaskPill } from "../orchestrate";
+import { patchBackupOverlay, patchErrorBar, patchTaskPill } from "../orchestrate";
 import { cancelTask } from "../tasks";
+import { showToast } from "../toast";
 import { openAiChatDrawer } from "../../views/ai-chat";
 import {
+  backupRunning,
   bootstrap,
   cancelCurrentBackup,
   cancelCurrentScan,
   chooseLibraryFolder,
+  closeBackupPanel,
   connectLibrary,
   createBackupPreview,
   openBackupPanel,
@@ -26,6 +29,7 @@ import {
   scanLibrary,
   startConfirmedBackup,
   viewNewImports,
+  viewRecentImports,
 } from "../library";
 import { toggleTheme } from "../settings-ops";
 import { exitSemanticSearch } from "./toolbar";
@@ -49,14 +53,123 @@ export function bindShellEvents(): void {
     void refreshMedia();
   });
   bind(app.querySelector("#scan-top-button"), "click", () => void scanLibrary());
+  // 侧栏「导入照片…」是骨架里的静态节点：在这里绑一次，不依赖 patchSidebar。
+  bindAll('[data-nav="import"]', "click", () => void openBackupPanel());
   // 骨架重建后 .content 是新节点，滚动监听要跟着新节点重挂。
   bind(app.querySelector(".content"), "scroll", onGridScroll);
+  bindBackupDrawerEvents();
+}
+
+/**
+ * 备份抽屉是 overlay 槽位里的动态内容，每次 patch 都会换掉内部节点。
+ * 在静态宿主上做一次委托，比每次重建后重绑十几个 id 稳，也不会和
+ * patchBackupOverlay 的调用顺序耦合。
+ */
+function bindBackupDrawerEvents(): void {
+  const host = app.querySelector<HTMLElement>('[data-overlay="backup"]');
+  if (!host) return;
+  bind(host, "click", (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (!target) return;
+    // 只有点在遮罩本身才关闭；抽屉内的点击不会命中这个判断。
+    if (target.classList.contains("backup-backdrop")) {
+      if (backupRunning()) {
+        showToast("备份在后台继续 · 重新打开可查看进度", { kind: "info", key: "backup-running" });
+        return;
+      }
+      closeBackupPanel();
+      return;
+    }
+    if (target.closest("#close-backup")) {
+      closeBackupPanel();
+      return;
+    }
+    if (target.closest("#backup-preview-button")) {
+      void createBackupPreview();
+      return;
+    }
+    if (target.closest("#backup-start-button")) {
+      void startConfirmedBackup();
+      return;
+    }
+    if (target.closest("#backup-cancel-button")) {
+      void cancelCurrentBackup();
+      return;
+    }
+    if (target.closest("#backup-retry-button")) {
+      void retryCurrentBackup();
+      return;
+    }
+    if (target.closest("#backup-view-new")) {
+      void viewNewImports();
+      return;
+    }
+    if (target.closest("#backup-view-new-later")) {
+      // 结果已经落库，收藏/历史都在；这里只收起抽屉，侧栏「最近导入」可再进。
+      closeBackupPanel();
+      return;
+    }
+    const runRow = target.closest<HTMLElement>("[data-backup-run]");
+    if (runRow) toggleBackupRun(runRow.dataset.backupRun);
+  });
+  bind(host, "change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.id === "backup-source") {
+      state.backupSourceId = (target as HTMLSelectElement).value || null;
+      return;
+    }
+    if (target.id === "backup-target") {
+      state.backupTargetId = (target as HTMLSelectElement).value || null;
+      return;
+    }
+    if (target.id === "backup-ignore") {
+      state.backupIgnoreExtensions = (target as HTMLInputElement).value;
+      return;
+    }
+    if (target.id === "backup-conflict") {
+      void saveBackupConflict((target as HTMLSelectElement).value as ConflictPolicy);
+      return;
+    }
+    if (target.id === "backup-merge") {
+      void saveBackupMerge((target as HTMLSelectElement).value === "on");
+      return;
+    }
+    if (target.id === "backup-deep-verify") {
+      state.backupDeepVerify = (target as HTMLInputElement).checked;
+      // The switch is persisted with the preview plan, so an existing summary
+      // would otherwise keep advertising the previous setting.
+      if (state.backupPreview) void createBackupPreview();
+      else patchBackupOverlay();
+    }
+  });
+}
+
+function toggleBackupRun(runId: string | undefined): void {
+  if (!runId) return;
+  state.backupExpandedRunId = state.backupExpandedRunId === runId ? null : runId;
+  patchBackupOverlay();
+  if (state.backupExpandedRunId) {
+    void listBackupRunItems(runId, true)
+      .then((items) => {
+        state.backupHistoryItems = items;
+        patchBackupOverlay();
+      })
+      .catch((error) => {
+        state.error = toUserMessage(error, "读取备份明细失败");
+        patchBackupOverlay();
+        patchToolbar();
+      });
+  } else {
+    state.backupHistoryItems = [];
+  }
 }
 
 /** 侧栏：媒体库块 / 日期树 / AI 块 / 页脚。 */
 export function bindSidebarEvents(): void {
   bind(app.querySelector("#theme-toggle"), "click", () => void toggleTheme());
   bindAll("#settings-button, #settings-button-top", "click", () => void openSettings());
+  bindAll('[data-nav="recent-imports"]', "click", () => void viewRecentImports());
   bindAll("[data-prefix]", "click", (event) => {
     const prefix = (event.currentTarget as HTMLElement).dataset.prefix || undefined;
     state.datePrefix = prefix;
@@ -130,8 +243,9 @@ export function bindSidebarEvents(): void {
 }
 
 /**
- * 反馈区：错误条 / 任务胶囊 / 查询状态横幅 / 备份面板。
+ * 反馈区：错误条 / 任务胶囊 / 查询状态横幅。
  * 区域整块重建后这里会被重跑，bind / bindAll 自带幂等，不会叠加监听器。
+ * 备份抽屉的控件不在这里：它挂在 overlay 槽位，由 bindBackupDrawerEvents 委托。
  */
 export function bindStatusEvents(): void {
   bind(app.querySelector("#rescan-button"), "click", () => void bootstrap());
@@ -163,65 +277,6 @@ export function bindStatusEvents(): void {
     if (id === "scan") void cancelCurrentScan();
     else cancelTask(id);
     patchTaskPill();
-  });
-  bind(app.querySelector("#backup-open-button"), "click", () => void openBackupPanel());
-  bind(app.querySelector("#close-backup"), "click", () => {
-    state.backupOpen = false;
-    patchToolbar();
-  });
-  bind(app.querySelector("#backup-preview-button"), "click", () => void createBackupPreview());
-  bind(app.querySelector("#backup-source"), "change", (event) => {
-    state.backupSourceId = (event.target as HTMLSelectElement).value || null;
-  });
-  bind(app.querySelector("#backup-target"), "change", (event) => {
-    state.backupTargetId = (event.target as HTMLSelectElement).value || null;
-  });
-  bind(app.querySelector("#backup-ignore"), "change", (event) => {
-    state.backupIgnoreExtensions = (event.target as HTMLInputElement).value;
-  });
-  bind(
-    app.querySelector("#backup-conflict"),
-    "change",
-    (event) => void saveBackupConflict((event.target as HTMLSelectElement).value as ConflictPolicy),
-  );
-  bind(
-    app.querySelector("#backup-merge"),
-    "change",
-    (event) => void saveBackupMerge((event.target as HTMLSelectElement).value === "on"),
-  );
-  bind(app.querySelector("#backup-deep-verify"), "change", (event) => {
-    state.backupDeepVerify = (event.target as HTMLInputElement).checked;
-    // The switch is persisted with the preview plan, so an existing summary
-    // would otherwise keep advertising the previous setting.
-    if (state.backupPreview) void createBackupPreview();
-    else patchToolbar();
-  });
-  bind(app.querySelector("#backup-start-button"), "click", () => void startConfirmedBackup());
-  bind(app.querySelector("#backup-cancel-button"), "click", () => void cancelCurrentBackup());
-  bind(app.querySelector("#backup-retry-button"), "click", () => void retryCurrentBackup());
-  bind(app.querySelector("#backup-view-new"), "click", () => void viewNewImports());
-  bind(app.querySelector("#backup-view-new-later"), "click", () => {
-    state.backupProgress = state.backupProgress ? { ...state.backupProgress, state: "completed" } : null;
-    patchToolbar();
-  });
-  bindAll("[data-backup-run]", "click", (event) => {
-    const runId = (event.currentTarget as HTMLElement).dataset.backupRun;
-    if (!runId) return;
-    state.backupExpandedRunId = state.backupExpandedRunId === runId ? null : runId;
-    if (state.backupExpandedRunId) {
-      void listBackupRunItems(runId, true)
-        .then((items) => {
-          state.backupHistoryItems = items;
-          patchToolbar();
-        })
-        .catch((error) => {
-          state.error = toUserMessage(error, "读取备份明细失败");
-          patchToolbar();
-        });
-    } else {
-      state.backupHistoryItems = [];
-    }
-    patchToolbar();
   });
 }
 

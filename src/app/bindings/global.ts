@@ -10,6 +10,7 @@ import {
   onScanProgress,
   onVideoMergeProgress,
 } from "../../api/media";
+import { formatCount } from "../../lib/format";
 import { previewAssetCache } from "../../media/cache";
 import { app } from "../../render/context";
 import { render, renderSettingsAware } from "../../render/paint";
@@ -33,8 +34,10 @@ import {
 import { previewUi } from "../../views/preview/state";
 import { updateSettingsPanel } from "../../views/settings";
 import { closeMergeModal, closeTagManager } from "../dialogs-ops";
-import { bootstrap, loadBackupHistory } from "../library";
+import { backupRunning, bootstrap, closeBackupPanel, loadBackupHistory, viewNewImports } from "../library";
 import { cancelDeleteConfirm, runConfirmedDelete } from "../media-ops";
+import { patchBackupOverlay } from "../orchestrate";
+import { showToast } from "../toast";
 import { refreshTags } from "../media-query";
 import { closeSettings, loadAiStats, loadSettingsSectionData } from "../settings-ops";
 import { handleCutCompleted, handleEditSaved, handleMergeCompleted } from "./editor";
@@ -89,6 +92,18 @@ window.addEventListener("keydown", (event) => {
       void runConfirmedDelete();
       return;
     }
+  }
+  if (state.backupOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (backupRunning()) {
+        // 运行中关抽屉 = 后台继续；Esc 不该让用户以为任务被取消。
+        showToast("备份在后台继续 · 重新打开可查看进度", { kind: "info", key: "backup-running" });
+      } else {
+        closeBackupPanel();
+      }
+    }
+    return;
   }
   // The toolbar tag popover closes before the "/" shortcut / preview Escape
   // paths can act on the same keypress.
@@ -269,21 +284,38 @@ void onBackupProgress((progress) => {
   if (!state.backupJobId && progress.state === "running") return;
   state.backupProgress = progress;
   if (progress.state === "running") {
-    // running 态只改状态区里的进度面板。
+    // 抽屉开着就原地改数字；抽屉关着时任务胶囊接管进度。
+    patchBackupOverlay();
     patchToolbar();
     return;
   }
   state.backupJobId = null;
   if (progress.state === "failed") state.error = progress.error ?? "备份失败";
-  void loadBackupHistory().then(() => patchToolbar());
+  if (progress.state === "completed") {
+    // 结果入口不再依赖内容流：toast 常驻 8s，带「查看」直达新导入结果。
+    showToast(`导入完成 · 新增 ${formatCount(progress.fileProcessed)} 个文件`, {
+      kind: "success",
+      key: "backup-result",
+      timeout: 8000,
+      action: { label: "查看", run: () => void viewNewImports() },
+    });
+  }
+  patchBackupOverlay();
+  void loadBackupHistory().then(() => {
+    // 历史与失败明细都进了抽屉签名；补一次 patch，别让「最近备份」停在上一轮。
+    patchBackupOverlay();
+    patchToolbar();
+  });
   if (state.backupLastRunId) {
     void listBackupRunItems(state.backupLastRunId, true)
       .then((items) => {
         state.backupFailedItems = items;
+        patchBackupOverlay();
         patchToolbar();
       })
       .catch(() => {
         state.backupFailedItems = [];
+        patchBackupOverlay();
         patchToolbar();
       });
   }

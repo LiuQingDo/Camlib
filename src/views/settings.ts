@@ -273,7 +273,7 @@ export function renderSettingsBackupSection(): string {
         </select></label>
         <div class="settings-actions">
           <button class="primary-button" type="button" id="settings-save-backup-defaults">保存默认项</button>
-          <button class="outline-button" type="button" id="settings-open-backup-panel">打开备份面板</button>
+          <button class="outline-button" type="button" id="settings-open-backup-panel">打开导入抽屉</button>
         </div>
       </div>
     </div>

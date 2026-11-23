@@ -572,6 +572,50 @@ select:focus-visible,
   color: #8a8a8a;
   font-size: 12px;
 }
+/* 侧栏一级入口：导入照片 / 最近导入。与日期树同列，不参与滚动。 */
+.import-section {
+  margin-bottom: 12px;
+}
+.recent-section {
+  margin-bottom: 10px;
+}
+.sidebar-nav-item {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 12px;
+  color: #333333;
+  background: rgba(255, 255, 255, 0.4);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+.sidebar-nav-item:hover {
+  border-color: rgba(255, 255, 255, 0.9);
+  color: #111111;
+  background: rgba(255, 255, 255, 0.72);
+}
+.sidebar-nav-icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 13px;
+  line-height: 1;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.9);
+}
 /* 底部状态栏：状态独占一行、控件独占一行。272px 窄侧栏放不进单行，
    挤在一起时「索引已连接」会被压成两行，基线全乱。 */
 .sidebar-footer {
@@ -1725,22 +1769,101 @@ h1 {
 .text-button:hover {
   background: rgba(255, 255, 255, 0.5);
 }
-.backup-launcher-row {
+/* ── 导入抽屉：右侧全高，遮罩沿用 modal-backdrop 的视觉语言 ─────────────── */
+/* 复合选择器：styles.css 后面的 .modal-backdrop 还会写 display/padding，
+   这里必须靠 specificity 压过它，才能保持右侧贴边、无内边距。 */
+.modal-backdrop.backup-backdrop {
   display: flex;
+  align-items: stretch;
   justify-content: flex-end;
-  margin: -8px 0 22px;
+  padding: 0;
 }
-.backup-panel {
-  margin: -8px 0 22px;
-  padding: 17px;
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  border-radius: 19px;
-  background: rgba(255, 255, 255, 0.4);
+.backup-drawer {
+  position: relative;
+  display: flex;
+  width: min(480px, 100vw);
+  max-width: 100%;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-right: 0;
+  border-radius: 22px 0 0 22px;
+  background: color-mix(in srgb, var(--glass-strong) 90%, transparent);
   box-shadow:
-    var(--glass-specular),
-    0 13px 28px rgba(0, 0, 0, 0.04);
-  backdrop-filter: blur(22px) saturate(1.4);
-  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+    -18px 0 48px rgba(0, 0, 0, 0.18),
+    var(--glass-specular);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  animation: backup-drawer-in 0.26s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+}
+@keyframes backup-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+/* 抽屉内部按签名重建（预览、进度状态、历史展开）时不重播入场动画；
+   只有第一次插入遮罩时才播放。 */
+.backup-backdrop.is-settled,
+.backup-backdrop.is-settled > .backup-drawer {
+  animation: none;
+}
+.backup-drawer .backup-heading {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 18px 18px 8px;
+}
+.backup-drawer .backup-heading strong {
+  font-size: 16px;
+}
+.backup-drawer .backup-steps {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 18px 12px;
+}
+.backup-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0 18px 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.backup-body .backup-step-block:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.backup-footer {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px calc(14px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  background: color-mix(in srgb, var(--surface-solid) 72%, transparent);
+}
+.backup-footer-preview {
+  margin-right: auto;
+}
+.backup-footer .primary-button {
+  min-height: 38px;
+}
+@media (max-width: 900px) {
+  .backup-drawer {
+    width: 100%;
+    border-radius: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .backup-drawer {
+    animation: none;
+  }
 }
 .backup-heading,
 .backup-form,
@@ -4547,6 +4670,20 @@ h1 {
 [data-theme="dark"] .sidebar-footer {
   border-top-color: var(--border-hairline);
 }
+[data-theme="dark"] .sidebar-nav-item {
+  border-color: var(--glass-border);
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
+[data-theme="dark"] .sidebar-nav-item:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: var(--surface-strong);
+}
+[data-theme="dark"] .sidebar-nav-icon {
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
 [data-theme="dark"] .auto-scan-toggle:hover {
   color: var(--ink);
   background: rgba(255, 255, 255, 0.08);
@@ -4938,12 +5075,19 @@ h1 {
   color: var(--muted);
 }
 
-[data-theme="dark"] .backup-panel {
+[data-theme="dark"] .modal-backdrop.backup-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+[data-theme="dark"] .backup-drawer {
   border-color: var(--glass-border);
-  background: var(--surface);
+  background: var(--bg-elevated);
   box-shadow:
     var(--glass-specular),
-    0 13px 28px rgba(0, 0, 0, 0.4);
+    -18px 0 48px rgba(0, 0, 0, 0.55);
+}
+[data-theme="dark"] .backup-footer {
+  border-top-color: var(--border-hairline);
+  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
 }
 [data-theme="dark"] .backup-heading strong {
   color: var(--ink);
@@ -8763,6 +8907,9 @@ html.is-scrolling .preview-skeleton {
   }
 }
 [data-overlay] > .ai-chat-drawer.is-leaving {
+  animation: overlay-drawer-out 140ms ease both;
+}
+[data-overlay] > .backup-backdrop.is-leaving > .backup-drawer {
   animation: overlay-drawer-out 140ms ease both;
 }
 

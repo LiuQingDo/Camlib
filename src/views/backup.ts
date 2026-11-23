@@ -3,7 +3,6 @@ import { backupStatusLabel, conflictPolicyLabel, escapeHtml, willCopyCount } fro
 import { state } from "../state";
 
 export function renderBackupPanel(): string {
-  if (!state.backupOpen) return "";
   const preview = state.backupPreview;
   const progress = state.backupProgress;
   const running = Boolean(state.backupJobId) || progress?.state === "running";
@@ -34,11 +33,11 @@ export function renderBackupPanel(): string {
 
   const formDisabled = running || state.backupLoading || state.availability !== "available";
   const canPreview = !formDisabled && state.backupSources.length > 0 && state.libraries.length > 0;
+  const willCopy = preview ? willCopyCount(preview) : 0;
+  const spaceOk = preview?.spaceSufficient !== false;
 
   let previewBlock = "";
   if (preview) {
-    const willCopy = willCopyCount(preview);
-    const spaceOk = preview.spaceSufficient !== false;
     const conflictNote =
       preview.conflictFiles > 0
         ? preview.conflictPolicy === "skip_same"
@@ -91,9 +90,6 @@ export function renderBackupPanel(): string {
               : "深度校验已开启：每个文件复制后都会回读目标文件并比对内容哈希，较慢，但能发现大小不变的内容损坏。"
             : ""
         }</div>
-        <div class="backup-actions">
-          <button class="primary-button" id="backup-start-button" type="button" ${running || state.backupLoading || !spaceOk || willCopy === 0 ? "disabled" : ""}>${willCopy === 0 ? "没有需要复制的文件" : spaceOk ? "确认并开始备份" : "空间不足，无法开始"}</button>
-        </div>
       </div>`;
   }
 
@@ -124,13 +120,13 @@ export function renderBackupPanel(): string {
         <div class="scan-copy">
           ${progress.state === "running" ? `<span class="spinner"></span>` : ""}
           <span>${title}</span>
-          <strong>${progress.state === "running" ? `${progressPercent}%` : filesLabel}</strong>
+          <strong data-backup-percent>${progress.state === "running" ? `${progressPercent}%` : filesLabel}</strong>
           ${progress.state === "running" ? `<button class="text-button" id="backup-cancel-button" type="button">取消</button>` : ""}
         </div>
-        <div class="progress-track${progress.state === "running" && progress.bytesTotal <= 0 ? " is-indeterminate" : ""}">
-          <span style="width:${progress.state === "running" && progress.bytesTotal <= 0 ? "35%" : `${progressPercent}%`}"></span>
+        <div class="progress-track${progress.state === "running" && progress.bytesTotal <= 0 ? " is-indeterminate" : ""}" data-backup-track>
+          <span data-backup-track-fill style="width:${progress.state === "running" && progress.bytesTotal <= 0 ? "35%" : `${progressPercent}%`}"></span>
         </div>
-        <div class="scan-current">${escapeHtml(progress.currentFile || (progress.state === "running" ? (progress.phase === "merging" ? "正在合并分段" : "准备中") : ""))}${liveMeta ? ` · ${liveMeta}` : ""} · ${bytesLabel}</div>
+        <div class="scan-current" data-backup-current>${escapeHtml(progress.currentFile || (progress.state === "running" ? (progress.phase === "merging" ? "正在合并分段" : "准备中") : ""))}${liveMeta ? ` · ${liveMeta}` : ""} · ${bytesLabel}</div>
         <div class="backup-note">${safePoint}</div>
         ${progress.error || failed ? `<div class="backup-note is-danger">${escapeHtml(progress.error || "备份过程中出现错误")}</div>` : ""}
         ${
@@ -152,16 +148,6 @@ export function renderBackupPanel(): string {
             : (failed || cancelled) && state.backupLastRunId
               ? `<div class="backup-note">没有可重试的文件项。可重新生成预览后再备份。</div>`
               : ""
-        }
-        ${
-          done && state.backupLastRunId
-            ? `
-          <div class="backup-actions">
-            <button class="primary-button" id="backup-view-new" type="button">查看新导入</button>
-            <button class="text-button" id="backup-view-new-later" type="button">稍后再看</button>
-          </div>
-        `
-            : ""
         }
       </div>`;
   }
@@ -201,12 +187,22 @@ export function renderBackupPanel(): string {
         .join("")
     : `<div class="backup-note">还没有备份记录。完成一次备份后会出现在这里。</div>`;
 
-  return `<section class="backup-panel" aria-label="相机备份">
+  const previewButton = `<button class="${preview ? "outline-button" : "primary-button"} backup-footer-preview" id="backup-preview-button" type="button" ${canPreview ? "" : "disabled"}>${state.backupLoading ? "生成预览中…" : preview ? "刷新预览" : "生成预览"}</button>`;
+  const startButton = preview
+    ? `<button class="primary-button" id="backup-start-button" type="button" ${running || state.backupLoading || !spaceOk || willCopy === 0 ? "disabled" : ""}>${willCopy === 0 ? "没有需要复制的文件" : spaceOk ? "确认并开始备份" : "空间不足，无法开始"}</button>`
+    : "";
+  const viewNewButtons =
+    progress?.state === "completed" && state.backupLastRunId
+      ? `<button class="primary-button" id="backup-view-new" type="button">查看新导入</button><button class="text-button" id="backup-view-new-later" type="button">稍后再看</button>`
+      : "";
+
+  return `<aside class="backup-drawer" role="dialog" aria-modal="true" aria-label="导入照片">
     <div class="backup-heading">
-      <div><strong>相机备份</strong><span>源盘只读 · 临时文件校验后提交</span></div>
-      <button class="icon-button" id="close-backup" type="button" aria-label="关闭备份面板">×</button>
+      <div><strong>导入照片</strong><span>相机备份 · 源盘只读 · 临时文件校验后提交</span></div>
+      <button class="icon-button" id="close-backup" type="button" aria-label="关闭导入面板">×</button>
     </div>
     <div class="backup-steps" aria-label="备份步骤">${stepChip(1, "选择")}${stepChip(2, "确认")}${stepChip(3, "执行")}</div>
+    <div class="backup-body">
     <div class="backup-step-block">
       <div class="backup-step-title">第 1 步 · 选择源盘与目标</div>
       <div class="backup-form">
@@ -219,7 +215,6 @@ export function renderBackupPanel(): string {
           <input id="backup-deep-verify" type="checkbox" ${state.backupDeepVerify ? "checked" : ""} ${formDisabled ? "disabled" : ""} />
           <span>深度校验</span>
         </label>
-        <button class="primary-button" id="backup-preview-button" type="button" ${canPreview ? "" : "disabled"}>${state.backupLoading ? "生成预览中…" : preview ? "刷新预览" : "生成预览"}</button>
       </div>
       <div class="backup-note">深度校验：较慢，但能发现传输损坏。开启后会按文件内容逐块比对源文件与写入后的目标文件，速度会低于仅比对大小（默认关闭）。</div>
       ${!state.backupSources.length ? `<div class="backup-note">未检测到包含 DCIM 的可移动盘。请插入相机存储卡或 U 盘后重新打开。</div>` : ""}
@@ -230,5 +225,11 @@ export function renderBackupPanel(): string {
       <div class="backup-step-title">最近备份</div>
       <div class="backup-history">${historyRows}</div>
     </div>
-  </section>`;
+    </div>
+    <div class="backup-footer">
+      ${previewButton}
+      ${startButton}
+      ${viewNewButtons}
+    </div>
+  </aside>`;
 }

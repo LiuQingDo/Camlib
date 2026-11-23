@@ -1,4 +1,6 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
+import type { BackupProgressDto } from "../api/media";
+import { formatEtaSeconds, formatSize, formatSpeed } from "../lib/format";
 import { app } from "../render/context";
 import { OVERLAY_ENTER_MS, OVERLAY_LEAVE_MS, beginOverlayTransition } from "../render/overlay-transition";
 import { patchSidebar, renderShell } from "../render/shell";
@@ -10,6 +12,7 @@ import {
 import { patchGrid } from "../render/virtual";
 import { state } from "../state";
 import { aiChatReady, renderAiChatDrawer, setupAiChatResize } from "../views/ai-chat";
+import { renderBackupPanel } from "../views/backup";
 import {
   applyDialogSizes,
   renderDeleteConfirm,
@@ -22,7 +25,15 @@ import { loadModalAsset, patchPreviewFrame, renderPreview } from "../views/previ
 import { renderSettingsPanel, updateSettingsPanel } from "../views/settings";
 import { bindOverlayEvents } from "./bindings/overlay";
 
-export type OverlayId = "preview" | "confirm" | "tag-manager" | "editor" | "merge" | "settings" | "ai-chat";
+export type OverlayId =
+  | "preview"
+  | "confirm"
+  | "tag-manager"
+  | "editor"
+  | "merge"
+  | "settings"
+  | "ai-chat"
+  | "backup";
 
 /** 弹窗容器 → 上次构建它的签名。签名没变就完全不碰 DOM。 */
 export const overlaySignatures = new WeakMap<HTMLElement, string>();
@@ -156,6 +167,102 @@ export function patchPreviewOverlay(): { rebuilt: boolean; load: boolean } {
   return { rebuilt, load: false };
 }
 
+// ---------------------------------------------------------------------------
+// 备份抽屉：结构按签名重建，运行中的数字进度原地同步
+//
+// 备份进度每秒可能推进很多次。若把 bytesProcessed / speed / eta 也算进签名，
+// 每次事件都会重写整个抽屉并重播入场过渡，既丢焦点又让玻璃降级窗口一直开着。
+// 这里签名只包含「结构会变」的字段（步骤、预览、进度状态、历史），数字部分
+// 交给 syncBackupProgressView() 直接改文字与进度条宽度。
+// ---------------------------------------------------------------------------
+
+function backupOverlaySignature(): string {
+  if (!state.backupOpen) return "closed";
+  const preview = state.backupPreview;
+  const progress = state.backupProgress;
+  return [
+    state.backupLoading ? "loading" : "idle",
+    state.availability,
+    state.backupSources.map((source) => `${source.id}:${source.volumeLabel ?? ""}:${source.rootPath}`).join(","),
+    state.libraries.map((library) => `${library.id}:${library.volumeLabel ?? ""}`).join(","),
+    state.backupSourceId ?? "",
+    state.backupTargetId ?? "",
+    state.backupConflictPolicy,
+    state.backupIgnoreExtensions,
+    state.backupMergeSegments ? "merge" : "keep",
+    state.backupDeepVerify ? "deep" : "fast",
+    preview
+      ? [
+          preview.id,
+          preview.requiredBytes,
+          preview.freeBytes ?? "",
+          preview.spaceSufficient,
+          preview.conflictPolicy,
+          preview.deepVerify ? "deep" : "fast",
+          preview.mergeGroupCount,
+          preview.mergeSegmentCount,
+          preview.conflictFiles,
+          preview.alreadyExistsFiles,
+          preview.ignoredFiles,
+          preview.totalFiles,
+        ].join(":")
+      : "no-preview",
+    progress ? `${progress.jobId}:${progress.state}:${progress.phase}:${progress.error ?? ""}` : "no-progress",
+    state.backupJobId ?? "",
+    state.backupRetrying ? "retrying" : "",
+    state.backupLastRunId ?? "",
+    state.backupFailedItems.map((item) => `${item.id}:${item.errorMessage ?? ""}`).join(","),
+    state.backupHistory
+      .map((run) => `${run.id}:${run.status}:${run.copiedFiles}:${run.skippedFiles}:${run.failedFiles}:${run.copiedBytes}`)
+      .join(","),
+    state.backupExpandedRunId ?? "",
+    state.backupHistoryItems.map((item) => item.id).join(","),
+  ].join("|");
+}
+
+function backupCurrentLabel(progress: BackupProgressDto): string {
+  const phaseLabel = progress.currentFile || (progress.phase === "merging" ? "正在合并分段" : "准备中");
+  const liveMeta = `${formatSpeed(progress.speedBytesPerSec)} · ${formatEtaSeconds(progress.etaSeconds)}`;
+  return `${phaseLabel} · ${liveMeta} · ${formatSize(progress.bytesProcessed)} / ${formatSize(progress.bytesTotal)}`;
+}
+
+/** 运行中只改数字，不重建节点；抽屉关着时什么都不做。 */
+function syncBackupProgressView(): void {
+  const progress = state.backupProgress;
+  if (!progress || progress.state !== "running" || !state.backupOpen) return;
+  const host = app.querySelector<HTMLElement>('[data-overlay="backup"]');
+  if (!host?.firstChild) return;
+  const percent =
+    progress.bytesTotal > 0
+      ? Math.min(100, Math.max(0, Math.round((progress.bytesProcessed / progress.bytesTotal) * 100)))
+      : 0;
+  const percentNode = host.querySelector<HTMLElement>("[data-backup-percent]");
+  if (percentNode) percentNode.textContent = `${percent}%`;
+  const track = host.querySelector<HTMLElement>("[data-backup-track]");
+  const fill = host.querySelector<HTMLElement>("[data-backup-track-fill]");
+  if (track && fill) {
+    const indeterminate = progress.bytesTotal <= 0;
+    track.classList.toggle("is-indeterminate", indeterminate);
+    fill.style.width = indeterminate ? "35%" : `${percent}%`;
+  }
+  const current = host.querySelector<HTMLElement>("[data-backup-current]");
+  if (current) current.textContent = backupCurrentLabel(progress);
+}
+
+export function patchBackupOverlay(): boolean {
+  const host = app.querySelector<HTMLElement>('[data-overlay="backup"]');
+  // 已经在场上（预览完成、进度换态、历史展开）时只换内容，不重播滑入动画。
+  const wasRendered = Boolean(host?.firstElementChild);
+  const rebuilt = patchOverlay("backup", backupOverlaySignature(), () =>
+    state.backupOpen
+      ? `<div class="modal-backdrop backup-backdrop" data-backdrop="backup">${renderBackupPanel()}</div>`
+      : "",
+  );
+  if (rebuilt && wasRendered) host?.firstElementChild?.classList.add("is-settled");
+  syncBackupProgressView();
+  return rebuilt;
+}
+
 export function renderOverlays(): void {
   let changed = false;
   const preview = patchPreviewOverlay();
@@ -195,6 +302,7 @@ export function renderOverlays(): void {
         : "closed",
       renderAiChatDrawer,
     ) || changed;
+  changed = patchBackupOverlay() || changed;
   if (changed) {
     bindOverlayEvents();
     // 新弹窗需要恢复保存的几何尺寸并补上拖拽手柄（两者都自带幂等判断）。

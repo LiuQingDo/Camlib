@@ -42,6 +42,7 @@ import { SortMode, state } from "../state";
 import { sanitizeDialogSizes } from "../views/dialogs";
 import { updateSettingsPanel } from "../views/settings";
 import { refreshTags } from "./media-query";
+import { patchBackupOverlay } from "./orchestrate";
 import {
   applyTheme,
   clampDensity,
@@ -131,11 +132,42 @@ export async function loadBackupHistory(): Promise<void> {
   }
 }
 
+/** 打开抽屉的触发元素；关闭时把焦点还回去（侧栏重绘过就退回「导入照片…」）。 */
+let backupTrigger: HTMLElement | null = null;
+
+/** 备份任务是否在跑：运行中关抽屉、Esc、点遮罩都不能取消它。 */
+export function backupRunning(): boolean {
+  // 终态进度优先：startBackup 的响应可能晚于完成事件，别把已结束的任务当成还在跑。
+  if (state.backupProgress && state.backupProgress.state !== "running") return false;
+  return Boolean(state.backupJobId) || state.backupProgress?.state === "running";
+}
+
+function focusBackupDrawer(): void {
+  if (!state.backupOpen) return;
+  const host = app.querySelector<HTMLElement>('[data-overlay="backup"]');
+  if (!host) return;
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && host.contains(active)) return;
+  host.querySelector<HTMLElement>("#close-backup")?.focus();
+}
+
+function patchBackupUi(): void {
+  patchBackupOverlay();
+  patchToolbar();
+}
+
 export async function openBackupPanel(): Promise<void> {
+  if (state.backupOpen) {
+    focusBackupDrawer();
+    return;
+  }
+  const active = document.activeElement;
+  backupTrigger = active instanceof HTMLElement ? active : null;
   state.backupOpen = true;
   state.backupPreview = null;
   state.backupLoading = true;
-  patchToolbar();
+  patchBackupOverlay();
+  focusBackupDrawer();
   try {
     const [sources] = await Promise.all([discoverBackupSources(), loadBackupHistory()]);
     state.backupSources = sources;
@@ -149,8 +181,22 @@ export async function openBackupPanel(): Promise<void> {
     state.error = toUserMessage(error, "发现相机盘失败");
   } finally {
     state.backupLoading = false;
-    patchToolbar();
+    patchBackupUi();
+    focusBackupDrawer();
   }
+}
+
+/**
+ * 关闭抽屉 = 仅收起浮层。state.backupProgress 原样保留，
+ * 备份任务在后台继续，重新打开时按进度恢复当前步骤。
+ */
+export function closeBackupPanel(options: { restoreFocus?: boolean } = {}): void {
+  if (!state.backupOpen) return;
+  state.backupOpen = false;
+  patchBackupOverlay();
+  const trigger = backupTrigger?.isConnected ? backupTrigger : app.querySelector<HTMLElement>('[data-nav="import"]');
+  backupTrigger = null;
+  if (options.restoreFocus !== false) trigger?.focus();
 }
 
 export async function createBackupPreview(): Promise<void> {
@@ -173,7 +219,7 @@ export async function createBackupPreview(): Promise<void> {
     .filter(Boolean);
   state.backupLoading = true;
   state.error = null;
-  patchToolbar();
+  patchBackupUi();
   try {
     state.backupPreview = await previewBackup({
       sourceVolumeId: source,
@@ -187,7 +233,7 @@ export async function createBackupPreview(): Promise<void> {
     state.error = toUserMessage(error, "生成备份预览失败");
   } finally {
     state.backupLoading = false;
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
@@ -195,10 +241,10 @@ export async function saveBackupConflict(policy: ConflictPolicy): Promise<void> 
   try {
     const settings = await setBackupConflictPolicy(policy);
     state.backupConflictPolicy = settings.backup_conflict_policy;
-    patchToolbar();
+    patchBackupUi();
   } catch (error) {
     state.error = toUserMessage(error, "保存冲突策略失败");
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
@@ -206,10 +252,10 @@ export async function saveBackupMerge(enabled: boolean): Promise<void> {
   try {
     const settings = await setBackupMergeSegments(enabled);
     state.backupMergeSegments = settings.backup_merge_segments;
-    patchToolbar();
+    patchBackupUi();
   } catch (error) {
     state.error = toUserMessage(error, "保存分段合并设置失败");
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
@@ -218,7 +264,7 @@ export async function startConfirmedBackup(): Promise<void> {
   if (!preview || state.backupJobId) return;
   if (preview.spaceSufficient === false) {
     state.error = "目标盘空间不足，无法开始备份";
-    patchToolbar();
+    patchBackupUi();
     return;
   }
   const deepVerifyNote = preview.deepVerify
@@ -233,7 +279,7 @@ export async function startConfirmedBackup(): Promise<void> {
   state.backupLastRunId = preview.backupRunId;
   state.backupProgress = null;
   state.backupFailedItems = [];
-  patchToolbar();
+  patchBackupUi();
   try {
     const start = await startBackup(preview.backupRunId, preview.id);
     state.backupJobId = start.jobId;
@@ -242,7 +288,7 @@ export async function startConfirmedBackup(): Promise<void> {
     state.error = toUserMessage(error, "无法开始备份");
   } finally {
     state.backupLoading = false;
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
@@ -252,7 +298,7 @@ export async function cancelCurrentBackup(): Promise<void> {
     await cancelBackup(state.backupJobId);
   } catch (error) {
     state.error = toUserMessage(error, "无法取消备份");
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
@@ -261,7 +307,7 @@ export async function retryCurrentBackup(): Promise<void> {
   if (!runId || state.backupJobId || state.backupRetrying) return;
   state.backupRetrying = true;
   state.error = null;
-  patchToolbar();
+  patchBackupUi();
   try {
     const start = await retryFailedBackup(runId);
     state.backupJobId = start.jobId;
@@ -272,15 +318,15 @@ export async function retryCurrentBackup(): Promise<void> {
     state.error = toUserMessage(error, "重试备份失败");
   } finally {
     state.backupRetrying = false;
-    patchToolbar();
+    patchBackupUi();
   }
 }
 
-export async function viewNewImports(): Promise<void> {
-  // Prefer the finished backup's start time so items indexed before the run
-  // are not listed as "new".
-  const runId = state.backupLastRunId;
-  const startedAt = runId ? state.backupHistory.find((run) => run.id === runId)?.startedAt : undefined;
+/**
+ * 「新导入」是既有筛选（firstSeenFrom），备份完成与侧栏「最近导入」共用。
+ * 进入这个视图前清掉日期 / 类型 / 收藏 / 搜索条件，避免叠加后结果为空。
+ */
+function applyNewImportsFilter(startedAt: string | undefined): void {
   state.firstSeenFrom =
     startedAt && startedAt.startsWith("unix-ms:") ? startedAt : `unix-ms:${Date.now() - 15 * 60 * 1000}`;
   state.datePrefix = undefined;
@@ -291,7 +337,41 @@ export async function viewNewImports(): Promise<void> {
   state.burstOnly = false;
   state.search = "";
   searchUi.draft = "";
-  state.backupOpen = false;
+  // 语义搜索会直接取代普通查询管线；标签/评分同样会缩小「新导入」的结果。
+  // 进入这个视图时一并清掉，保证「最近导入」看到的就是备份新增的那批。
+  state.tagIds.clear();
+  state.ratingEq = null;
+  state.ratingMin = null;
+  state.semanticSearch = null;
+  searchUi.semantic = "";
+  state.semanticMeta = null;
+  state.semanticMode = null;
+}
+
+function latestImportStartedAt(): string | undefined {
+  const latest = state.backupHistory.find((run) => run.status === "completed") ?? state.backupHistory[0];
+  return latest?.startedAt;
+}
+
+export async function viewNewImports(): Promise<void> {
+  // Prefer the finished backup's start time so items indexed before the run
+  // are not listed as "new".
+  const runId = state.backupLastRunId;
+  const startedAt = runId ? state.backupHistory.find((run) => run.id === runId)?.startedAt : undefined;
+  applyNewImportsFilter(startedAt);
+  // 从抽屉里的「查看新导入」或完成 toast 进入：收起抽屉，但不再把焦点
+  // 抢回侧栏入口——用户此刻的意图是看结果。
+  closeBackupPanel({ restoreFocus: false });
+  if (state.library && state.availability === "available") {
+    await refreshMedia();
+  } else {
+    render();
+  }
+}
+
+/** 侧栏「最近导入」：重新进入最近一次完成备份的新导入结果。 */
+export async function viewRecentImports(): Promise<void> {
+  applyNewImportsFilter(latestImportStartedAt());
   if (state.library && state.availability === "available") {
     await refreshMedia();
   } else {

@@ -65,7 +65,7 @@ const TARGETS: GlassTarget[] = [
   },
   {
     key: "backup-panel",
-    selector: ".backup-panel",
+    selector: ".backup-drawer",
     style: { strength: 0.42, band: 0.16, blur: 22, saturate: 1.4, contrast: 1.05, brightness: 1.04 },
   },
   {
