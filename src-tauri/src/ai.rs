@@ -622,7 +622,9 @@ fn authorization_header(key: &str) -> Option<(&'static str, String)> {
 pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, AppError> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Err(AppError::invalid_argument("请先填写接口地址，再获取模型清单"));
+        return Err(AppError::invalid_argument(
+            "请先填写接口地址，再获取模型清单",
+        ));
     }
     let url = format!("{base}/models");
     let agent = UreqTransport::agent();
@@ -2760,7 +2762,10 @@ mod tests {
                 { "id": "deepseek-v4-pro", "object": "model" },
             ]
         });
-        assert_eq!(parse_model_ids(&openai), vec!["deepseek-flash", "deepseek-v4-pro"]);
+        assert_eq!(
+            parse_model_ids(&openai),
+            vec!["deepseek-flash", "deepseek-v4-pro"]
+        );
 
         // 有些实现只回字符串数组，或干脆是裸数组。
         let strings = serde_json::json!({ "data": ["kimi-k3", "kimi-k3", " "] });
