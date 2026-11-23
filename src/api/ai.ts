@@ -12,9 +12,12 @@ import type { MediaItemDto } from "./media";
 /**
  * 一条模型档案：服务商 + 接口地址 + 模型 + 它自己的 API Key。
  *
- * 档案之间互不共享 Key——同一服务商可以存多条（两个账号、打标用便宜模型 +
- * 对话用强模型），切换时不会串用或覆盖别条档案的凭据。API key 明文存本地
- * （个人应用，设置页可回显），与 Rust `AiProfile` 一一对应。
+ * 档案之间互不共享 Key——同一服务商可以存多条（两个账号、不同用途），切换时
+ * 不会串用或覆盖别条档案的凭据。API key 明文存本地（个人应用，设置页可回显），
+ * 与 Rust `AiProfile` 一一对应。
+ *
+ * 一条档案可以勾选多个上游模型，但只有两个角色真正发请求：识图模型用于照片
+ * 自动打标，对话模型用于 AI 助手与自然语言检索解析。
  */
 export interface AiProfileDto {
   /** 前端生成的稳定 id，重命名不改变它。 */
@@ -24,7 +27,12 @@ export interface AiProfileDto {
   /** 服务商预设 id，仅用于回显卡片。 */
   provider: string;
   baseUrl: string;
-  model: string;
+  /** 从上游清单里勾选的模型，识图 / 对话两个角色都包含在内。 */
+  models: string[];
+  /** 自动打标用的识图模型（需支持图片输入）。 */
+  visionModel: string;
+  /** AI 助手与检索解析用的对话模型。 */
+  chatModel: string;
   apiKey: string;
 }
 

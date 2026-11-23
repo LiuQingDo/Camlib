@@ -12,6 +12,7 @@ import {
   pickActiveProfile,
   pickerPresets,
   profileLabel,
+  profileModels,
   profileSummary,
   profileTitle,
   providerApiKey,
@@ -182,7 +183,8 @@ function profile(overrides: Partial<ProfileLike>): ProfileLike {
     id: "p1",
     name: "",
     provider: "openai",
-    model: "gpt-6.1-terra",
+    visionModel: "gpt-6.1-terra",
+    chatModel: "gpt-6.1-terra",
     apiKey: "sk-aaaa1111",
     baseUrl: "https://api.openai.com/v1",
     ...overrides,
@@ -193,7 +195,20 @@ describe("profile helpers", () => {
   it("labels a profile by its note, else by provider and model", () => {
     expect(profileLabel(profile({ name: "打标用" }))).toBe("打标用");
     expect(profileLabel(profile({ name: "  " }))).toBe("OpenAI · gpt-6.1-terra");
-    expect(profileLabel(profile({ model: "" }))).toBe("OpenAI · 未选模型");
+    expect(profileLabel(profile({ visionModel: "", chatModel: "" }))).toBe("OpenAI · 未选模型");
+    // 两个角色不同时都标出来，避免误以为只有一个模型在跑。
+    expect(profileLabel(profile({ visionModel: "gpt-vision", chatModel: "gpt-chat" }))).toBe(
+      "OpenAI · 识图 gpt-vision · 对话 gpt-chat",
+    );
+  });
+
+  it("summarizes both role models", () => {
+    expect(profileModels(profile({}))).toBe("gpt-6.1-terra");
+    expect(profileModels(profile({ visionModel: "gpt-vision", chatModel: "gpt-chat" }))).toBe(
+      "识图 gpt-vision · 对话 gpt-chat",
+    );
+    expect(profileModels(profile({ visionModel: " only ", chatModel: "" }))).toBe("only");
+    expect(profileModels(profile({ visionModel: "", chatModel: "" }))).toBe("");
   });
 
   it("titles a list row with the note or the vendor name", () => {
@@ -206,7 +221,8 @@ describe("profile helpers", () => {
   it("summarizes a row as model plus masked key", () => {
     expect(profileSummary(profile({}))).toBe("gpt-6.1-terra · sk-…1111");
     expect(profileSummary(profile({ apiKey: "" }))).toBe("gpt-6.1-terra");
-    expect(profileSummary(profile({ model: "  ", apiKey: "" }))).toBe("未选模型");
+    expect(profileSummary(profile({ visionModel: "  ", chatModel: "", apiKey: "" }))).toBe("未选模型");
+    expect(profileSummary(profile({ visionModel: "v", chatModel: "c", apiKey: "" }))).toBe("识图 v · 对话 c");
   });
 
   it("masks keys without hiding the parts that tell accounts apart", () => {

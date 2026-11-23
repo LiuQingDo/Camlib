@@ -316,7 +316,12 @@ function cloneAiConfig(config: AiConfigDto): AiConfigDto {
     enabled: config.enabled,
     concurrency: config.concurrency,
     activeProfileId: config.activeProfileId,
-    profiles: config.profiles.map((profile) => ({ ...profile })),
+    profiles: config.profiles.map((profile) => ({
+      ...profile,
+      models: [...(profile.models ?? [])],
+      visionModel: profile.visionModel ?? "",
+      chatModel: profile.chatModel ?? "",
+    })),
   };
 }
 
@@ -328,7 +333,9 @@ function blankProfile(providerId: string): AiProfileDto {
     name: "",
     provider: preset.id,
     baseUrl: preset.baseUrl,
-    model: "",
+    models: [],
+    visionModel: "",
+    chatModel: "",
     apiKey: "",
   };
 }
@@ -394,8 +401,10 @@ export function syncAiDraftFromDom(): void {
     if (key !== null) profile.apiKey = key.trim();
     const url = value("#settings-ai-chat-url");
     if (url !== null) profile.baseUrl = url.trim();
-    const modelInput = value("#settings-ai-model");
-    if (modelInput !== null) profile.model = modelInput.trim();
+    const visionModel = value("#settings-ai-vision-model");
+    if (visionModel !== null) profile.visionModel = visionModel.trim();
+    const chatModel = value("#settings-ai-chat-model");
+    if (chatModel !== null) profile.chatModel = chatModel.trim();
     const name = value("#settings-ai-profile-name");
     if (name !== null) profile.name = name.trim();
   }
@@ -524,16 +533,52 @@ export function removeAiProvider(profileId: string): void {
   updateSettingsPanel();
 }
 
-/** 从取回的清单里点一个模型：写进输入框与草稿。手填同样走这条。 */
-export function selectAiModel(modelId: string): void {
+/** 把角色模型补进已勾选清单：手填的 ID 也要在清单里打上勾。 */
+function ensureRoleModelsSelected(profile: AiProfileDto): void {
+  for (const model of [profile.visionModel.trim(), profile.chatModel.trim()]) {
+    if (model && !profile.models.includes(model)) profile.models.push(model);
+  }
+}
+
+/**
+ * 勾选 / 取消勾选上游清单里的一个模型。
+ *
+ * 取消勾选一个正在承担角色的模型时，把对应角色一起清掉——否则会保存出
+ * 「角色指向未选模型」的悬空状态。
+ */
+export function toggleAiModelSelection(modelId: string): void {
   syncAiDraftFromDom();
   const draft = state.aiDraft;
   if (!draft) return;
   const profile = editingProfile(draft);
   if (!profile) return;
-  profile.model = modelId.trim();
+  const id = modelId.trim();
+  if (!id) return;
+  if (profile.models.includes(id)) {
+    profile.models = profile.models.filter((model) => model !== id);
+    if (profile.visionModel === id) profile.visionModel = "";
+    if (profile.chatModel === id) profile.chatModel = "";
+  } else {
+    profile.models = [...profile.models, id];
+  }
   resetAiTestState();
-  updateSettingsPanel();
+  updateSettingsPanel({ preserveScroll: true });
+}
+
+/** 把一个模型指定为识图或对话角色；顺手确保它在已勾选清单里。 */
+export function assignAiModelRole(modelId: string, role: "vision" | "chat"): void {
+  syncAiDraftFromDom();
+  const draft = state.aiDraft;
+  if (!draft) return;
+  const profile = editingProfile(draft);
+  if (!profile) return;
+  const id = modelId.trim();
+  if (!id) return;
+  if (!profile.models.includes(id)) profile.models = [...profile.models, id];
+  if (role === "vision") profile.visionModel = id;
+  else profile.chatModel = id;
+  resetAiTestState();
+  updateSettingsPanel({ preserveScroll: true });
 }
 
 /**
@@ -550,18 +595,22 @@ export async function fetchAiModels(): Promise<void> {
   const baseUrl = profile.baseUrl.trim();
   if (!baseUrl) {
     state.aiModelsError = "先填接口地址，再获取模型";
-    updateSettingsPanel();
+    updateSettingsPanel({ preserveScroll: true });
     return;
   }
   state.aiModelsBusy = true;
   state.aiModelsError = null;
   state.aiModelQuery = "";
-  updateSettingsPanel();
+  updateSettingsPanel({ preserveScroll: true });
   try {
     const models = await listAiModels(baseUrl, profile.apiKey);
     state.aiModels = models;
-    // 只有一条时直接选上；已选的模型若不在清单里，保留手填值不动。
-    if (models.length === 1 && models[0] && !profile.model.trim()) profile.model = models[0];
+    // 只有一条时直接补到两个角色上；已选角色若不在清单里，保留手填值不动。
+    if (models.length === 1 && models[0]) {
+      if (!profile.visionModel.trim()) profile.visionModel = models[0];
+      if (!profile.chatModel.trim()) profile.chatModel = models[0];
+    }
+    ensureRoleModelsSelected(profile);
     resetAiTestState();
   } catch (error) {
     state.aiModels = null;
@@ -612,10 +661,14 @@ export async function saveAiSettings(): Promise<void> {
     updateSettingsPanel();
     return;
   }
-  // 模型不再预填：空着保存等于存了一条跑不起来的配置，当场拦住并说清楚怎么补。
-  const missingModel = draft.profiles.find((profile) => !profile.model.trim());
-  if (missingModel) {
-    state.settingsError = `「${profileTitle(missingModel)}」还没选模型：点「获取模型」挑一个，或手填模型 ID`;
+  // 两个角色都必填：空着保存等于存了一条跑不起来的配置，当场拦住并说清楚怎么补。
+  draft.profiles.forEach(ensureRoleModelsSelected);
+  const missingRoles = draft.profiles.find((profile) => !profile.visionModel.trim() || !profile.chatModel.trim());
+  if (missingRoles) {
+    const missing: string[] = [];
+    if (!missingRoles.visionModel.trim()) missing.push("识图模型");
+    if (!missingRoles.chatModel.trim()) missing.push("对话模型");
+    state.settingsError = `「${profileTitle(missingRoles)}」还没指定${missing.join("和")}：在模型清单里点「识图 / 对话」，或直接填模型 ID`;
     updateSettingsPanel();
     return;
   }

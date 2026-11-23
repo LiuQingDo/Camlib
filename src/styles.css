@@ -6362,19 +6362,22 @@ details.ai-advanced .settings-form {
   flex-direction: column;
   gap: 7px;
 }
-/* 手填模型名 + 「获取模型」：输入框吃掉剩余宽度，按钮不换行 */
-.ai-model-line {
+/* 「获取模型」+ 说明：按钮不换行，说明吃掉剩余宽度 */
+.ai-model-line,
+.ai-model-fetch {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 8px;
 }
-.ai-model-line .ai-model-input {
+.ai-model-line .ai-model-input,
+.ai-model-fetch .ai-config-hint {
   min-width: 0;
   flex: 1;
 }
 /* 配置卡本身是白的，玻璃白按钮在这里会「消失」：给它一条实边才像个可点的按钮 */
-.ai-model-line .outline-button {
+.ai-model-line .outline-button,
+.ai-model-fetch .outline-button {
   flex: none;
   height: 34px;
   border: 1px solid rgba(0, 0, 0, 0.14);
@@ -6382,13 +6385,15 @@ details.ai-advanced .settings-form {
   box-shadow: none;
   white-space: nowrap;
 }
-.ai-model-line .outline-button:hover {
+.ai-model-line .outline-button:hover,
+.ai-model-fetch .outline-button:hover {
   border-color: rgba(0, 0, 0, 0.26);
   background: #ffffff;
   box-shadow: none;
   transform: none;
 }
-[data-theme="dark"] .ai-model-line .outline-button {
+[data-theme="dark"] .ai-model-line .outline-button,
+[data-theme="dark"] .ai-model-fetch .outline-button {
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
 }
@@ -6397,15 +6402,22 @@ details.ai-advanced .settings-form {
   min-width: 0;
   flex-direction: column;
   gap: 7px;
+  container-type: inline-size;
 }
-/* 上游清单动辄上百条：限高滚动，别把整张卡撑到天上 */
+/* 上游清单动辄上百条：限高滚动，别把整张卡撑到天上。
+   每列至少 280px；面板再宽也最多 3 列，不把模型 ID 挤成省略号。 */
 .ai-model-list {
   display: grid;
   max-height: 208px;
   padding-right: 2px;
   overflow-y: auto;
-  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 6px;
+}
+@container (min-width: 1100px) {
+  .ai-model-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 .ai-model-filter {
   height: 30px;
@@ -6439,15 +6451,14 @@ details.ai-advanced .settings-form {
 .ai-model-choice {
   display: flex;
   min-width: 0;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 7px 9px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 6px 8px;
   border: 1px solid var(--border-soft);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.6);
   text-align: left;
-  cursor: pointer;
   transition:
     border-color 0.15s ease,
     background 0.15s ease,
@@ -6457,10 +6468,23 @@ details.ai-advanced .settings-form {
   border-color: rgba(0, 0, 0, 0.2);
   background: #ffffff;
 }
-.ai-model-choice.is-active {
+.ai-model-choice.is-selected {
   border-color: rgba(0, 0, 0, 0.32);
   background: #ffffff;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+}
+.ai-model-choice-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.ai-model-check {
+  flex: none;
+  margin: 0;
+  accent-color: #111111;
 }
 .ai-model-choice-name {
   overflow: hidden;
@@ -6471,10 +6495,31 @@ details.ai-advanced .settings-form {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ai-model-choice.is-active .ai-model-choice-name::after {
-  margin-left: 3px;
+.ai-model-role-buttons {
+  display: flex;
+  flex: none;
+  gap: 3px;
+}
+.ai-model-role {
+  padding: 2px 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  color: #9a9a9a;
+  background: transparent;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ai-model-role:hover {
+  border-color: rgba(0, 0, 0, 0.24);
+  color: #111111;
+}
+.ai-model-role.is-on {
+  border-color: rgba(15, 107, 69, 0.3);
   color: #0f6b45;
-  content: "\2713";
+  background: rgba(15, 107, 69, 0.08);
 }
 .ai-model-input,
 .ai-config-input {
@@ -6865,7 +6910,7 @@ details.ai-advanced .settings-form {
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.08);
 }
-[data-theme="dark"] .ai-model-choice.is-active {
+[data-theme="dark"] .ai-model-choice.is-selected {
   border-color: rgba(255, 255, 255, 0.3);
   background: rgba(255, 255, 255, 0.1);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -6873,8 +6918,21 @@ details.ai-advanced .settings-form {
 [data-theme="dark"] .ai-model-choice-name {
   color: var(--ink);
 }
-[data-theme="dark"] .ai-model-choice.is-active .ai-model-choice-name::after {
+[data-theme="dark"] .ai-model-check {
+  accent-color: rgba(255, 255, 255, 0.78);
+}
+[data-theme="dark"] .ai-model-role {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.55);
+}
+[data-theme="dark"] .ai-model-role:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--ink);
+}
+[data-theme="dark"] .ai-model-role.is-on {
+  border-color: rgba(111, 224, 170, 0.36);
   color: #6fe0aa;
+  background: rgba(62, 207, 142, 0.12);
 }
 [data-theme="dark"] .ai-config-advanced {
   border-color: rgba(255, 255, 255, 0.1);

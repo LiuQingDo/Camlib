@@ -443,7 +443,7 @@ function renderAiProviderList(config: AiConfigDto): string {
     <div class="ai-panel-head">
       <div class="ai-panel-title">
         <h4>供应商</h4>
-        <p>已添加 ${config.profiles.length} 个。打标与对话都用标着「使用中」的那一个；同一厂商可以加多条（两个账号、或成本低的模型 + 效果好的模型），各自独立保存 Key。</p>
+        <p>已添加 ${config.profiles.length} 个。打标与对话都用标着「使用中」的那条档案，档案内可分别指定识图与对话模型；同一厂商可以加多条（两个账号、不同用途），各自独立保存 Key。</p>
       </div>
       <div class="ai-panel-actions">
         ${dirty ? `<button class="outline-button" type="button" id="settings-save-ai" ${state.settingsBusy ? "disabled" : ""}>${state.settingsBusy ? "保存中…" : "保存配置"}</button>` : ""}
@@ -556,12 +556,22 @@ function renderAiProviderEditor(config: AiConfigDto, profile: AiProfileDto): str
   </div>`
       : "";
 
+  const visionRow = `<div class="ai-config-row">
+    <span class="ai-config-label">识图模型</span>
+    <input id="settings-ai-vision-model" class="ai-config-input" value="${escapeHtml(profile.visionModel)}" spellcheck="false" autocomplete="off" placeholder="自动打标用，需支持图片输入" />
+  </div>`;
+
+  const chatRow = `<div class="ai-config-row">
+    <span class="ai-config-label">对话模型</span>
+    <input id="settings-ai-chat-model" class="ai-config-input" value="${escapeHtml(profile.chatModel)}" spellcheck="false" autocomplete="off" placeholder="AI 助手与检索解析用" />
+  </div>`;
+
   const modelRow = `<div class="ai-config-row is-top">
-    <span class="ai-config-label">模型</span>
+    <span class="ai-config-label">模型清单</span>
     <div class="ai-model-picker">
-      <div class="ai-model-line">
-        <input id="settings-ai-model" class="ai-model-input" value="${escapeHtml(profile.model)}" spellcheck="false" autocomplete="off" placeholder="点「获取模型」挑一个，或手填模型 ID" />
+      <div class="ai-model-fetch">
         <button class="outline-button" type="button" id="settings-ai-fetch-models" ${state.aiModelsBusy ? "disabled" : ""}>${state.aiModelsBusy ? "获取中…" : state.aiModels ? "重新获取" : "获取模型"}</button>
+        <span class="ai-config-hint">勾选要保留的模型，再点每行的「识图 / 对话」指定角色；也可以直接手填模型 ID。</span>
       </div>
       ${renderAiModelResults(profile)}
     </div>
@@ -618,6 +628,8 @@ function renderAiProviderEditor(config: AiConfigDto, profile: AiProfileDto): str
         ${urlRow}
         ${endpointRow}
         ${regionRow}
+        ${visionRow}
+        ${chatRow}
         ${modelRow}
         ${nameRow}
         ${advanced}
@@ -652,7 +664,7 @@ export function renderAiModelResults(profile: AiProfileDto): string {
       <span class="ai-config-hint">拿不到清单不影响使用：直接在上面手填厂商文档里的模型 ID 即可。</span>`;
   }
   if (!state.aiModels) {
-    return `<span class="ai-config-hint">模型不预置：点「获取模型」按当前地址与密钥向厂商拉取可用清单，也可以直接手填模型 ID。</span>`;
+    return `<span class="ai-config-hint">模型不预置：点「获取模型」按当前地址与密钥向厂商拉取可用清单，勾选后把其中两个分别指定为识图与对话模型。</span>`;
   }
   const filter =
     state.aiModels.length > 8
@@ -660,38 +672,50 @@ export function renderAiModelResults(profile: AiProfileDto): string {
       : "";
   return `<div class="ai-model-results">
     ${filter}
-    <div class="ai-model-list" id="ai-model-list" role="radiogroup" aria-label="上游模型">${renderAiModelList(profile)}</div>
-    <span class="ai-config-hint" id="ai-model-count">${aiModelCountHint()}</span>
+    <div class="ai-model-list" id="ai-model-list" aria-label="上游模型（可多选）">${renderAiModelList(profile)}</div>
+    <span class="ai-config-hint" id="ai-model-count">${aiModelCountHint(profile)}</span>
   </div>`;
 }
 
 /**
- * 清单本体。过滤时只换这一块（连同下面的计数），过滤输入框留在原地——
+ * 清单本体：每行一个复选框（多选保留），右侧两个角色按钮把该模型指定为
+ * 识图 / 对话。过滤时只换这一块（连同下面的计数），过滤输入框留在原地——
  * 整块替换会把正在输入的那个框换掉，光标和焦点一起丢。
  */
 export function renderAiModelList(profile: AiProfileDto): string {
   if (!state.aiModels) return "";
   const query = state.aiModelQuery.trim().toLowerCase();
   const matched = query ? state.aiModels.filter((id) => id.toLowerCase().includes(query)) : state.aiModels;
-  const selected = profile.model.trim();
+  const selected = new Set(profile.models ?? []);
+  const vision = profile.visionModel.trim();
+  const chat = profile.chatModel.trim();
   if (matched.length === 0) return `<div class="ai-model-status">没有匹配的模型</div>`;
   return matched
-    .map(
-      (
-        id,
-      ) => `<button type="button" class="ai-model-choice ${id === selected ? "is-active" : ""}" role="radio" aria-checked="${id === selected}" data-ai-model="${escapeHtml(id)}">
-        <span class="ai-model-choice-name">${escapeHtml(id)}</span>
-      </button>`,
-    )
+    .map((id) => {
+      const checked = selected.has(id);
+      const isVision = id === vision;
+      const isChat = id === chat;
+      return `<div class="ai-model-choice ${checked ? "is-selected" : ""}" title="${escapeHtml(id)}">
+        <label class="ai-model-choice-main">
+          <input type="checkbox" class="ai-model-check" data-ai-model-select="${escapeHtml(id)}" ${checked ? "checked" : ""} />
+          <span class="ai-model-choice-name">${escapeHtml(id)}</span>
+        </label>
+        <span class="ai-model-role-buttons">
+          <button type="button" class="ai-model-role ${isVision ? "is-on" : ""}" data-ai-model-role="vision" data-ai-model-id="${escapeHtml(id)}" aria-pressed="${isVision}" title="把该模型设为识图模型">识图${isVision ? " ✓" : ""}</button>
+          <button type="button" class="ai-model-role ${isChat ? "is-on" : ""}" data-ai-model-role="chat" data-ai-model-id="${escapeHtml(id)}" aria-pressed="${isChat}" title="把该模型设为对话模型">对话${isChat ? " ✓" : ""}</button>
+        </span>
+      </div>`;
+    })
     .join("");
 }
 
 /** 列表下方的计数说明；过滤时与列表一起刷新。 */
-export function aiModelCountHint(): string {
+export function aiModelCountHint(profile: AiProfileDto): string {
   if (!state.aiModels) return "";
   const query = state.aiModelQuery.trim().toLowerCase();
   const matched = query ? state.aiModels.filter((id) => id.toLowerCase().includes(query)) : state.aiModels;
-  return `上游共 ${state.aiModels.length} 个可用模型${query ? `，匹配 ${matched.length} 个` : ""}。自动打标需要支持图片输入的模型。`;
+  const count = new Set(profile.models ?? []).size;
+  return `上游共 ${state.aiModels.length} 个可用模型${query ? `，匹配 ${matched.length} 个` : ""}；已勾选 ${count} 个。识图模型需支持图片输入。`;
 }
 
 export function renderSettingsAboutSection(): string {
@@ -883,14 +907,17 @@ export function renderSettingsPanel(): string {
  * Patch only the settings dialog. Full `render()` rebuilds the whole shell and
  * remounts every media thumbnail — that is what made tab switches flicker.
  */
-export function updateSettingsPanel(options?: { animate?: boolean }): void {
+export function updateSettingsPanel(options?: { animate?: boolean; preserveScroll?: boolean }): void {
   if (!state.settingsOpen) return;
   const content = app.querySelector<HTMLElement>("#settings-content");
   if (!content) {
     render();
     return;
   }
+  // 勾选模型这类「同屏局部更新」不该把长表单滚回顶部；切分区时仍从顶部开始。
+  const scrollTop = options?.preserveScroll ? content.scrollTop : 0;
   content.innerHTML = settingsContentHtml();
+  if (options?.preserveScroll) content.scrollTop = scrollTop;
   if (options?.animate !== false) fadeSettingsContent(content);
   app.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.settingsSection === state.settingsSection);

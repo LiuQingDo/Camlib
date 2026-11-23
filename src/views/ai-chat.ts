@@ -53,7 +53,12 @@ export function aiChatReady(): boolean {
   const config = state.aiConfig;
   if (!config?.enabled) return false;
   const profile = pickActiveProfile(config);
-  return !!profile && profile.model.trim().length > 0 && /^https?:\/\//.test(profile.baseUrl.trim());
+  return (
+    !!profile &&
+    profile.visionModel.trim().length > 0 &&
+    profile.chatModel.trim().length > 0 &&
+    /^https?:\/\//.test(profile.baseUrl.trim())
+  );
 }
 
 /** 助手当前能“看到”的照片：预览中者优先，其次预览里钉住的那张。 */

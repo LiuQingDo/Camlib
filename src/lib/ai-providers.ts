@@ -526,7 +526,8 @@ export interface ProfileLike {
   id: string;
   name: string;
   provider: string;
-  model: string;
+  visionModel: string;
+  chatModel: string;
   apiKey: string;
   baseUrl: string;
 }
@@ -551,12 +552,20 @@ export function findProfile<T extends ProfileLike>(profiles: readonly T[], id: s
   return profiles.find((profile) => profile.id === id) ?? null;
 }
 
+/** 一条档案的模型摘要：同模型只显示一次，两个角色不同则都标出来。 */
+export function profileModels(profile: Pick<ProfileLike, "visionModel" | "chatModel">): string {
+  const vision = profile.visionModel.trim();
+  const chat = profile.chatModel.trim();
+  if (vision && chat) return vision === chat ? vision : `识图 ${vision} · 对话 ${chat}`;
+  return vision || chat;
+}
+
 /** 档案展示名：优先用户备注，其次「服务商 · 模型」。 */
-export function profileLabel(profile: Pick<ProfileLike, "name" | "provider" | "model">): string {
+export function profileLabel(profile: Pick<ProfileLike, "name" | "provider" | "visionModel" | "chatModel">): string {
   const named = profile.name.trim();
   if (named) return named;
   const providerName = findProvider(profile.provider).name;
-  const model = profile.model.trim();
+  const model = profileModels(profile);
   return model ? `${providerName} · ${model}` : `${providerName} · 未选模型`;
 }
 
@@ -567,9 +576,11 @@ export function profileTitle(profile: Pick<ProfileLike, "name" | "provider">): s
   return named && named !== providerName ? named : providerName;
 }
 
-/** 列表行的副标题：模型 + 掩码 Key，一眼分清同厂商的两个账号。 */
-export function profileSummary(profile: Pick<ProfileLike, "provider" | "model" | "apiKey">): string {
-  const model = profile.model.trim() || "未选模型";
+/** 列表行的副标题：模型角色 + 掩码 Key，一眼分清同厂商的两个账号。 */
+export function profileSummary(
+  profile: Pick<ProfileLike, "provider" | "visionModel" | "chatModel" | "apiKey">,
+): string {
+  const model = profileModels(profile) || "未选模型";
   const key = maskApiKey(profile.apiKey);
   return key === "无 Key" ? model : `${model} · ${key}`;
 }

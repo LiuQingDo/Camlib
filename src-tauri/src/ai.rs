@@ -1,9 +1,10 @@
 //! Optional AI enhancement over a user-configured OpenAI-compatible endpoint.
 //!
-//! One multimodal chat model powers every AI feature: it tags each photo
-//! thumbnail and writes a one-line Chinese caption, and parses natural-language
-//! search queries into structured conditions plus a keyword phrase that is
-//! matched against the stored captions/tags.
+//! Each profile assigns two models: a vision model tags every photo thumbnail
+//! and writes a one-line Chinese caption, while a chat model powers the
+//! assistant and parses natural-language search queries into structured
+//! conditions plus a keyword phrase matched against the stored captions/tags.
+//! Both roles may point at the same model when it handles images and text.
 //!
 //! Privacy: the feature is off by default. Thumbnail JPEGs (~512px, reused
 //! from the local cache pipeline) are only sent to the configured third-party
@@ -78,26 +79,41 @@ static NEXT_AI_JOB: AtomicU64 = AtomicU64::new(1);
 /// Id given to the single profile synthesized from a pre-profile config.
 const LEGACY_PROFILE_ID: &str = "legacy-default";
 
-/// One saved endpoint: provider + base URL + model + **its own API key**.
+/// One saved endpoint: provider + base URL + models + **its own API key**.
 ///
 /// Profiles are deliberately independent. The same provider can be saved
-/// several times (two accounts, a cheap tagging model next to a strong chat
-/// model), and each entry carries its own key — switching provider or model in
-/// the UI never silently reuses, or overwrites, another entry's credentials.
+/// several times (two accounts, a tagging profile next to a chat profile), and
+/// each entry carries its own key — switching provider or model in the UI never
+/// silently reuses, or overwrites, another entry's credentials.
+///
+/// A profile can keep several models from the provider's `/models` list, but
+/// only two role slots drive requests: `vision_model` tags photos (it must
+/// accept image input) and `chat_model` powers the assistant and query parsing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AiProfile {
     /// Frontend-generated id; stable across renames so the active profile
     /// reference survives edits.
     pub id: String,
-    /// Optional user label; empty means the UI shows "provider · model".
+    /// Optional user label; empty means the UI shows "provider · models".
     pub name: String,
     /// Provider preset id (`openai`, `deepseek`, `custom`, …). Only used by the
-    /// UI to restore the highlighted card; the request path reads
-    /// `base_url` + `model` only.
+    /// UI to restore the highlighted card; the request path reads `base_url` +
+    /// the role fields only.
     pub provider: String,
     pub base_url: String,
+    /// Legacy single-model field from the pre-split schema. Read only while
+    /// migrating; new saves leave it empty so stored JSON carries just the
+    /// role fields below.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// Models selected from the provider's `/models` list. Role ids are kept
+    /// here too, even when the user typed them by hand.
+    pub models: Vec<String>,
+    /// Model used for photo tagging; must support image input.
+    pub vision_model: String,
+    /// Model used for the assistant and natural-language query parsing.
+    pub chat_model: String,
     pub api_key: String,
 }
 
@@ -107,9 +123,34 @@ impl AiProfile {
         trimmed.starts_with("http://") || trimmed.starts_with("https://")
     }
 
-    /// Whether this profile is complete enough to make a call.
+    /// Move a pre-split `model` into both role slots. Runs on load and on save,
+    /// so an upgraded config keeps working without re-picking a model.
+    fn migrate_legacy_model(&mut self) {
+        let legacy = self.model.trim().to_owned();
+        if !legacy.is_empty() {
+            if self.vision_model.trim().is_empty() {
+                self.vision_model = legacy.clone();
+            }
+            if self.chat_model.trim().is_empty() {
+                self.chat_model = legacy.clone();
+            }
+            if !self.models.iter().any(|model| model.trim() == legacy) {
+                self.models.push(legacy);
+            }
+        }
+        self.model.clear();
+    }
+
+    fn with_legacy_model(mut self) -> Self {
+        self.migrate_legacy_model();
+        self
+    }
+
+    /// Whether both role slots and the endpoint are complete enough for a call.
     pub fn ready(&self) -> bool {
-        !self.model.trim().is_empty() && Self::url_ok(&self.base_url)
+        !self.vision_model.trim().is_empty()
+            && !self.chat_model.trim().is_empty()
+            && Self::url_ok(&self.base_url)
     }
 
     fn normalized(mut self) -> Self {
@@ -118,7 +159,25 @@ impl AiProfile {
         self.provider = self.provider.trim().to_lowercase();
         self.base_url = self.base_url.trim().trim_end_matches('/').to_owned();
         self.model = self.model.trim().to_owned();
+        self.migrate_legacy_model();
+        self.vision_model = self.vision_model.trim().to_owned();
+        self.chat_model = self.chat_model.trim().to_owned();
         self.api_key = self.api_key.trim().to_owned();
+        // Selected models: trim, drop empties/duplicates, then make sure both
+        // role ids are visible in the checklist even when typed by hand.
+        let mut models: Vec<String> = Vec::new();
+        for model in std::mem::take(&mut self.models) {
+            let model = model.trim().to_owned();
+            if !model.is_empty() && !models.contains(&model) {
+                models.push(model);
+            }
+        }
+        for role in [self.vision_model.clone(), self.chat_model.clone()] {
+            if !role.is_empty() && !models.contains(&role) {
+                models.push(role);
+            }
+        }
+        self.models = models;
         self
     }
 }
@@ -158,8 +217,16 @@ impl AiConfig {
             .or_else(|| self.profiles.first())
     }
 
-    pub fn model(&self) -> &str {
-        self.active().map_or("", |profile| profile.model.as_str())
+    /// Vision model used for photo tagging.
+    pub fn vision_model(&self) -> &str {
+        self.active()
+            .map_or("", |profile| profile.vision_model.as_str())
+    }
+
+    /// Chat model used by the assistant and query parsing.
+    pub fn chat_model(&self) -> &str {
+        self.active()
+            .map_or("", |profile| profile.chat_model.as_str())
     }
 
     pub fn base_url(&self) -> &str {
@@ -216,8 +283,13 @@ impl AiConfig {
                     "接口地址无效，需以 http(s):// 开头（一般填到 /v1 这一级）",
                 ));
             }
-            if active.model.is_empty() {
-                return Err(AppError::invalid_argument("请选择或填写对话模型名称"));
+            if active.vision_model.is_empty() {
+                return Err(AppError::invalid_argument(
+                    "请指定识图模型（自动打标需要支持图片输入的模型）",
+                ));
+            }
+            if active.chat_model.is_empty() {
+                return Err(AppError::invalid_argument("请指定对话模型（AI 助手使用）"));
             }
         }
         Ok(self)
@@ -252,7 +324,11 @@ impl From<StoredAiConfig> for AiConfig {
                 enabled: stored.enabled,
                 concurrency,
                 active_profile_id: stored.active_profile_id,
-                profiles: stored.profiles,
+                profiles: stored
+                    .profiles
+                    .into_iter()
+                    .map(AiProfile::with_legacy_model)
+                    .collect(),
             };
         }
         let mut config = Self {
@@ -263,14 +339,18 @@ impl From<StoredAiConfig> for AiConfig {
         // Old single-endpoint config → one profile, keeping the same key.
         if !stored.chat_model.trim().is_empty() || !stored.chat_base_url.trim().is_empty() {
             config.active_profile_id = LEGACY_PROFILE_ID.to_owned();
-            config.profiles.push(AiProfile {
-                id: LEGACY_PROFILE_ID.to_owned(),
-                name: String::new(),
-                provider: stored.provider,
-                base_url: stored.chat_base_url,
-                model: stored.chat_model,
-                api_key: stored.chat_api_key,
-            });
+            config.profiles.push(
+                AiProfile {
+                    id: LEGACY_PROFILE_ID.to_owned(),
+                    name: String::new(),
+                    provider: stored.provider,
+                    base_url: stored.chat_base_url,
+                    model: stored.chat_model,
+                    api_key: stored.chat_api_key,
+                    ..Default::default()
+                }
+                .with_legacy_model(),
+            );
         }
         config
     }
@@ -301,7 +381,7 @@ pub fn validate_config_for_run(config: &AiConfig) -> Result<(), AppError> {
     }
     if !config.chat_ready() {
         return Err(AppError::invalid_argument(
-            "当前选中的模型配置不完整（接口地址与模型名称必填）",
+            "当前选中的模型配置不完整（接口地址、识图模型与对话模型必填）",
         ));
     }
     Ok(())
@@ -615,8 +695,14 @@ impl AiTransport for UreqTransport {
             ]),
             None => json!(prompt),
         };
+        // 带图 → 识图模型（自动打标）；纯文本 → 对话模型（检索解析等）。
+        let model = if image_jpeg.is_some() {
+            config.vision_model()
+        } else {
+            config.chat_model()
+        };
         let body = json!({
-            "model": config.model(),
+            "model": model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
             "max_tokens": 800,
@@ -664,7 +750,7 @@ impl AiTransport for UreqTransport {
             }
         }
         let body = json!({
-            "model": config.model(),
+            "model": config.chat_model(),
             "messages": payload,
             "temperature": CHAT_TEMPERATURE,
             "max_tokens": CHAT_MAX_TOKENS,
@@ -895,7 +981,7 @@ pub fn process_item(
             media_item_id: &details.item.id,
             caption: Some(&description.caption),
             tags_json: Some(&tags_json),
-            ai_model: Some(config.model()),
+            ai_model: Some(config.vision_model()),
             status: "success",
             error_message: None,
             processed_at: Some(&now),
@@ -1796,8 +1882,11 @@ mod tests {
                 name: String::new(),
                 provider: "openai".into(),
                 base_url: "https://api.example.com/v1".into(),
-                model: "vision-model".into(),
+                models: vec!["vision-model".into(), "chat-model".into()],
+                vision_model: "vision-model".into(),
+                chat_model: "chat-model".into(),
                 api_key: "key".into(),
+                ..Default::default()
             }],
         }
     }
@@ -1982,9 +2071,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Missing model name is rejected.
+        // Missing role models are rejected.
         assert!(config.clone().normalized().is_err());
-        // Trailing slash trimmed and provider lower-cased once the model is set.
+        let mut only_vision = config.clone();
+        only_vision.profiles[0].vision_model = "v".into();
+        assert!(only_vision.normalized().is_err());
+        // Legacy `model` fills both roles; trailing slash trimmed, provider
+        // lower-cased, and the migrated model lands in the selected list.
         let mut with_model = config.clone();
         with_model.profiles[0].provider = "  OpenAI ".into();
         with_model.profiles[0].model = "m".into();
@@ -1993,6 +2086,10 @@ mod tests {
         assert_eq!(normalized.base_url(), "https://api.example.com/v1");
         assert_eq!(normalized.active().unwrap().provider, "openai");
         assert_eq!(normalized.api_key(), "sk-1");
+        assert_eq!(normalized.vision_model(), "m");
+        assert_eq!(normalized.chat_model(), "m");
+        assert_eq!(normalized.active().unwrap().models, vec!["m".to_owned()]);
+        assert!(normalized.active().unwrap().model.is_empty());
         // Disabled configs are stored as-is without validation.
         let idle = AiConfig {
             enabled: false,
@@ -2017,7 +2114,8 @@ mod tests {
                     id: "p1".into(),
                     provider: "openai".into(),
                     base_url: "https://api.openai.com/v1".into(),
-                    model: "gpt-6-luna".into(),
+                    vision_model: "gpt-6-luna".into(),
+                    chat_model: "gpt-6-luna".into(),
                     api_key: "sk-first".into(),
                     ..Default::default()
                 },
@@ -2025,7 +2123,8 @@ mod tests {
                     id: "p2".into(),
                     provider: "openai".into(),
                     base_url: "https://api.openai.com/v1".into(),
-                    model: "gpt-6.1-terra".into(),
+                    vision_model: "gpt-6.1-terra".into(),
+                    chat_model: "gpt-6.1-terra".into(),
                     api_key: "sk-second".into(),
                     ..Default::default()
                 },
@@ -2034,10 +2133,11 @@ mod tests {
         .normalized()
         .unwrap();
         // Same provider twice: the active profile decides which key is used.
-        assert_eq!(config.model(), "gpt-6.1-terra");
+        assert_eq!(config.chat_model(), "gpt-6.1-terra");
         assert_eq!(config.api_key(), "sk-second");
         config.active_profile_id = "p1".into();
-        assert_eq!(config.model(), "gpt-6-luna");
+        assert_eq!(config.chat_model(), "gpt-6-luna");
+        assert_eq!(config.vision_model(), "gpt-6-luna");
         assert_eq!(config.api_key(), "sk-first");
         // The other profile is untouched.
         assert_eq!(config.profiles[1].api_key, "sk-second");
@@ -2073,7 +2173,44 @@ mod tests {
         assert_eq!(config.profiles[2].id, "dup-2");
         // Unknown active id falls back to the first profile.
         assert_eq!(config.active_profile_id, "profile-1");
-        assert_eq!(config.model(), "a");
+        assert_eq!(config.chat_model(), "a");
+        assert_eq!(config.vision_model(), "a");
+    }
+
+    #[test]
+    fn profile_keeps_selected_models_and_role_assignments() {
+        let profile = AiProfile {
+            base_url: "https://api.example.com/v1".into(),
+            models: vec![" extra ".into(), "extra".into(), "".into()],
+            vision_model: " vision ".into(),
+            chat_model: "chat".into(),
+            ..Default::default()
+        }
+        .normalized();
+        // 去重、去空，角色模型即使手填也会进入已选清单。
+        assert_eq!(
+            profile.models,
+            vec!["extra".to_owned(), "vision".to_owned(), "chat".to_owned()]
+        );
+        assert_eq!(profile.vision_model, "vision");
+        assert_eq!(profile.chat_model, "chat");
+        assert!(profile.model.is_empty());
+    }
+
+    #[test]
+    fn config_exposes_distinct_role_models() {
+        let config = AiConfig {
+            active_profile_id: "p1".into(),
+            profiles: vec![AiProfile {
+                id: "p1".into(),
+                vision_model: "vision".into(),
+                chat_model: "chat".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(config.vision_model(), "vision");
+        assert_eq!(config.chat_model(), "chat");
     }
 
     #[test]
@@ -2093,12 +2230,46 @@ mod tests {
         assert_eq!(config.profiles[0].id, LEGACY_PROFILE_ID);
         assert_eq!(config.api_key(), "sk-legacy");
         assert_eq!(config.base_url(), "https://api.deepseek.com/v1");
+        assert_eq!(config.vision_model(), "deepseek-flash");
+        assert_eq!(config.chat_model(), "deepseek-flash");
+        assert_eq!(
+            config.active().unwrap().models,
+            vec!["deepseek-flash".to_owned()]
+        );
         assert!(config.chat_ready());
         // A config without any endpoint stays empty instead of spawning one.
         let empty = AiConfig::from(StoredAiConfig::default());
         assert!(empty.profiles.is_empty());
         assert!(empty.active_profile_id.is_empty());
         assert_eq!(empty.concurrency, 2);
+    }
+
+    #[test]
+    fn stored_profiles_with_legacy_model_migrate_on_load() {
+        let stored: StoredAiConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "activeProfileId": "p1",
+            "profiles": [{
+                "id": "p1",
+                "provider": "deepseek",
+                "baseUrl": "https://api.deepseek.com",
+                "model": "deepseek-chat",
+                "apiKey": "sk-1"
+            }]
+        }))
+        .unwrap();
+        let config = AiConfig::from(stored);
+        let profile = config.active().unwrap();
+        // 旧单模型字段填进两个角色，并进入已勾选清单。
+        assert_eq!(profile.vision_model, "deepseek-chat");
+        assert_eq!(profile.chat_model, "deepseek-chat");
+        assert_eq!(profile.models, vec!["deepseek-chat".to_owned()]);
+        assert!(profile.model.is_empty());
+        // 新结构只写角色字段，不再回写旧的 `model`。
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json["profiles"][0].get("model").is_none());
+        assert_eq!(json["profiles"][0]["visionModel"], "deepseek-chat");
+        assert_eq!(json["profiles"][0]["chatModel"], "deepseek-chat");
     }
 
     #[test]

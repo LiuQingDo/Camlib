@@ -23,6 +23,7 @@ import {
 } from "../library";
 import {
   addAiProvider,
+  assignAiModelRole,
   backToAiProviderList,
   cancelAiEditing,
   cancelAiRun,
@@ -45,7 +46,6 @@ import {
   saveSystemSettings,
   saveThemeSetting,
   saveThumbnailCacheDir,
-  selectAiModel,
   selectAiRegion,
   setActiveAiProvider,
   setAiModelQuery,
@@ -54,6 +54,7 @@ import {
   syncAiDraftFromDom,
   testAiConnectionNow,
   toggleAiKeyVisibility,
+  toggleAiModelSelection,
 } from "../settings-ops";
 
 export function bindSettingsEvents(): void {
@@ -293,7 +294,7 @@ export function bindSettingsBodyEvents(): void {
     const list = app.querySelector<HTMLElement>("#ai-model-list");
     if (list) list.innerHTML = renderAiModelList(profile);
     const count = app.querySelector<HTMLElement>("#ai-model-count");
-    if (count) count.textContent = aiModelCountHint();
+    if (count) count.textContent = aiModelCountHint(profile);
     bindAiModelChoices();
   });
   // 区域页签：切换厂商在不同区域的端点地址。
@@ -309,7 +310,7 @@ export function bindSettingsBodyEvents(): void {
   // 未失焦的输入先同步进草稿，避免切换服务商/重新渲染时丢字。
   app
     .querySelectorAll<HTMLInputElement>(
-      "#settings-ai-chat-key, #settings-ai-model, #settings-ai-chat-url, #settings-ai-profile-name",
+      "#settings-ai-chat-key, #settings-ai-vision-model, #settings-ai-chat-model, #settings-ai-chat-url, #settings-ai-profile-name",
     )
     .forEach((input) => input.addEventListener("input", () => syncAiDraftFromDom()));
   app
@@ -383,12 +384,22 @@ export function bindSettingsBodyEvents(): void {
   });
 }
 
-/** 已取回清单里的模型项：点一下写入草稿（清单重绘后需要重新绑定）。 */
+/**
+ * 已取回清单里的模型项：复选框切换多选，右侧按钮指定识图 / 对话角色
+ * （清单重绘后需要重新绑定）。
+ */
 function bindAiModelChoices(): void {
-  app.querySelectorAll<HTMLButtonElement>("[data-ai-model]").forEach((button) => {
+  app.querySelectorAll<HTMLInputElement>("[data-ai-model-select]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const modelId = input.dataset.aiModelSelect;
+      if (modelId) toggleAiModelSelection(modelId);
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>("[data-ai-model-role]").forEach((button) => {
     button.addEventListener("click", () => {
-      const modelId = button.dataset.aiModel;
-      if (modelId) selectAiModel(modelId);
+      const modelId = button.dataset.aiModelId;
+      const role = button.dataset.aiModelRole;
+      if (modelId && (role === "vision" || role === "chat")) assignAiModelRole(modelId, role);
     });
   });
 }

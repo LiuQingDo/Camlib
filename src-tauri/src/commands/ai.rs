@@ -67,7 +67,7 @@ pub fn ai_test_connection_blocking(config: &AiConfig) -> Result<AiTestResultDto,
     if !config.chat_ready() {
         return Ok(AiTestResultDto {
             ok: false,
-            message: "请先选择或填写对话模型与接口地址".to_owned(),
+            message: "请先指定识图模型、对话模型与接口地址".to_owned(),
             latency_ms: 0,
         });
     }
@@ -76,7 +76,7 @@ pub fn ai_test_connection_blocking(config: &AiConfig) -> Result<AiTestResultDto,
     let latency = started.elapsed().as_millis() as u64;
     Ok(AiTestResultDto {
         ok: !reply.trim().is_empty(),
-        message: format!("模型 {} 已连通（{latency} ms）", config.model()),
+        message: format!("模型 {} 已连通（{latency} ms）", config.chat_model()),
         latency_ms: latency,
     })
 }
