@@ -22,7 +22,9 @@ import { bumpGridEpoch, patchGrid } from "../render/virtual";
 import { state } from "../state";
 import { invalidatePreviewMeta, loadModalAsset } from "../views/preview";
 import { refreshTags } from "./media-query";
+import { dismissNotice, pushNotice } from "./notices";
 import { loadAiStats, updateAiSingleProgress } from "./settings-ops";
+import { showToast } from "./toast";
 
 export async function toggleFavorite(id: string): Promise<void> {
   if (state.favoritePendingIds.has(id)) return;
@@ -299,6 +301,56 @@ export async function requestDeleteSelected(): Promise<void> {
   }
 }
 
+/**
+ * 删除结果反馈。
+ *
+ * 成功：一条 4s 自动收的 toast；部分失败：常驻 toast + 「查看 N 条失败」——
+ * 十几行错误明细不塞进 toast，推进错误条那条可折叠、可重试的通知里。
+ *
+ * 落点放在 app 层而不是 renderDeleteFeedback()：重试要调 requestDeleteSelected()，
+ * 而 render/toolbar 不能反向 import app/media-ops（会成环）。
+ */
+function emitDeleteResultFeedback(result: DeleteResultDto): void {
+  const summary = `媒体 ${formatCount(result.mediaCount)} 项 · 成功回收 ${formatCount(result.filesRecycled)} 个文件 · 本就缺失 ${formatCount(result.filesAlreadyMissing)} · 失败 ${formatCount(result.failedFiles)}`;
+  if (result.failedFiles <= 0) {
+    showToast(`已移入回收站 · ${summary}`, { kind: "success", key: "delete-result" });
+    return;
+  }
+  showToast(`删除部分完成 · ${summary}`, {
+    kind: "error",
+    key: "delete-result",
+    action: { label: `查看 ${formatCount(result.failedFiles)} 条失败`, run: () => revealDeleteFailures(result) },
+  });
+}
+
+/** 「查看 N 条失败」：明细 + 重试入口推到错误条，并滚到可见处。 */
+function revealDeleteFailures(result: DeleteResultDto): void {
+  const failedIds = result.failedItemIds;
+  pushNotice({
+    id: "delete-failed",
+    kind: "error",
+    title: "删除部分完成",
+    detail: result.errors.length ? result.errors.join("\n") : "后端没有返回逐条错误，失败文件仍在原位置。",
+    sticky: true,
+    actions: failedIds.length
+      ? [
+          {
+            label: "重试失败项",
+            run: () => {
+              dismissNotice("delete-failed");
+              // 只把失败项放回选择集，再走一遍既有的「预览 → 确认」流程。
+              state.selectedIds.clear();
+              for (const id of failedIds) state.selectedIds.add(id);
+              void requestDeleteSelected();
+            },
+          },
+        ]
+      : undefined,
+  });
+  patchToolbar();
+  app.querySelector(".error-bar")?.scrollIntoView({ block: "start" });
+}
+
 export async function runConfirmedDelete(): Promise<void> {
   const confirm = state.deleteConfirm;
   if (!state.library || !confirm || state.deleting) return;
@@ -317,8 +369,9 @@ export async function runConfirmedDelete(): Promise<void> {
     state.deleteResult = result;
     state.deleteProgress = null;
     applyDeleteToGrid(result, confirm.ids);
-    // Partial failures are explained by the result panel; do not stack a second error banner.
+    // 结果走 toast（成功自动收、失败常驻）；明细与重试留在错误条，不叠加第二条错误。
     state.error = null;
+    emitDeleteResultFeedback(result);
   } catch (error) {
     state.deleteProgress = null;
     state.error = toUserMessage(error, "删除媒体失败");

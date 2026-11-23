@@ -1,38 +1,19 @@
-// 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
-import { app } from "../render/context";
-import { escapeHtml } from "../render/text";
-
-/** Module-level timer so successive toasts never stack dismiss handles. */
-export let transientNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function clearTransientNotice(): void {
-  if (transientNoticeTimer !== null) {
-    clearTimeout(transientNoticeTimer);
-    transientNoticeTimer = null;
-  }
-  app.querySelector("#batch-notice")?.remove();
-}
+// 由 main.ts 拆分而来：从「横幅式提示」改成 toast 的薄封装。
+import { clearToasts, showToast } from "./toast";
 
 /**
- * Lightweight toast that does not rebuild the media grid.
- * Success auto-dismisses (~3s); error stays until closed.
+ * 批量操作的成功 / 失败提示。
+ *
+ * 保留旧签名（paint 门面与十几个调用点都按它调），内部走 toast：
+ * 固定在右下角、不随内容滚动；同一条文案用同一个 key 合并，连续点收藏
+ * 只会刷新那一条，而不是排队把它顶掉。
  */
 export function showTransientNotice(message: string, kind: "success" | "error" = "success"): void {
   if (!message) return;
-  clearTransientNotice();
-  const sticky = app.querySelector(".sticky-controls");
-  if (!sticky) return;
-  sticky.insertAdjacentHTML(
-    "afterend",
-    `<div class="notice-banner toast-in${kind === "error" ? " is-error" : " is-success"}" id="batch-notice" role="${kind === "error" ? "alert" : "status"}"><span class="notice-icon">${kind === "error" ? "!" : "✓"}</span><span>${escapeHtml(message)}</span><button class="text-button" id="dismiss-batch-notice" type="button">关闭</button></div>`,
-  );
-  app.querySelector<HTMLButtonElement>("#dismiss-batch-notice")?.addEventListener("click", () => {
-    clearTransientNotice();
-  });
-  if (kind === "success") {
-    transientNoticeTimer = setTimeout(() => {
-      transientNoticeTimer = null;
-      app.querySelector("#batch-notice")?.remove();
-    }, 3000);
-  }
+  showToast(message, { kind, key: `${kind}:${message}` });
+}
+
+/** 兼容旧入口：一次性清掉屏上的 toast。 */
+export function clearTransientNotice(): void {
+  clearToasts();
 }

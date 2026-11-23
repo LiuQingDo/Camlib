@@ -5,9 +5,12 @@ import { ConflictPolicy, listBackupRunItems } from "../../api/media";
 import { app, bind, bindAll, region } from "../../render/context";
 import { openSettings, refreshMedia } from "../../render/paint";
 import { patchSidebar } from "../../render/shell";
-import { patchToolbar, resetSidebarExpansionForSelection, searchUi } from "../../render/toolbar";
+import { patchToolbar, resetSidebarExpansionForSelection, searchUi, toggleTaskPill } from "../../render/toolbar";
 import { onGridScroll } from "../../render/virtual";
 import { state } from "../../state";
+import { dismissNotice, runNoticeAction } from "../notices";
+import { patchErrorBar, patchTaskPill } from "../orchestrate";
+import { cancelTask } from "../tasks";
 import { openAiChatDrawer } from "../../views/ai-chat";
 import {
   bootstrap,
@@ -124,31 +127,40 @@ export function bindSidebarEvents(): void {
   });
 }
 
-/** 状态横幅区：扫描/删除横幅、备份面板、语义搜索提示。 */
+/**
+ * 反馈区：错误条 / 任务胶囊 / 查询状态横幅 / 备份面板。
+ * 区域整块重建后这里会被重跑，bind / bindAll 自带幂等，不会叠加监听器。
+ */
 export function bindStatusEvents(): void {
-  bind(app.querySelector("#scan-cancel-button"), "click", () => void cancelCurrentScan());
   bind(app.querySelector("#rescan-button"), "click", () => void bootstrap());
   bind(app.querySelector("#open-settings-from-banner"), "click", () => void openSettings("library"));
   bind(app.querySelector("#exit-semantic-search"), "click", () => exitSemanticSearch());
-  bind(app.querySelector("#dismiss-ffmpeg-hint"), "click", () => {
-    state.ffmpegHintDismissed = true;
-    patchToolbar();
+  // 关闭一条通知：注册表会顺手清回源 state，否则下一次同步又把它推回来。
+  bindAll("[data-notice-dismiss]", "click", (event) => {
+    const id = (event.currentTarget as HTMLElement).dataset.noticeDismiss;
+    if (!id) return;
+    dismissNotice(id);
+    patchErrorBar();
   });
-  bind(app.querySelector("#dismiss-recent-task"), "click", () => {
-    state.recentTaskNotice = null;
-    patchToolbar();
+  bindAll("[data-notice-action]", "click", (event) => {
+    const element = event.currentTarget as HTMLElement;
+    const id = element.dataset.noticeId;
+    const index = Number(element.dataset.noticeAction);
+    if (!id || !Number.isInteger(index)) return;
+    runNoticeAction(id, index);
+    patchErrorBar();
   });
-  bind(app.querySelector("#dismiss-state-error"), "click", () => {
-    state.error = null;
-    patchToolbar();
+  bindAll("[data-task-toggle]", "click", () => {
+    toggleTaskPill();
+    patchTaskPill();
   });
-  bind(app.querySelector("#dismiss-delete-result"), "click", () => {
-    state.deleteResult = null;
-    patchToolbar();
-  });
-  bind(app.querySelector("#dismiss-delete-notice"), "click", () => {
-    state.deleteNotice = null;
-    patchToolbar();
+  bindAll("[data-task-cancel]", "click", (event) => {
+    const id = (event.currentTarget as HTMLElement).dataset.taskCancel;
+    if (!id) return;
+    // 扫描的取消命令在 app/library（要走后端），其余任务用注册表里的回调。
+    if (id === "scan") void cancelCurrentScan();
+    else cancelTask(id);
+    patchTaskPill();
   });
   bind(app.querySelector("#backup-open-button"), "click", () => void openBackupPanel());
   bind(app.querySelector("#close-backup"), "click", () => {

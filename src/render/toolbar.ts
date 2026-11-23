@@ -1,4 +1,6 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
+import { listNotices, syncStateNotices, type Notice } from "../app/notices";
+import { finishTask, listTasks, taskPercent, upsertTask, type Task } from "../app/tasks";
 import { MediaKind, MediaQueryInput, ScanProgressDto, TagDto } from "../api/media";
 import { hasAnyFilter, secondaryFilterParts } from "../lib/filters";
 import { formatCount, formatRangeLabel } from "../lib/format";
@@ -312,69 +314,210 @@ export function scanPercentLabel(progress: ScanProgressDto): string {
   return progress.total > 0 ? `${Math.round((progress.processed / progress.total) * 100)}%` : "发现中";
 }
 
-export function renderStatusBannerBase(): string {
-  if (state.semanticSearch) {
-    const meta = state.semanticMeta;
-    const modeLabel =
-      state.semanticMode === "text"
-        ? "描述/标签关键字"
-        : state.semanticMode === "structured"
-          ? "时间/类型条件"
-          : "检索中…";
-    const conditions: string[] = [];
-    if (meta?.dateFrom || meta?.dateTo) {
-      conditions.push(
-        meta?.dateFrom && meta?.dateTo
-          ? `${meta.dateFrom} ~ ${meta.dateTo}`
-          : meta?.dateFrom
-            ? `自 ${meta.dateFrom}`
-            : `至 ${meta.dateTo}`,
-      );
-    }
-    if (meta?.kind) conditions.push(meta.kind === "photo" ? "照片" : meta.kind === "video" ? "视频" : "实况");
-    if (meta?.keywords) conditions.push(`关键词「${meta.keywords}」`);
-    return `<div class="notice-banner is-info" role="status"><span class="notice-icon">✦</span><div><strong>AI 搜索：${escapeHtml(state.semanticSearch)}</strong><span>${escapeHtml(`模式：${modeLabel}${conditions.length ? ` · 解析条件：${conditions.join("，")}` : ""}。结果由 AI 检索决定，不叠加其他筛选。`)}</span></div><button class="text-button" id="exit-semantic-search" type="button">退出 AI 搜索</button></div>`;
+/**
+ * 查询状态横幅：现在是「只为 AI 搜索而生」的一条说明。
+ *
+ * 它回答的是「当前结果为什么长这样」，是查询状态而不是通知，所以留在原位、
+ * 不迁进错误条；扫描进度归任务胶囊，其余告警归错误条，三者互不抢占。
+ */
+export function renderStatusBanner(): string {
+  if (!state.semanticSearch) return "";
+  const meta = state.semanticMeta;
+  const modeLabel =
+    state.semanticMode === "text"
+      ? "描述/标签关键字"
+      : state.semanticMode === "structured"
+        ? "时间/类型条件"
+        : "检索中…";
+  const conditions: string[] = [];
+  if (meta?.dateFrom || meta?.dateTo) {
+    conditions.push(
+      meta?.dateFrom && meta?.dateTo
+        ? `${meta.dateFrom} ~ ${meta.dateTo}`
+        : meta?.dateFrom
+          ? `自 ${meta.dateFrom}`
+          : `至 ${meta.dateTo}`,
+    );
   }
-  if (state.scanning && state.scanProgress) {
-    const progress =
-      state.scanProgress.total > 0 ? Math.round((state.scanProgress.processed / state.scanProgress.total) * 100) : 0;
-    const status = scanStatusLabel(state.scanProgress);
-    const progressLabel = scanPercentLabel(state.scanProgress);
-    const trackClass = state.scanProgress.total > 0 ? "" : " is-indeterminate";
-    const trackWidth = state.scanProgress.total > 0 ? `${progress}%` : "35%";
-    return `<div class="scan-banner" id="scan-progress-banner" role="status"><div class="scan-copy"><span class="spinner"></span><span data-scan-phase>${status}</span><strong data-scan-percent>${progressLabel}</strong><button class="text-button" id="scan-cancel-button" type="button">取消</button></div><div class="progress-track${trackClass}"><span data-scan-track style="width:${trackWidth}"></span></div><div class="scan-current" data-scan-current>${state.scanProgress.current ? escapeHtml(state.scanProgress.current) : ""}</div></div>`;
-  }
-  if (state.availability === "disconnected")
-    return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库已断开</strong><span>${escapeHtml(state.rootPath ?? "原媒体库")} 不可用。已禁用扫描、删除、缩略图重建与备份目标写入。请重新连接磁盘，或在设置中更换媒体库路径。</span></div><button class="text-button" id="rescan-button" type="button">重新检测</button></div>`;
-  if (state.availability === "invalid")
-    return `<div class="notice-banner is-warning"><span class="notice-icon">!</span><div><strong>媒体库路径无效</strong><span>当前卷与记录的媒体库不一致。请在设置中重新选择可访问的媒体库目录。</span></div><button class="text-button" id="open-settings-from-banner" type="button">打开设置</button></div>`;
-  if (state.error)
-    return `<div class="notice-banner is-error" role="alert"><span class="notice-icon">!</span><span>${escapeHtml(state.error)}</span><button class="text-button" id="dismiss-state-error" type="button">关闭</button></div>`;
-  if (state.recentTaskNotice)
-    return `<div class="notice-banner is-info"><span class="notice-icon">i</span><div><strong>最近任务</strong><span>${escapeHtml(state.recentTaskNotice)}</span></div><button class="text-button" id="dismiss-recent-task" type="button">知道了</button></div>`;
-  if (state.ffmpegMissing && !state.ffmpegHintDismissed)
-    return `<div class="notice-banner is-info" id="ffmpeg-hint" role="status"><span class="notice-icon">i</span><div><strong>缺少 ffmpeg</strong><span>视频缩略图与部分预览需要 ffmpeg：在终端运行 winget install ffmpeg 即可，装完重启 Camlib 生效。已安装则忽略这行提示。</span></div><button class="text-button" id="dismiss-ffmpeg-hint" type="button">知道了</button></div>`;
-  return "";
+  if (meta?.kind) conditions.push(meta.kind === "photo" ? "照片" : meta.kind === "video" ? "视频" : "实况");
+  if (meta?.keywords) conditions.push(`关键词「${meta.keywords}」`);
+  return `<div class="notice-banner is-info" role="status"><span class="notice-icon">✦</span><div><strong>AI 搜索：${escapeHtml(state.semanticSearch)}</strong><span>${escapeHtml(`模式：${modeLabel}${conditions.length ? ` · 解析条件：${conditions.join("，")}` : ""}。结果由 AI 检索决定，不叠加其他筛选。`)}</span></div><button class="text-button" id="exit-semantic-search" type="button">退出 AI 搜索</button></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// 反馈三通道
+//
+// 改造前这里是一条 if-else 链：语义搜索 → 扫描中 → 断盘 → 路径无效 → error
+// → 最近任务 → ffmpeg，同一时刻只画一条，于是「扫描中」会把「索引损坏」盖掉，
+// 删除反馈还画在内容流里，滚两屏就看不见。现在拆开：
+//   错误条  —— 常驻错误 / 告警，读 app/notices.ts；
+//   胶囊    —— 进行中的任务，读 app/tasks.ts；
+//   toast   —— 一次性结果，见 app/toast.ts。
+// 三者各自有挂载点，可以同时出现。
+// ---------------------------------------------------------------------------
+
+const NOTICE_ICON: Record<Notice["kind"], string> = {
+  error: "!",
+  warning: "!",
+  info: "i",
+  success: "✓",
+};
+
+/**
+ * 派生通知的固定按钮。沿用骨架里既有的 id，绑定仍留在 bindStatusEvents，
+ * 这样 render 层不必为了「重新检测」去 import app/library。
+ */
+const DERIVED_NOTICE_ACTIONS: Record<string, string> = {
+  "library-disconnected": `<button class="text-button" type="button" id="rescan-button">重新检测</button>`,
+  "library-invalid": `<button class="text-button" type="button" id="open-settings-from-banner">打开设置</button>`,
+};
+
+function noticeItemHtml(notice: Notice): string {
+  const actions = [
+    ...(notice.actions ?? []).map(
+      (action, index) =>
+        `<button class="text-button" type="button" data-notice-id="${escapeHtml(notice.id)}" data-notice-action="${index}">${escapeHtml(action.label)}</button>`,
+    ),
+    DERIVED_NOTICE_ACTIONS[notice.id] ?? "",
+  ].join("");
+  // 派生通知（断盘 / 路径无效）不给关闭：关掉下一帧同步又会推回来，看起来像没反应。
+  const close =
+    notice.closable === false
+      ? ""
+      : `<button class="error-bar-close" type="button" data-notice-dismiss="${escapeHtml(notice.id)}" aria-label="关闭通知">×</button>`;
+  // 错误/告警的 detail 是技术细节，默认折叠；信息类（最近任务、缺 ffmpeg）的
+  // detail 就是正文本身，折起来反而要用户多点一次才能读到。
+  const collapsed = notice.kind === "error" || notice.kind === "warning";
+  const detail = notice.detail
+    ? collapsed
+      ? `<details class="error-bar-detail"><summary>技术细节</summary><pre>${escapeHtml(notice.detail)}</pre></details>`
+      : `<span class="error-bar-detail-inline">${escapeHtml(notice.detail)}</span>`
+    : "";
+  return `<div class="error-bar-item is-${notice.kind}" data-notice="${escapeHtml(notice.id)}" role="${notice.kind === "error" ? "alert" : "status"}"><span class="notice-icon" aria-hidden="true">${NOTICE_ICON[notice.kind]}</span><div class="error-bar-copy"><strong>${escapeHtml(notice.title)}</strong>${detail}</div>${actions}${close}</div>`;
+}
+
+/** 错误条：最多 3 条，其余只报数量（不悄悄吞掉）。 */
+export function renderErrorBar(): string {
+  const { visible, hidden } = listNotices();
+  if (!visible.length) return "";
+  const more = hidden > 0 ? `<span class="error-bar-more">还有 ${formatCount(hidden)} 条</span>` : "";
+  return `<div class="error-bar" role="region" aria-label="通知">${visible.map(noticeItemHtml).join("")}${more}</div>`;
+}
+
+/** 展开 / 收起的纯 UI 状态；不放进 state 是因为它不影响任何查询。 */
+let taskPillExpanded = false;
+
+export function toggleTaskPill(): void {
+  taskPillExpanded = !taskPillExpanded;
+}
+
+/** scan 的取消走既有 cancelCurrentScan()（app 层按 id 分派），注册表里不塞回调。 */
+function canCancelTask(task: Task): boolean {
+  return Boolean(task.cancel) || task.id === "scan";
+}
+
+function taskRowHtml(task: Task): string {
+  const percent = taskPercent(task);
+  const trackClass = percent === null ? " is-indeterminate" : "";
+  const width = percent === null ? "35%" : `${percent}%`;
+  const counts = task.total ? `${formatCount(task.done ?? 0)} / ${formatCount(task.total)}` : "";
+  const cancel = canCancelTask(task)
+    ? `<button class="text-button" type="button" data-task-cancel="${escapeHtml(task.id)}">取消</button>`
+    : "";
+  return `<div class="task-pill-row"><div class="task-pill-row-head"><span class="task-pill-row-title">${escapeHtml(task.title)}</span><strong>${percent === null ? "处理中" : `${percent}%`}</strong>${cancel}</div>${task.detail ? `<span class="task-pill-detail-text" data-task-detail>${escapeHtml(task.detail)}</span>` : ""}<div class="progress-track${trackClass}"><span data-task-track style="width:${width}"></span></div>${counts ? `<span class="task-pill-count">${counts}</span>` : ""}</div>`;
+}
+
+/**
+ * 任务胶囊：标题 + 百分比，点击展开明细与取消。
+ * 多条任务同时跑时，胶囊只显示队首，其余用 +N 标出。
+ */
+export function renderTaskPill(): string {
+  syncScanTask();
+  const tasks = listTasks();
+  if (!tasks.length) {
+    taskPillExpanded = false;
+    return "";
+  }
+  const head = tasks[0];
+  const percent = taskPercent(head);
+  const extra = tasks.length > 1 ? `<span class="task-pill-extra">+${formatCount(tasks.length - 1)}</span>` : "";
+  const panel = taskPillExpanded ? `<div class="task-pill-panel">${tasks.map(taskRowHtml).join("")}</div>` : "";
+  return `<div class="task-pill${taskPillExpanded ? " is-expanded" : ""}"><button class="task-pill-main" type="button" data-task-toggle="1" aria-expanded="${taskPillExpanded}" aria-label="任务进度">${percent === null ? `<span class="spinner"></span>` : `<span class="task-pill-dot" aria-hidden="true"></span>`}<span class="task-pill-title">${escapeHtml(head.title)}</span><span class="task-pill-percent" data-task-percent>${percent === null ? "发现中" : `${percent}%`}</span>${extra}<span class="task-pill-caret" aria-hidden="true">${taskPillExpanded ? "▴" : "▾"}</span></button>${panel}</div>`;
+}
+
+/** 扫描是后台任务，登记进任务表；结束就撤掉，不占错误条。 */
+function syncScanTask(): void {
+  if (!state.scanning) {
+    finishTask("scan");
+    return;
+  }
+  const progress = state.scanProgress;
+  const phase = !progress
+    ? "准备中"
+    : progress.phase === "discovering"
+      ? "发现文件"
+      : progress.phase === "indexing"
+        ? "建立索引"
+        : "整理结果";
+  upsertTask({
+    id: "scan",
+    title: "正在扫描媒体库",
+    detail: progress?.current ? `${phase} · ${progress.current}` : phase,
+    done: progress?.processed,
+    total: progress?.total,
+  });
+}
+
+/**
+ * 删除反馈只负责「进度 → 任务」。进度条原来画在内容流里，滚两屏就丢；
+ * 结果 toast 在 app/media-ops.ts 发（render 层不 import app/ 里的动作）。
+ */
+export function renderDeleteFeedback(): void {
+  if (state.deleting && state.deleteProgress) {
+    const progress = state.deleteProgress;
+    upsertTask({
+      id: "delete",
+      title: "正在移入回收站",
+      detail: progress.current || undefined,
+      done: progress.processedFiles,
+      total: progress.totalFiles > 0 ? progress.totalFiles : undefined,
+    });
+    return;
+  }
+  finishTask("delete");
+}
+
+/** 错误条 patch：先同步派生通知，再按缓存写区域。 */
+export function patchErrorBar(): void {
+  syncStateNotices();
+  if (setRegionHtml(region("error-bar"), renderErrorBar())) bindStatusEvents();
+}
+
+/** 任务胶囊 patch。 */
+export function patchTaskPill(): void {
+  if (setRegionHtml(region("task-pill"), renderTaskPill())) bindStatusEvents();
+}
+
+/**
+ * 扫描进度的高频更新：只改胶囊里的文字与进度轨，不重画整块区域。
+ * 胶囊还没建出来（刚进扫描态）时才回落到一次 patchToolbar。
+ */
 export function updateScanProgressView(): void {
   const progress = state.scanProgress;
-  const banner = app.querySelector<HTMLElement>("#scan-progress-banner");
-  if (!progress || !banner) {
-    // 横幅还没渲染出来（例如刚进入扫描态），补一次横幅区即可。
+  const pill = app.querySelector<HTMLElement>('[data-region="task-pill"] .task-pill');
+  if (!progress || !pill) {
     patchToolbar();
     return;
   }
-  banner.querySelector<HTMLElement>("[data-scan-phase]")!.textContent = scanStatusLabel(progress);
-  banner.querySelector<HTMLElement>("[data-scan-percent]")!.textContent = scanPercentLabel(progress);
-  const track = banner.querySelector<HTMLElement>("[data-scan-track]")!;
-  track.style.width = progress.total > 0 ? `${Math.round((progress.processed / progress.total) * 100)}%` : "35%";
-  track.parentElement!.classList.toggle("is-indeterminate", progress.total <= 0);
-  banner.querySelector<HTMLElement>("[data-scan-current]")!.textContent = progress.current ?? "";
-}
-
-export function renderStatusBanner(): string {
-  return `${renderStatusBannerBase()}${state.backupOpen ? "" : `<div class="backup-launcher-row"><button class="outline-button" id="backup-open-button" type="button">相机备份预览</button></div>`}${renderBackupPanel()}`;
+  const percent = taskPercent({ done: progress.processed, total: progress.total });
+  setText(pill.querySelector("[data-task-percent]"), percent === null ? "发现中" : `${percent}%`);
+  const track = pill.querySelector<HTMLElement>("[data-task-track]");
+  if (track) {
+    track.style.width = percent === null ? "35%" : `${percent}%`;
+    track.parentElement?.classList.toggle("is-indeterminate", percent === null);
+  }
+  const detail = pill.querySelector<HTMLElement>("[data-task-detail]");
+  if (detail && progress.current) setText(detail, progress.current);
 }
 
 export function renderSelectionToolbar(): string {
@@ -428,38 +571,13 @@ export function renderSelectionToolbar(): string {
   return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" data-action="select-current-results" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" data-action="clear-selection" type="button">清除选择</button><button class="selection-button" id="batch-ai-tag" data-action="batch-ai-tag" type="button" title="${escapeHtml(aiTitle)}" ${aiDisabled ? "disabled" : ""}>${state.aiSingleBusy ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…` : `✦ AI 打标`}</button><button class="selection-button" id="favorite-selected" data-action="batch-favorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" data-action="batch-unfavorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" data-action="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" data-action="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" data-action="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" data-action="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" data-action="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
 }
 
-export function renderDeleteFeedback(): string {
-  if (state.deleteProgress && state.deleting) {
-    const progress = state.deleteProgress;
-    const percent = progress.totalFiles > 0 ? Math.round((progress.processedFiles / progress.totalFiles) * 100) : 0;
-    const trackClass = progress.totalFiles > 0 ? "" : " is-indeterminate";
-    const trackWidth = progress.totalFiles > 0 ? `${percent}%` : "35%";
-    return `<div class="scan-banner delete-progress-banner" role="status" aria-live="polite"><div class="scan-copy"><span class="spinner"></span><span>正在移入 Windows 回收站</span><strong>${progress.totalFiles > 0 ? `${formatCount(progress.processedFiles)} / ${formatCount(progress.totalFiles)} 个文件` : "处理中…"}</strong></div><div class="progress-track${trackClass}"><span style="width:${trackWidth}"></span></div>${progress.current ? `<div class="scan-current">${escapeHtml(progress.current)}</div>` : ""}</div>`;
-  }
-  if (state.deleteResult) {
-    const result = state.deleteResult;
-    const hasFailures = result.failedFiles > 0;
-    const title = hasFailures ? "删除部分完成" : "已移入回收站";
-    const summary = `媒体 ${formatCount(result.mediaCount)} 项 · 成功回收 ${formatCount(result.filesRecycled)} 个文件 · 本就缺失 ${formatCount(result.filesAlreadyMissing)} · 失败 ${formatCount(result.failedFiles)}`;
-    const errors = result.errors.length
-      ? `<ul class="delete-error-list">${result.errors
-          .slice(0, 12)
-          .map((error) => `<li>${escapeHtml(error)}</li>`)
-          .join(
-            "",
-          )}${result.errors.length > 12 ? `<li>…以及另外 ${formatCount(result.errors.length - 12)} 条错误</li>` : ""}</ul>`
-      : "";
-    return `<div class="notice-banner ${hasFailures ? "is-warning" : "is-success"}" role="status" aria-live="polite"><span class="notice-icon">${hasFailures ? "!" : "✓"}</span><div><strong>${title}</strong><span>${summary}</span>${errors}<span class="delete-recover-hint">文件在 Windows 回收站中，可随时恢复。</span></div><button class="text-button" id="dismiss-delete-result" type="button">知道了</button></div>`;
-  }
-  if (state.deleteNotice) {
-    return `<div class="notice-banner is-success" role="status" aria-live="polite"><span class="notice-icon">✓</span><span>${escapeHtml(state.deleteNotice)}</span><button class="text-button" id="dismiss-delete-notice" type="button">关闭</button></div>`;
-  }
-  return "";
-}
-
 export function patchToolbar(): void {
   setRegionHtml(region("topbar-title"), titleBlockHtml());
   if (setRegionHtml(region("status"), statusRegionHtml())) bindStatusEvents();
+  // 顺序固定：删除进度先落进任务表，再一起 patch 胶囊；错误条独立于两者。
+  renderDeleteFeedback();
+  patchErrorBar();
+  patchTaskPill();
   setRegionHtml(region("filter-row"), renderPrimaryFilters());
   if (setRegionHtml(region("advanced"), renderAdvancedFiltersInner())) bindToolbarEvents();
   syncAdvancedFiltersVisibility();
@@ -530,11 +648,14 @@ export function titleBlockHtml(): string {
 }
 
 /** 顶栏下方的横幅区：新导入提示 / 状态横幅 / 删除反馈 / 备份面板。 */
+/** 顶栏下方的查询状态区：新导入提示 / AI 搜索条件 / 备份入口与面板（原位置）。 */
 export function statusRegionHtml(): string {
   const firstSeen = state.firstSeenFrom
     ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>`
     : "";
-  return `${firstSeen}${renderStatusBanner()}${renderDeleteFeedback()}`;
+  // 备份面板暂时留在原位：它不属于三通道中的任何一条，后续步骤再单独安置。
+  const backup = `${state.backupOpen ? "" : `<div class="backup-launcher-row"><button class="outline-button" id="backup-open-button" type="button">相机备份预览</button></div>`}${renderBackupPanel()}`;
+  return `${firstSeen}${renderStatusBanner()}${backup}`;
 }
 
 /**

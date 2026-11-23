@@ -2,7 +2,11 @@
 import { app } from "../render/context";
 import { OVERLAY_ENTER_MS, OVERLAY_LEAVE_MS, beginOverlayTransition } from "../render/overlay-transition";
 import { patchSidebar, renderShell } from "../render/shell";
-import { patchToolbar } from "../render/toolbar";
+import {
+  patchErrorBar as patchErrorBarRegion,
+  patchTaskPill as patchTaskPillRegion,
+  patchToolbar,
+} from "../render/toolbar";
 import { patchGrid } from "../render/virtual";
 import { state } from "../state";
 import { aiChatReady, renderAiChatDrawer, setupAiChatResize } from "../views/ai-chat";
@@ -200,6 +204,21 @@ export function renderOverlays(): void {
   }
   // 预览容器刚建好、或刚换了图，都由这里补一次装载。
   if (preview.load && state.previewIndex !== null) void loadModalAsset();
+}
+
+/**
+ * 反馈三通道里的两块常驻区域，单独 patch 入口。
+ *
+ * 整块刷新走 patchToolbar()（它内部已按顺序带上这两条通道）；只有「关掉一条
+ * 通知」「取消/展开一个任务」这种局部动作才从这里直调，避免连带重画标题、
+ * 筛选行与选择工具栏。
+ */
+export function patchErrorBar(): void {
+  patchErrorBarRegion();
+}
+
+export function patchTaskPill(): void {
+  patchTaskPillRegion();
 }
 
 /**
