@@ -502,7 +502,7 @@ impl UreqTransport {
         api_key: &str,
         body: &serde_json::Value,
         stream: bool,
-    ) -> Result<ureq::Response, ureq::Error> {
+    ) -> Result<ureq::Response, Box<ureq::Error>> {
         let mut request = agent.post(url);
         if stream {
             request = request.set("Accept", "text/event-stream");
@@ -510,7 +510,9 @@ impl UreqTransport {
         if let Some((name, value)) = authorization_header(api_key) {
             request = request.set(name, &value);
         }
-        request.send_json(body.clone())
+        // `ureq::Error` 带整份响应，直接塞进 `Result` 会让返回值超过 clippy 的
+        // 体积阈值；这里只是内部单次转交，装箱几乎没有额外成本。
+        request.send_json(body.clone()).map_err(Box::new)
     }
 
     /// 先按原参数发；若 400 明确点名采样参数不受支持，去掉它们再发一次。
@@ -524,15 +526,17 @@ impl UreqTransport {
     ) -> Result<ureq::Response, AppError> {
         match Self::post_once(agent, url, api_key, body, stream) {
             Ok(response) => Ok(response),
-            Err(ureq::Error::Status(400, response)) => {
-                let text = response.into_string().unwrap_or_default();
-                if !is_sampling_param_rejection(&text) {
-                    return Err(map_status_error("对话模型请求", 400, &text));
+            Err(error) => match *error {
+                ureq::Error::Status(400, response) => {
+                    let text = response.into_string().unwrap_or_default();
+                    if !is_sampling_param_rejection(&text) {
+                        return Err(map_status_error("对话模型请求", 400, &text));
+                    }
+                    Self::post_once(agent, url, api_key, &without_sampling_params(body), stream)
+                        .map_err(|error| map_http_error("对话模型请求", *error))
                 }
-                Self::post_once(agent, url, api_key, &without_sampling_params(body), stream)
-                    .map_err(|error| map_http_error("对话模型请求", error))
-            }
-            Err(error) => Err(map_http_error("对话模型请求", error)),
+                error => Err(map_http_error("对话模型请求", error)),
+            },
         }
     }
 }
