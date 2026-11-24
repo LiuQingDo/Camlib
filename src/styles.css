@@ -3255,7 +3255,7 @@ h1 {
 }
 /* Immersive viewer: a compact glass chrome surrounds a larger, calm media stage. */
 .preview-modal {
-  width: min(94vw, 1180px);
+  width: min(94vw, 1280px);
   height: min(88vh, 820px);
   border-color: rgba(255, 255, 255, 0.4);
   border-radius: 28px;
@@ -3371,14 +3371,121 @@ h1 {
   color: #a0a0a0;
   font-size: 11px;
 }
+/* 底部提示区：一条主提示 + `?` + 「已加载 x / y」小字。
+   提示不再在窄窗口整条 display:none——它被截断成一行省略号，仍然可读。 */
+.modal-hint-row {
+  position: relative;
+  display: flex !important;
+  flex: 1 0 100%;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
 .modal-hint {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 6px 9px;
+  overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 9px;
   color: #888888 !important;
   background: rgba(255, 255, 255, 0.05);
   font-size: 10px !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal-hint-more {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  color: #888888;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-hint-more:hover,
+.modal-hint-more[aria-expanded="true"] {
+  color: #111111;
+  background: rgba(255, 255, 255, 0.9);
+}
+.modal-hint-pop {
+  position: absolute;
+  z-index: 12;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: flex;
+  width: 232px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  color: #333333;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.16),
+    inset 0 1px rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  animation: hint-pop-in 0.16s ease both;
+}
+.modal-hint-pop[hidden] {
+  display: none;
+}
+.modal-hint-row .modal-hint-pop strong {
+  margin-bottom: 2px;
+  color: #111111;
+  font-size: 11px;
+}
+.hint-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.hint-row kbd {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  color: #333333;
+  background: rgba(0, 0, 0, 0.04);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 650;
+}
+.hint-row span {
+  color: #666666 !important;
+  font-size: 10px !important;
+  text-align: right;
+}
+.modal-loaded-note {
+  flex: 0 0 auto;
+  color: #8a8a8a !important;
+  font-size: 10px !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.modal-loaded-note[hidden] {
+  display: none;
+}
+@keyframes hint-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 @media (max-width: 720px) {
   .preview-modal {
@@ -3414,8 +3521,9 @@ h1 {
     min-height: 64px;
     padding: 12px 16px;
   }
+  /* 窄窗口只压缩提示，不再整条藏掉（藏掉等于告诉用户"没有快捷键"）。 */
   .modal-hint {
-    display: none;
+    padding: 5px 7px;
   }
 }
 /* Keep the viewer in the same light, translucent material family as the library. */
@@ -3522,6 +3630,9 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  /* 提示行独占第二行：挤在工具列里会被压成十几个字就省略。 */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 .modal-caption > .modal-caption-copy,
 .modal-caption-copy {
@@ -3736,6 +3847,58 @@ h1 {
 }
 .modal-meta.is-hidden {
   display: none;
+}
+/* 窄弹窗：信息面板从右侧栏改为盖在画面底部的抽屉。
+   判定看弹窗自身宽度（.is-drawer 由 JS 的 ResizeObserver 挂），不是窗口宽度——
+   窗口宽但弹窗被拖窄时，侧栏会把主图挤成一条。 */
+.preview-modal.is-drawer .modal-body {
+  position: relative;
+}
+.preview-modal.is-drawer .modal-meta {
+  position: absolute;
+  z-index: 8;
+  inset: auto 8px 8px;
+  width: auto;
+  max-height: 58%;
+  margin: 0;
+  flex: 0 0 auto;
+  border-radius: 16px;
+  box-shadow:
+    0 -10px 30px rgba(0, 0, 0, 0.16),
+    inset 0 1px rgba(255, 255, 255, 0.86);
+  animation: drawer-in 0.2s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+}
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+/* 关掉动效时也关掉位移：只保留淡入淡出，别让抽屉"滑"进来。 */
+@media (prefers-reduced-motion: reduce) {
+  .zoom-chip,
+  .modal-hint-pop,
+  .preview-modal.is-drawer .modal-meta {
+    transform: none !important;
+    animation: none !important;
+  }
+}
+/* 信息面板底部：⤢ 按图片尺寸调整窗口（从头部移过来的）。 */
+.meta-panel-foot {
+  display: flex;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+  justify-content: flex-start;
+}
+.meta-fit-button {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 .meta-placeholder {
   color: #777777;
@@ -4627,27 +4790,72 @@ h1 {
 .photo-stage.is-original-ready .photo-zoom-hint {
   opacity: 0.55;
 }
-.photo-stage:fullscreen {
-  border-radius: 0;
-  background: #0a0a0a;
+/* 缩放比例 chip：画面右下角（挂在 .modal-stage 上，换图不会把它冲掉），
+   1.2s 后淡出；1:1（100%）时常亮。百分比是「画面相对原始像素的显示倍率」，
+   适配态通常只有 40–60%。 */
+.zoom-chip {
+  position: absolute;
+  z-index: 14;
+  right: 20px;
+  bottom: 16px;
+  padding: 4px 9px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 9px;
+  color: #333333;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity 0.24s ease,
+    transform 0.24s ease;
+  pointer-events: none;
 }
-.photo-stage:fullscreen img.modal-photo {
-  border: 0;
-  border-radius: 0;
+.zoom-chip.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.zoom-chip.is-pinned {
+  opacity: 0.6;
+  transform: translateY(0);
+}
+.preview-modal.is-immersive .zoom-chip {
+  right: 20px;
+  bottom: 20px;
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #eeeeee;
+  background: rgba(0, 0, 0, 0.5);
   box-shadow: none;
 }
-.photo-stage:fullscreen .photo-zoom-hint {
-  right: 18px;
-  bottom: 18px;
-  left: auto;
-  color: #dddddd;
-  background: rgba(0, 0, 0, 0.55);
-  border-color: rgba(255, 255, 255, 0.12);
+/* 实况首帧角标：告诉用户"这不是一张静图"，点一下就会动。 */
+.live-badge {
+  position: absolute;
+  z-index: 3;
+  top: 10px;
+  left: 10px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 7px;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.46);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  pointer-events: none;
 }
-.photo-stage:fullscreen .photo-load-status {
-  color: #eeeeee;
-  background: rgba(0, 0, 0, 0.55);
-  border-color: rgba(255, 255, 255, 0.14);
+.live-still-stack.is-under .live-badge,
+.live-preview[data-live-playing="true"] .live-badge {
+  opacity: 0;
+}
+.live-preview img.live-still {
+  cursor: pointer;
 }
 .modal-media:has(.photo-stage) {
   overflow: hidden;
@@ -4665,20 +4873,17 @@ h1 {
 .live-still-stack.is-under img.live-still {
   visibility: hidden;
 }
+/* 窄窗口不再藏信息面板与舞台提示：
+   面板由 .is-drawer 变底部抽屉，提示被截断但仍在。只有实况说明留着藏——
+   它和底部主提示说同一件事，空间不够时优先保主提示。 */
 @media (max-width: 900px) {
-  .modal-meta {
-    display: none;
-  }
   .live-caption {
-    display: none;
-  }
-  .photo-zoom-hint {
     display: none;
   }
 }
 
-/* Immersive viewer — pure media, no chrome, free pan + Ctrl+wheel resize. */
-.immersive-exit {
+/* 专注视图 — 只剩画面与一个浮动退出按钮（F / Esc 同效，不调 Fullscreen API）。 */
+.focus-exit {
   display: none;
   position: fixed;
   z-index: 30;
@@ -4702,7 +4907,7 @@ h1 {
     background 0.18s ease,
     transform 0.18s ease;
 }
-.immersive-exit:hover {
+.focus-exit:hover {
   color: #ffffff;
   background: rgba(40, 40, 40, 0.72);
   transform: translateY(-1px);
@@ -4737,7 +4942,7 @@ h1 {
 .preview-modal.is-immersive .modal-nav {
   display: none !important;
 }
-.preview-modal.is-immersive .immersive-exit {
+.preview-modal.is-immersive .focus-exit {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4852,7 +5057,7 @@ h1 {
   .modal-caption-tools {
     gap: 6px;
   }
-  .immersive-exit {
+  .focus-exit {
     top: 12px;
     right: 12px;
   }
@@ -7764,6 +7969,45 @@ details.ai-advanced .settings-form {
   color: var(--faint) !important;
   background: rgba(255, 255, 255, 0.05);
 }
+[data-theme="dark"] .modal-hint-more {
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+}
+[data-theme="dark"] .modal-hint-more:hover,
+[data-theme="dark"] .modal-hint-more[aria-expanded="true"] {
+  color: var(--ink);
+  background: rgba(70, 70, 72, 0.95);
+}
+[data-theme="dark"] .modal-hint-pop {
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+[data-theme="dark"] .modal-hint-row .modal-hint-pop strong {
+  color: var(--ink);
+}
+[data-theme="dark"] .hint-row kbd {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+[data-theme="dark"] .hint-row span {
+  color: var(--muted) !important;
+}
+[data-theme="dark"] .modal-loaded-note {
+  color: var(--faint) !important;
+}
+[data-theme="dark"] .zoom-chip {
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--ink);
+  background: rgba(40, 40, 42, 0.85);
+  box-shadow: none;
+}
+[data-theme="dark"] .meta-panel-foot {
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
 [data-theme="dark"] .modal-actions .outline-button,
 [data-theme="dark"] .modal-tool-button,
 [data-theme="dark"] .modal-folder-button {
@@ -8834,16 +9078,12 @@ details.ai-advanced .settings-form {
 .dialog-resize-handle:hover {
   color: rgba(0, 0, 0, 0.55);
 }
-/* 右上角「按媒体尺寸自适应弹窗」按钮：与关闭按钮同组相邻排列，
-   复用 .modal-close 圆形玻璃外观；字号略小以容纳 ⤢ 图标。 */
+/* 头部只剩关闭按钮；「按媒体尺寸自适应」已移进信息面板底部（.meta-fit-button）。 */
 .modal-header-actions {
   display: flex;
   flex-shrink: 0;
   gap: 8px;
   align-items: center;
-}
-.modal-fit-button {
-  font-size: 17px;
 }
 .dialog-resize-handle.is-n {
   top: 0;

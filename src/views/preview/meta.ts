@@ -103,5 +103,6 @@ export function renderMetaPanel(meta: PreviewMetaDto | null, item: MediaItemDto)
     }
     <h4>关联文件</h4>
     <ul class="meta-files">${files}</ul>
+    <div class="meta-panel-foot"><button type="button" class="outline-button meta-fit-button" id="preview-fit" title="把弹窗调成这张图的最佳尺寸">⤢ 按图片尺寸调整窗口</button></div>
   </div>`;
 }

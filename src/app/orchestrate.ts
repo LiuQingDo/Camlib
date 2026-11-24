@@ -21,7 +21,7 @@ import {
   setupDialogResizing,
 } from "../views/dialogs";
 import { closeEditor, renderEditor } from "../views/editor";
-import { loadModalAsset, patchPreviewFrame, renderPreview } from "../views/preview";
+import { bindPreviewLayoutObserver, loadModalAsset, patchPreviewFrame, renderPreview } from "../views/preview";
 import { renderDeletedPanel } from "../views/deleted";
 import { renderSettingsPanel, updateSettingsPanel } from "../views/settings";
 import { bindDeletedOverlayEvents, bindOverlayEvents } from "./bindings/overlay";
@@ -399,6 +399,9 @@ export function renderOverlays(): void {
     applyDialogSizes();
     setupDialogResizing();
     setupAiChatResize();
+    // 几何落定之后再算预览布局：信息面板是右侧栏还是底部抽屉，取决于弹窗
+    // 真实宽度（不是窗口宽度），而宽度刚由 applyDialogSizes 写进 inline style。
+    bindPreviewLayoutObserver();
   }
   // 预览容器刚建好、或刚换了图，都由这里补一次装载。
   if (preview.load && state.previewIndex !== null) void loadModalAsset();

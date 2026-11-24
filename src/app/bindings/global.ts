@@ -29,10 +29,9 @@ import { applyDialogSizes, mergeUpdateFooter } from "../../views/dialogs";
 import { closeEditor } from "../../views/editor";
 import { editorUpdateFooter } from "../../views/editor/shared";
 import {
-  movePreview,
+  navigatePreview,
+  toggleFocusMode,
   toggleLivePreview,
-  togglePreviewFullscreen,
-  togglePreviewImmersive,
   togglePreviewInfo,
   togglePreviewMute,
   togglePreviewPlayback,
@@ -164,7 +163,7 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
-  // 预览的 Esc 阶梯（全屏 → 沉浸 → 标签选择器 → 关预览）只有一份实现：
+  // 预览的 Esc 阶梯（专注 → ? 浮层 → 标签选择器 → 关预览）只有一份实现：
   // 焦点在弹窗里时由焦点陷阱先调它，这里兜住焦点落在弹窗外的破例情况。
   if (event.key === "Escape") {
     event.preventDefault();
@@ -173,12 +172,12 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
     event.preventDefault();
-    movePreview(-1);
+    void navigatePreview(-1);
     return;
   }
   if (event.key === "ArrowRight" || event.key === "ArrowDown") {
     event.preventDefault();
-    movePreview(1);
+    void navigatePreview(1);
     return;
   }
   if (event.key === " " || event.key === "Spacebar") {
@@ -200,19 +199,16 @@ window.addEventListener("keydown", (event) => {
     togglePreviewPlayback();
     return;
   }
+  // F = 专注视图。这里刻意不调浏览器 Fullscreen API：Tauri 窗口下的系统全屏
+  // 退出路径不受我们控制，而「专注」只需隐藏 chrome。
   if (event.key === "f" || event.key === "F") {
     event.preventDefault();
-    togglePreviewFullscreen();
+    toggleFocusMode();
     return;
   }
   if (event.key === "i" || event.key === "I") {
     event.preventDefault();
     togglePreviewInfo();
-    return;
-  }
-  if (event.key === "e" || event.key === "E") {
-    event.preventDefault();
-    togglePreviewImmersive();
     return;
   }
   if (event.key === "l" || event.key === "L") {

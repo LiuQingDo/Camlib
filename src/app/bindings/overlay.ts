@@ -5,13 +5,12 @@ import { bindMergeModalEvents, bindSettingsEvents, openSettings, render } from "
 import { searchUi } from "../../render/toolbar";
 import { state } from "../../state";
 import { aiChatUi, autoGrowAiChatInput, closeAiChatDrawer, sendAiChatMessage } from "../../views/ai-chat";
-import { adaptDialogToMedia } from "../../views/dialogs";
 import { openEditor } from "../../views/editor";
 import {
   closePreview,
-  movePreview,
-  togglePreviewFullscreen,
-  togglePreviewImmersive,
+  navigatePreview,
+  toggleFocusMode,
+  togglePreviewHintPopover,
   togglePreviewInfo,
 } from "../../views/preview";
 import { closeDeletedPanel, loadDeletedItems, openDeletedItemFolder } from "../deleted-ops";
@@ -23,26 +22,23 @@ import { commitSemanticSearch } from "./toolbar";
 /** 弹窗区：预览 / 删除确认 / AI 抽屉 / 编辑器 / 合并 / 标签管理 / 设置。 */
 export function bindOverlayEvents(): void {
   bind(app.querySelector("#close-preview"), "click", closePreview);
-  // 实况默认展示静帧：优先取视频帧尺寸（未就绪时内部等待元数据），否则取静帧图片。
-  bind(app.querySelector("#preview-fit"), "click", () => {
-    const media = app.querySelector<HTMLElement>("#modal-media");
-    const video = media?.querySelector<HTMLVideoElement>("video:not([hidden])");
-    adaptDialogToMedia("preview", video ?? media?.querySelector<HTMLImageElement>("img") ?? null);
-  });
   bind(app.querySelector("#preview-modal"), "click", (event) => {
     if (event.target === event.currentTarget) closePreview();
   });
-  bind(app.querySelector("#preview-prev"), "click", () => movePreview(-1));
-  bind(app.querySelector("#preview-next"), "click", () => movePreview(1));
+  bind(app.querySelector("#preview-prev"), "click", () => void navigatePreview(-1));
+  bind(app.querySelector("#preview-next"), "click", () => void navigatePreview(1));
+  // TODO(14)：编辑器目前仍是独立 overlay。目标形态是预览内 viewMode: "view" | "edit"
+  // 切换（保存后就地替换当前图并 toast），这样「编辑」不用先关预览、也不用第二套
+  // 焦点陷阱。改动横跨 views/editor 与 orchestrate 的弹窗装配，本次先保持现状。
   bind(app.querySelector("#preview-edit"), "click", () => {
     const item = state.previewIndex === null ? undefined : state.page.items[state.previewIndex];
     if (item) void openEditor(item);
   });
   bind(app.querySelector("#preview-info-toggle"), "click", () => togglePreviewInfo());
-  bind(app.querySelector("#preview-fullscreen"), "click", () => togglePreviewFullscreen());
-  bind(app.querySelector("#preview-immersive"), "click", () => togglePreviewImmersive());
-  // Immersive exit is a leave-viewer action: return to the grid, not the framed modal.
-  bind(app.querySelector("#preview-immersive-exit"), "click", () => closePreview());
+  bind(app.querySelector("#preview-focus"), "click", () => toggleFocusMode());
+  bind(app.querySelector("#preview-hint-more"), "click", () => togglePreviewHintPopover());
+  // 专注视图是「隐藏 chrome」而不是离开预览：浮动按钮只退出专注，不关弹窗。
+  bind(app.querySelector("#preview-focus-exit"), "click", () => toggleFocusMode(false));
   bind(app.querySelector("#cancel-delete-confirm"), "click", cancelDeleteConfirm);
   bind(app.querySelector("#cancel-delete-confirm-footer"), "click", cancelDeleteConfirm);
   bind(app.querySelector("#confirm-delete"), "click", () => void runConfirmedDelete());

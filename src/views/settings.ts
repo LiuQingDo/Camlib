@@ -748,7 +748,7 @@ export function renderSettingsSystemSection(): string {
   return `<div class="settings-section-body">
     <div class="settings-status-card">
       <h3>查看偏好</h3>
-      <div class="settings-note">主题与默认查看方式即时保存。查看过程中仍可用底部「沉浸」按钮临时切换。</div>
+      <div class="settings-note">主题与默认查看方式即时保存。查看过程中仍可用底部「专注」按钮临时切换。</div>
       <div class="settings-form">
         <label><span>主题</span><select id="settings-theme" aria-label="界面主题">
           <option value="light" ${state.theme === "light" ? "selected" : ""}>浅色</option>
@@ -756,13 +756,13 @@ export function renderSettingsSystemSection(): string {
         </select></label>
         <label><span>默认查看方式</span><select id="settings-preview-mode" aria-label="默认媒体查看方式">
           <option value="standard" ${state.previewMode === "standard" ? "selected" : ""}>标准查看（带信息与工具栏）</option>
-          <option value="immersive" ${state.previewMode === "immersive" ? "selected" : ""}>沉浸式查看（纯媒体展示）</option>
+          <option value="immersive" ${state.previewMode === "immersive" ? "selected" : ""}>专注视图（纯媒体展示）</option>
         </select></label>
         <div class="settings-actions">
           <button class="primary-button" type="button" id="settings-save-preview-mode">保存查看方式</button>
         </div>
       </div>
-      <div class="settings-note">沉浸式：无多余边框，支持任意位置拖动平移，Ctrl+滚轮缩放，Esc 退出。主题与侧栏按钮同步。</div>
+      <div class="settings-note">专注视图：无多余边框，支持任意位置拖动平移，滚轮翻页，Ctrl+滚轮缩放，Esc / F 退出。</div>
     </div>
     <div class="settings-status-card">
       <h3>弹窗大小</h3>

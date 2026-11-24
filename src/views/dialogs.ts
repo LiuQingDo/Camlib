@@ -25,7 +25,8 @@ export const DIALOG_SPECS: Record<string, DialogSpec> = {
   preview: {
     selector: "#preview-modal .preview-modal",
     label: "媒体预览",
-    width: 1050,
+    // 默认宽度要越过信息面板的侧栏/抽屉断点（1200），否则一打开就是抽屉形态。
+    width: 1280,
     height: 780,
     minWidth: 560,
     minHeight: 380,
@@ -169,7 +170,7 @@ export function applyDialogSizes(): void {
 /**
  * Give every mounted dialog 8-direction resize handles. Handles are appended
  * after each render() together with the dialog DOM; `data-resize-bound` keeps
- * the immersive-exit re-run from duplicating them on a surviving dialog.
+ * the focus-mode toggle from duplicating them on a surviving dialog.
  */
 export function setupDialogResizing(): void {
   for (const [id, spec] of Object.entries(DIALOG_SPECS)) {

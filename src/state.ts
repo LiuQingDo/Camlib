@@ -97,9 +97,9 @@ export interface AppState {
   expandedYears: Set<string>;
   sort: SortMode;
   density: Density;
-  /** Default preview surface: framed modal or immersive pure media. */
+  /** Default preview surface: framed modal or focus view (pure media). */
   previewMode: UiPreviewMode;
-  /** 预览是否处于沉浸态（对话框几何计算与渲染都要读）。 */
+  /** 预览是否处于专注视图（对话框几何计算、CSS 与渲染都要读）。 */
   previewImmersive: boolean;
   /** Light / dark chrome; persisted via set_ui_prefs (not localStorage). */
   theme: UiTheme;
