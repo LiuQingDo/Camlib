@@ -2,14 +2,17 @@
 import {
   applyDateRangeInputs,
   applyDateRangePreset,
-  applyRatingFilter,
   changeSortMode,
   clearAllFilters,
   clearDateRange,
   commitDensity,
   openMediaCard,
   previewDensity,
+  removeFilter,
+  setAiSearchEnabled,
   setKindFilter,
+  setRatingMin,
+  setRatingUnratedOnly,
   toggleBurstOnlyFilter,
   toggleCardSelection,
   toggleFavoriteOnlyFilter,
@@ -30,7 +33,7 @@ import { state } from "../state";
 import { loadModalAsset, toggleLivePreview } from "../views/preview";
 import { app } from "./context";
 import { applyThumbnailToCard, markThumbnailRetryable } from "./grid";
-import { applySelectionChrome, toggleAdvancedFilters, toggleToolbarTagPopover } from "./toolbar";
+import { applySelectionChrome, closeFilterPanel, toggleFilterPanel } from "./toolbar";
 
 // ---------------------------------------------------------------------------
 // 事件委托（S3a）：媒体卡片区 + 粘性工具栏
@@ -69,15 +72,17 @@ export type ClickAction =
   | "filter-kind"
   | "filter-favorites"
   | "filter-burst"
-  | "filter-tag"
-  | "toggle-tag-popover"
+  | "filter-rating-min"
+  | "toggle-filter-panel"
+  | "remove-filter"
+  | "close-filter-panel"
+  | "reset-filters"
   | "open-tag-manager"
-  | "toggle-advanced-filters"
-  | "clear-filters"
   | "date-preset"
   | "clear-date-range";
 
-export type ChangeAction = "filter-rating" | "apply-date-range" | "sort-change" | "density-input";
+export type ChangeAction =
+  "filter-tag" | "filter-rating-unrated" | "filter-ai-search" | "apply-date-range" | "sort-change" | "density-input";
 
 export type InputAction = "density-input";
 
@@ -112,17 +117,20 @@ export const delegatedClickActions: Record<ClickAction, DelegatedHandler> = {
   "filter-kind": (chip) => setKindFilter(chip.dataset.kind ?? ""),
   "filter-favorites": () => toggleFavoriteOnlyFilter(),
   "filter-burst": () => toggleBurstOnlyFilter(),
-  "filter-tag": (chip) => toggleTagFilter(chip.dataset.tagFilter ?? ""),
-  "toggle-tag-popover": () => toggleToolbarTagPopover(),
+  "filter-rating-min": (button) => setRatingMin(Number(button.dataset.rating)),
+  "toggle-filter-panel": () => toggleFilterPanel(),
+  "remove-filter": (chip) => removeFilter(chip.dataset.removeFilter ?? ""),
+  "close-filter-panel": () => closeFilterPanel(),
+  "reset-filters": () => clearAllFilters(),
   "open-tag-manager": () => openTagManager(),
-  "toggle-advanced-filters": () => toggleAdvancedFilters(),
-  "clear-filters": () => clearAllFilters(),
   "date-preset": (chip) => applyDateRangePreset(chip.dataset.rangePreset),
   "clear-date-range": () => clearDateRange(),
 };
 
 export const delegatedChangeActions: Record<ChangeAction, DelegatedHandler> = {
-  "filter-rating": (select) => applyRatingFilter((select as HTMLSelectElement).value),
+  "filter-tag": (input) => toggleTagFilter(input.dataset.tagId ?? ""),
+  "filter-rating-unrated": (input) => setRatingUnratedOnly((input as HTMLInputElement).checked),
+  "filter-ai-search": (input) => setAiSearchEnabled((input as HTMLInputElement).checked),
   // from / to 两个输入框共用：任一变更都重读两侧的值。
   "apply-date-range": () => applyDateRangeInputs(),
   "sort-change": (select) => changeSortMode((select as HTMLSelectElement).value),

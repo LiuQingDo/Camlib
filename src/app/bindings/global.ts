@@ -14,7 +14,7 @@ import { formatCount } from "../../lib/format";
 import { previewAssetCache } from "../../media/cache";
 import { app } from "../../render/context";
 import { render, renderSettingsAware } from "../../render/paint";
-import { closeTagFilterPopover, patchToolbar, tagPopoverOpen, updateScanProgressView } from "../../render/toolbar";
+import { closeFilterPanel, filterPanelOpen, patchToolbar, updateScanProgressView } from "../../render/toolbar";
 import { invalidateGridGeometry, scheduleGridPaint } from "../../render/virtual";
 import { state } from "../../state";
 import { closeAiChatDrawer } from "../../views/ai-chat";
@@ -114,11 +114,10 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
-  // The toolbar tag popover closes before the "/" shortcut / preview Escape
-  // paths can act on the same keypress.
-  if (tagPopoverOpen && event.key === "Escape") {
+  // 筛选面板是这一层里最轻的浮层：先关它，别让 Esc 顺手把预览/抽屉也关掉。
+  if (filterPanelOpen && event.key === "Escape") {
     event.preventDefault();
-    closeTagFilterPopover();
+    closeFilterPanel();
     return;
   }
   if (state.previewIndex === null) {

@@ -1,9 +1,17 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { MediaKind } from "../../api/media";
+import { presetRange, type DatePresetId } from "../../lib/date-range";
 import { collectRangeIds } from "../../lib/selection";
 import { app } from "../../render/context";
 import { persistUiPrefs, refreshMedia, render } from "../../render/paint";
-import { applySelectionChrome, resetSidebarExpansionForSelection, searchUi } from "../../render/toolbar";
+import { patchSidebar } from "../../render/shell";
+import {
+  applySelectionChrome,
+  patchToolbar,
+  resetSidebarExpansionForSelection,
+  searchUi,
+  syncSearchChrome,
+} from "../../render/toolbar";
 import { invalidateGridGeometry, scheduleGridPaint } from "../../render/virtual";
 import { Density, SortMode, state } from "../../state";
 
@@ -47,38 +55,144 @@ export function clearFiltersKeepSearch(): void {
 /**
  * 工具栏命令。原先是 bindEvents 里的内联回调；改成事件委托后由派发表按
  * data-action 调用，state 变更顺序与原实现逐条一致。
+ *
+ * 单项条件（类型 / 收藏 / 连拍 / 标签 / 评分 / 日期 / 逐项移除）一律
+ * `resetScroll: false`：改一个条件就把视图拽回顶部，等于每次点 chip 都丢掉
+ * 用户刚滚到的位置。只有「重置全部」这类整轮重置才回顶部。
  */
 export function setKindFilter(kind: string): void {
   // 筛选是 AND 集合：切换类型只改 kind，不能顺手清掉收藏/连拍。
   // 旧实现会重置这两项，导致「只看收藏的视频」无法表达，也让 chip 与查询不同步。
   state.kind = (kind || undefined) as MediaKind | undefined;
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
 export function toggleFavoriteOnlyFilter(): void {
   // 收藏与连拍各自独立切换，可以与类型、标签等条件任意叠加。
   state.favoriteOnly = !state.favoriteOnly;
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
 export function toggleBurstOnlyFilter(): void {
   state.burstOnly = !state.burstOnly;
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
 export function toggleTagFilter(tagId: string): void {
   if (!tagId) return;
   if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
   else state.tagIds.add(tagId);
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
-export function applyRatingFilter(value: string): void {
+/**
+ * 评分下限（≥N★）。点击当前已选的那一档视为取消，因此点同一颗星两次等于
+ * 「不限」；`未评分` 与区间下限互斥，设下限时清掉它。
+ */
+export function setRatingMin(value: number): void {
+  const next = Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
+  state.ratingMin = state.ratingMin === next ? null : next;
   state.ratingEq = null;
-  state.ratingMin = null;
-  if (value.startsWith("eq:")) state.ratingEq = Number(value.slice(3));
-  else if (value.startsWith("min:")) state.ratingMin = Number(value.slice(4));
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
+}
+
+/** 「只看未评分」开关：ratingEq=0 是既有查询字段，不动后端参数。 */
+export function setRatingUnratedOnly(enabled: boolean): void {
+  state.ratingEq = enabled ? 0 : null;
+  if (enabled) state.ratingMin = null;
+  void refreshMedia({ resetScroll: false });
+}
+
+function decodeFilterValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * 逐项移除 chips：`data-remove-filter="<key>:<encodeURIComponent(value)>"`。
+ * 只改这一项条件，其余条件原样保留，且不回顶部。
+ */
+export function removeFilter(raw: string): void {
+  const separator = raw.indexOf(":");
+  const key = separator < 0 ? raw : raw.slice(0, separator);
+  const value = separator < 0 ? "" : decodeFilterValue(raw.slice(separator + 1));
+  switch (key) {
+    case "kind":
+      state.kind = undefined;
+      break;
+    case "favorite":
+      state.favoriteOnly = false;
+      break;
+    case "burst":
+      state.burstOnly = false;
+      break;
+    case "tag":
+      state.tagIds.delete(value);
+      break;
+    case "date":
+      state.datePrefix = undefined;
+      state.dateFrom = undefined;
+      state.dateTo = undefined;
+      // 侧栏的年/月选中态由同一份 state 决定，摘掉日期后要跟着取消高亮。
+      patchSidebar();
+      break;
+    case "rating":
+      state.ratingEq = null;
+      state.ratingMin = null;
+      break;
+    case "semantic":
+      state.semanticSearch = null;
+      state.semanticMeta = null;
+      state.semanticMode = null;
+      searchUi.semantic = "";
+      searchUi.mode = "text";
+      patchToolbar();
+      break;
+    default:
+      return;
+  }
+  void refreshMedia({ resetScroll: false });
+}
+
+/**
+ * 面板里的「AI 语义检索」开关：复用顶栏搜索框的 semantic 模式，不另建管线。
+ * 打开只是切到 AI 模式并把光标放进搜索框；真正的查询仍由回车提交。
+ */
+export function setAiSearchEnabled(enabled: boolean): void {
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  if (searchUi.mode === (enabled ? "ai" : "text")) {
+    patchToolbar();
+    if (enabled) input?.focus();
+    return;
+  }
+  let changed = false;
+  if (enabled) {
+    // 普通搜索词与 AI 检索互斥（与 commitSemanticSearch 的收尾一致）。
+    if (state.search) {
+      state.search = "";
+      searchUi.draft = "";
+      changed = true;
+    }
+    searchUi.mode = "ai";
+    if (input) input.value = searchUi.semantic;
+  } else {
+    if (state.semanticSearch) {
+      state.semanticSearch = null;
+      state.semanticMeta = null;
+      state.semanticMode = null;
+      changed = true;
+    }
+    searchUi.semantic = "";
+    searchUi.mode = "text";
+    if (input) input.value = searchUi.draft;
+  }
+  syncSearchChrome();
+  if (changed) void refreshMedia({ resetScroll: false });
+  else patchToolbar();
+  if (enabled) input?.focus();
 }
 
 /** 日期区间输入框（from / to 任一变更都重算整段区间）。 */
@@ -92,42 +206,31 @@ export function applyDateRangeInputs(): void {
     // 只能把一种日期条件写进标题，两者叠加会让标题在「2025-03」和
     // 「2025-03-01 ~ 2025-03-31」之间二选一，产生歧义。
     // 其余筛选（类型 / 收藏 / 连拍 / 标签 / 评分…）一律 AND 叠加。
-    state.datePrefix = undefined;
+    if (state.datePrefix) {
+      state.datePrefix = undefined;
+      patchSidebar();
+    }
   }
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
 export function clearDateRange(): void {
   state.dateFrom = undefined;
   state.dateTo = undefined;
-  void refreshMedia();
+  void refreshMedia({ resetScroll: false });
 }
 
 export function applyDateRangePreset(preset: string | undefined): void {
-  const today = new Date();
-  const toIso = (date: Date) => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  };
-  if (preset === "month") {
-    state.dateFrom = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
-    state.dateTo = toIso(today);
-  } else if (preset === "year") {
-    state.dateFrom = `${today.getFullYear()}-01-01`;
-    state.dateTo = toIso(today);
-  } else if (preset === "days30") {
-    const start = new Date(today);
-    start.setDate(start.getDate() - 29);
-    state.dateFrom = toIso(start);
-    state.dateTo = toIso(today);
-  } else {
-    return;
-  }
+  const range = presetRange(preset as DatePresetId);
+  if (!range) return;
+  state.dateFrom = range.from;
+  state.dateTo = range.to;
   // 预设区间同样清掉日期前缀：前缀 vs 区间是唯一合法互斥（见 applyDateRangeInputs）。
-  state.datePrefix = undefined;
-  void refreshMedia();
+  if (state.datePrefix) {
+    state.datePrefix = undefined;
+    patchSidebar();
+  }
+  void refreshMedia({ resetScroll: false });
 }
 
 export function changeSortMode(value: string): void {

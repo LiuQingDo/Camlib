@@ -168,8 +168,6 @@ export interface AppState {
   ffmpegMissing: boolean;
   /** 用户点过「知道了」就本次运行不再提示；下次启动重新判断。 */
   ffmpegHintDismissed: boolean;
-  /** Sticky toolbar secondary filters (tags/date/rating) expanded state. */
-  filtersExpanded: boolean;
   /** Load-more failure message; sticky in the sentinel until retry (not the top banner). */
   loadMoreError: string | null;
   /** Library segment-merge maintenance. */
@@ -357,7 +355,6 @@ export const state: AppState = {
   recentTaskNotice: null,
   ffmpegMissing: false,
   ffmpegHintDismissed: false,
-  filtersExpanded: false,
   loadMoreError: null,
   libraryMergePreview: null,
   libraryMergeLoading: false,

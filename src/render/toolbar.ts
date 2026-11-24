@@ -2,11 +2,12 @@
 import { listNotices, syncStateNotices, type Notice } from "../app/notices";
 import { finishTask, listTasks, taskPercent, upsertTask, type Task } from "../app/tasks";
 import { MediaKind, MediaQueryInput, ScanProgressDto, TagDto } from "../api/media";
-import { hasAnyFilter, secondaryFilterParts } from "../lib/filters";
+import { matchDatePreset, type DatePresetId } from "../lib/date-range";
+import { formatDatePrefix, panelFilterCount, secondaryFilterParts } from "../lib/filters";
 import { formatCount, formatRangeLabel } from "../lib/format";
 import { SortMode, state } from "../state";
 import { app, region, setRegionHtml, setText } from "./context";
-import { bindStatusEvents, refreshMedia } from "./paint";
+import { bindStatusEvents } from "./paint";
 import { escapeHtml, formatDate, groupedFacets } from "./text";
 
 /**
@@ -26,13 +27,22 @@ export const searchUi: { draft: string; semantic: string; mode: SearchMode } = {
   mode: "text",
 };
 // Same draft discipline for the semantic (natural-language) search box.
-export let tagPopoverOpen = false;
+/**
+ * 筛选面板的开关与面板内 UI 状态。
+ *
+ * 都不进 `state`：它们不影响任何查询参数，放进去只会让「查询变了要刷新」
+ * 的判断多出三个噪音字段。模块级变量同样能在 patch 之间存活。
+ */
+export let filterPanelOpen = false;
 
-export let tagPopoverQuery = "";
+/** 面板内标签搜索词：面板重挂时回填，关一次不该把打了一半的词吃掉。 */
+let filterPanelTagQuery = "";
 
-export function hasSecondaryFilter(): boolean {
-  return secondaryFilterParts(state).length > 0;
-}
+/** 标签列表上次的滚动位置：面板重挂时恢复，选了深的标签不会跳回顶部。 */
+let filterPanelTagScroll = 0;
+
+/** 面板主行按钮的 `getBoundingClientRect()` 只在挂载与 patch 时读一次。 */
+const FILTER_PANEL_GAP = 6;
 
 export function primaryDateLabel(): string {
   if (state.firstSeenFrom) return "新导入";
@@ -130,9 +140,16 @@ export function updateFavoriteButton(id: string): void {
   button.setAttribute("aria-busy", String(pending));
 }
 
+/**
+ * 主行：类型 / 收藏 / 连拍 三个即时开关 + 「筛选 (n) ▾」。
+ *
+ * 永远只有一行：chip 组放在一个横向可滚的壳里（滚条隐藏），右侧的「筛选」
+ * 按钮固定在外层，窗口再窄也不会被挤出可见区。原来那行条件摘要与
+ * 折叠箭头一并删掉——条件改由下一行的 chips 逐项呈现。
+ */
 export function renderPrimaryFilters(): string {
   // 类型 chip 是普通 AND 条件，高亮必须严格等于 state.kind。
-  // 收藏 / 连拍 不再影响这里：它们可以和类型同时生效，也不会偷偷改查询。
+  // 收藏 / 连拍 各自独立切换，可以和类型同时生效，也不会偷偷改查询。
   const kinds = [
     { value: undefined, label: "全部" },
     { value: "photo" as MediaKind, label: "照片" },
@@ -145,167 +162,327 @@ export function renderPrimaryFilters(): string {
     )
     .join("");
   const kindGroup = `${kinds}<button class="filter-chip ${state.favoriteOnly ? "is-active" : ""}" type="button" id="favorite-filter" data-action="filter-favorites">收藏</button><button class="filter-chip ${state.burstOnly ? "is-active" : ""}" type="button" id="burst-filter" data-action="filter-burst">连拍</button>`;
-  const secondaryParts = secondaryFilterParts(state);
-  const hasSecondary = secondaryParts.length > 0;
-  const expanded = state.filtersExpanded;
-  const toggleLabel = hasSecondary && !expanded ? `筛选 (${secondaryParts.length})` : expanded ? "筛选" : "筛选";
-  const summary =
-    hasSecondary && !expanded
-      ? `<span class="filter-summary">${escapeHtml(secondaryParts.join(" · "))}</span><button class="text-button clear-summary-filters" data-action="clear-filters" type="button">清除</button>`
-      : "";
-  return `<div class="filter-group">${kindGroup}</div><span class="filter-divider" aria-hidden="true"></span><button class="filter-chip filter-toggle ${hasSecondary ? "has-active" : ""}" type="button" id="toggle-advanced-filters" data-action="toggle-advanced-filters" aria-expanded="${expanded}" aria-controls="advanced-filters">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${expanded ? "▴" : "▾"}</span></button>${summary}`;
+  const panelCount = panelFilterCount(state);
+  const toggleLabel = panelCount ? `筛选 (${panelCount})` : "筛选";
+  return `<div class="filter-row-scroll"><div class="filter-group">${kindGroup}</div></div><button class="filter-chip filter-toggle ${panelCount ? "has-active" : ""}" type="button" id="toggle-filter-panel" data-action="toggle-filter-panel" aria-expanded="${filterPanelOpen}" aria-haspopup="dialog" aria-controls="filter-panel">${toggleLabel}<span class="filter-toggle-caret" aria-hidden="true">${filterPanelOpen ? "▴" : "▾"}</span></button>`;
 }
 
-/** Inline toolbar chips: selected tags first, then hot tags by media count. */
-export function toolbarTagChips(): TagDto[] {
-  const selected = state.tags.filter((tag) => state.tagIds.has(tag.id));
-  const hot = state.tags
-    .filter((tag) => !state.tagIds.has(tag.id))
-    .sort((a, b) => (b.mediaCount ?? 0) - (a.mediaCount ?? 0) || a.name.localeCompare(b.name, "zh-Hans-CN"));
-  return [...selected, ...hot.slice(0, Math.max(0, 8 - selected.length))];
+/**
+ * 条件 chips：每个已生效条件一枚，顺序由 `secondaryFilterParts()` 固定。
+ * 点 × 立刻摘掉这一项且不回顶部；「重置全部」才把视图拉回顶端。
+ */
+export function renderFilterChips(): string {
+  return secondaryFilterParts(state)
+    .map((chip) => {
+      // value 可能是带冒号/斜杠的 AI 查询，编码后塞进属性，读回来再解。
+      const remove = `${chip.key}:${encodeURIComponent(chip.value)}`;
+      return `<span class="chip" data-chip="${chip.key}"><span class="chip-label" title="${escapeHtml(chip.label)}">${escapeHtml(chip.label)}</span><button class="chip-x" type="button" data-action="remove-filter" data-remove-filter="${escapeHtml(remove)}" aria-label="移除 ${escapeHtml(chip.label)}" title="移除">×</button></span>`;
+    })
+    .join("");
 }
 
-/** Tag count-descending view shared by the popover list and the picker. */
+/** Tag count-descending view for the panel's tag list. */
 export function sortedTagsByUsage(): TagDto[] {
   return state.tags
     .slice()
     .sort((a, b) => (b.mediaCount ?? 0) - (a.mediaCount ?? 0) || a.name.localeCompare(b.name, "zh-Hans-CN"));
 }
 
-export function tagPopoverHtml(): string {
-  const rows = sortedTagsByUsage()
-    .map(
-      (tag) =>
-        `<button type="button" class="tag-picker-row ${state.tagIds.has(tag.id) ? "is-active" : ""}" data-tag-popover-row="${escapeHtml(tag.id)}" data-tag-name="${escapeHtml(tag.name.toLowerCase())}"><span class="tag-picker-name">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</span>${tag.mediaCount != null ? `<span class="tag-picker-count">${formatCount(tag.mediaCount)} 项</span>` : ""}<span class="tag-picker-check" aria-hidden="true">✓</span></button>`,
-    )
-    .join("");
-  return `<div class="tag-popover" id="tag-filter-popover"><div class="tag-picker-search"><span aria-hidden="true">⌕</span><input id="tag-popover-input" type="text" placeholder="搜索标签" value="${escapeHtml(tagPopoverQuery)}" aria-label="搜索标签" /></div><div class="tag-picker-list" id="tag-popover-list">${rows}<div class="tag-picker-empty" data-picker-empty hidden>没有匹配的标签</div></div></div>`;
+// ---------------------------------------------------------------------------
+// 筛选面板（非模态浮层）
+//
+// 旧的三套范式——主行折叠层、吸顶条里的 132px 内滚动层、挂在吸顶条上的
+// 标签浮层——合并成一个面板：
+//   · 浮层挂在 `#overlay-host` 的 `[data-overlay="filters"]` 槽位，位置由主行
+//     按钮的 rect 算出来，因此不会被 sticky 条的圆角或溢出裁切；
+//   · 面板内只有标签列表一处滚动，其它分组按内容撑开；
+//   · 控件全是原生 input/checkbox/button，自造日历与下拉只会把键盘、区域格式
+//     和可访问性一起做丢。
+// ---------------------------------------------------------------------------
+
+/** 标签列表的结构签名：标签增删或计数变化才重建行，否则原地同步勾选态。 */
+function tagSignature(): string {
+  return state.tags.map((tag) => `${tag.id}:${tag.name}:${tag.mediaCount ?? -1}`).join("|");
 }
 
-/** Wire search filtering + row toggles for a mounted popover. */
-export function bindTagPopover(scope: HTMLElement): void {
-  const input = scope.querySelector<HTMLInputElement>("#tag-popover-input");
-  if (input) {
-    const filterRows = () => {
-      const query = input.value.trim().toLowerCase();
-      tagPopoverQuery = input.value;
-      let visible = 0;
-      scope.querySelectorAll<HTMLElement>("#tag-popover-list [data-tag-popover-row]").forEach((row) => {
-        const match = !query || (row.dataset.tagName ?? "").includes(query);
-        row.hidden = !match;
-        if (match) visible += 1;
-      });
-      const empty = scope.querySelector<HTMLElement>("#tag-popover-list [data-picker-empty]");
-      if (empty) empty.hidden = visible > 0;
-    };
-    input.addEventListener("input", filterRows);
-    if (tagPopoverQuery) filterRows();
+function tagRowsHtml(): string {
+  const tags = sortedTagsByUsage();
+  if (!tags.length) {
+    return `<div class="filter-panel-empty">还没有标签。<button class="text-button" type="button" data-action="open-tag-manager">管理标签</button></div>`;
   }
-  scope.querySelectorAll<HTMLButtonElement>("#tag-filter-popover [data-tag-popover-row]").forEach((row) => {
-    row.addEventListener("click", () => {
-      const tagId = row.dataset.tagPopoverRow;
-      if (!tagId) return;
-      // 弹层不再随整页重建而卸载，列表滚动位置由 DOM 自己保留。
-      if (state.tagIds.has(tagId)) state.tagIds.delete(tagId);
-      else state.tagIds.add(tagId);
-      void refreshMedia();
-    });
-  });
+  return `${tags
+    .map((tag) => {
+      const active = state.tagIds.has(tag.id);
+      return `<label class="tag-filter-row${active ? " is-active" : ""}" data-tag-name="${escapeHtml(tag.name.toLowerCase())}"><input type="checkbox" data-action="filter-tag" data-tag-id="${escapeHtml(tag.id)}" ${active ? "checked" : ""} /><span class="tag-filter-name">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</span>${tag.mediaCount != null ? `<span class="tag-filter-count">${formatCount(tag.mediaCount)}</span>` : ""}</label>`;
+    })
+    .join("")}<div class="filter-panel-empty" data-tag-empty hidden>没有匹配的标签</div>`;
 }
 
-/** Mount the toolbar tag popover inside .sticky-controls, anchored below the
- * toggle button. Mounting outside .advanced-filters dodges its max-height
- * overflow clipping; the sticky host keeps the anchor stable while scrolling. */
-export function mountTagPopover(focusSearch: boolean): void {
-  const toggle = app.querySelector<HTMLElement>("#toggle-tag-popover");
-  const host = app.querySelector<HTMLElement>(".sticky-controls");
-  if (!toggle || !host || host.querySelector("#tag-filter-popover")) return;
-  host.insertAdjacentHTML("beforeend", tagPopoverHtml());
-  const popover = host.querySelector<HTMLElement>("#tag-filter-popover");
-  if (popover) {
-    const buttonRect = toggle.getBoundingClientRect();
-    const hostRect = host.getBoundingClientRect();
-    popover.style.left = `${Math.max(0, Math.round(buttonRect.left - hostRect.left))}px`;
-    popover.style.top = `${Math.round(buttonRect.bottom - hostRect.top + 6)}px`;
-  }
-  bindTagPopover(host);
-  if (focusSearch) host.querySelector<HTMLInputElement>("#tag-popover-input")?.focus();
+/** 标签组：可搜索 + 数量计数 + 原生复选框（取代原来那个浮动标签面板）。 */
+export function renderTagFilterGroup(): string {
+  return `<section class="filter-panel-group filter-panel-tags"><div class="filter-panel-group-head"><h3>标签</h3><span data-tag-selected>已选 ${state.tagIds.size}/${state.tags.length}</span><button class="text-button filter-panel-manage" type="button" data-action="open-tag-manager">管理</button></div><div class="tag-filter-search"><span aria-hidden="true">⌕</span><input id="filter-panel-tag-input" type="search" placeholder="搜索标签" value="${escapeHtml(filterPanelTagQuery)}" aria-label="搜索标签" /></div><div class="tag-filter-list" data-tag-list data-signature="${escapeHtml(tagSignature())}">${tagRowsHtml()}</div></section>`;
 }
 
-/** Remove the popover DOM and reset the toggle button chrome. */
-/** 关闭标签筛选弹层：Esc、外部点击、区域 patch 共用同一条路径。 */
-export function closeTagFilterPopover(): void {
-  tagPopoverOpen = false;
-  unmountTagPopover();
-}
-
-export function unmountTagPopover(): void {
-  app.querySelector("#tag-filter-popover")?.remove();
-  const toggle = app.querySelector<HTMLButtonElement>("#toggle-tag-popover");
-  if (toggle) {
-    toggle.setAttribute("aria-expanded", "false");
-    toggle.classList.remove("is-active");
-  }
-}
-
-/** 高级筛选的内容体；外层 #advanced-filters 容器由 patchToolbar 原地维护。 */
-export function renderAdvancedFiltersInner(): string {
-  let tagBlock: string;
-  if (!state.tags.length) {
-    tagBlock = `<div class="filter-group filter-group-tags"><button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">标签管理</button></div>`;
-  } else {
-    const inline = toolbarTagChips();
-    const chips = inline
-      .map(
-        (tag) =>
-          `<button class="filter-chip filter-chip-tag ${tag.hasAi ? "filter-chip-tag-ai" : ""} ${state.tagIds.has(tag.id) ? "is-active" : ""}" type="button" data-action="filter-tag" data-tag-filter="${escapeHtml(tag.id)}" title="${escapeHtml(tag.name)}${tag.hasAi ? " · 含 AI 标签" : ""}${tag.mediaCount != null ? ` · ${tag.mediaCount} 项` : ""}">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</button>`,
-      )
-      .join("");
-    // Everything beyond the inline chips stays reachable through the
-    // searchable popover instead of a flat (truncated) chip row. The popover
-    // itself mounts into .sticky-controls (see mountTagPopover), not here —
-    // this container clips overflow.
-    const moreButton =
-      state.tags.length > inline.length
-        ? `<button class="filter-chip filter-chip-more ${tagPopoverOpen ? "is-active" : ""}" type="button" id="toggle-tag-popover" data-action="toggle-tag-popover" aria-expanded="${tagPopoverOpen}" aria-haspopup="true">更多标签 <span class="filter-toggle-caret" aria-hidden="true">${tagPopoverOpen ? "▴" : "▾"}</span></button>`
-        : "";
-    tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">管理</button></div>`;
-  }
-  return `${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
-}
-
+/** 评分：≥1..≥5 星级点击器 + 「未评分」开关（10 项下拉已删）。 */
 export function renderRatingFilter(): string {
-  const options = [
-    { value: "", label: "全部评分" },
-    { value: "eq:5", label: "5 星" },
-    { value: "eq:4", label: "4 星" },
-    { value: "eq:3", label: "3 星" },
-    { value: "eq:2", label: "2 星" },
-    { value: "eq:1", label: "1 星" },
-    { value: "eq:0", label: "未评分" },
-    { value: "min:3", label: "3 星以上" },
-    { value: "min:4", label: "4 星以上" },
-    { value: "min:5", label: "5 星" },
-  ];
-  let selected = "";
-  if (state.ratingEq !== null) selected = `eq:${state.ratingEq}`;
-  else if (state.ratingMin !== null) selected = `min:${state.ratingMin}`;
-  return `<label class="select-wrap rating-filter${selected ? " is-active" : ""}"><span>评分</span><select id="rating-filter" data-action="filter-rating" aria-label="评分筛选">${options.map((option) => `<option value="${option.value}" ${selected === option.value ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>`;
+  const steps = [1, 2, 3, 4, 5]
+    .map((value) => {
+      const active = state.ratingMin === value;
+      return `<button class="rating-step${active ? " is-active" : ""}" type="button" data-action="filter-rating-min" data-rating="${value}" aria-pressed="${active}" aria-label="评分不低于 ${value} 星">≥${value}★</button>`;
+    })
+    .join("");
+  return `<section class="filter-panel-group"><div class="filter-panel-group-head"><h3>评分</h3><span>${state.ratingMin === null ? "不限下限" : `≥ ${state.ratingMin} 星`}</span></div><div class="rating-steps" role="group" aria-label="最低评分">${steps}</div><label class="filter-switch"><input type="checkbox" data-action="filter-rating-unrated" ${state.ratingEq === 0 ? "checked" : ""} /><span>只看未评分</span></label></section>`;
+}
+
+/** 日期预设；`clear` 是动作而不是区间，单独渲染成可禁用的按钮。 */
+const DATE_PRESETS: ReadonlyArray<{ id: Exclude<DatePresetId, "clear">; label: string }> = [
+  { id: "week", label: "本周" },
+  { id: "month", label: "本月" },
+  { id: "last-month", label: "上月" },
+  { id: "year", label: "今年" },
+];
+
+function dateRangeNote(): string {
+  if (state.datePrefix) {
+    return `已按侧栏的「${formatDatePrefix(state.datePrefix)}」筛选。日期前缀与区间互斥，所以区间与预设先禁用；移除条件行里的「日期」chip 即可改用区间。`;
+  }
+  return "只填一侧表示开区间：自某天起 / 至某天止。";
 }
 
 export function renderDateRangeControls(): string {
-  const presets = [
-    { id: "month", label: "本月" },
-    { id: "year", label: "今年" },
-    { id: "days30", label: "最近30天" },
-  ];
-  return `<div class="date-range" aria-label="日期区间">
-    <label><span>从</span><input type="date" id="date-from" data-action="apply-date-range" value="${escapeHtml(state.dateFrom ?? "")}" aria-label="开始日期" /></label>
-    <label><span>到</span><input type="date" id="date-to" data-action="apply-date-range" value="${escapeHtml(state.dateTo ?? "")}" aria-label="结束日期" /></label>
-    ${presets.map((preset) => `<button class="filter-chip range-preset" type="button" data-action="date-preset" data-range-preset="${preset.id}">${preset.label}</button>`).join("")}
-    ${state.dateFrom || state.dateTo ? `<button class="filter-chip" type="button" id="clear-date-range" data-action="clear-date-range">清除区间</button>` : ""}
-  </div>`;
+  const locked = Boolean(state.datePrefix);
+  const matched = matchDatePreset(state.dateFrom, state.dateTo);
+  const presets = DATE_PRESETS.map((preset) => {
+    const active = preset.id === matched;
+    return `<button class="filter-chip range-preset${active ? " is-active" : ""}" type="button" data-action="date-preset" data-range-preset="${preset.id}" aria-pressed="${active}" ${locked ? "disabled" : ""}>${preset.label}</button>`;
+  }).join("");
+  const hasRange = Boolean(state.dateFrom || state.dateTo);
+  return `<section class="filter-panel-group"><div class="filter-panel-group-head"><h3>日期</h3></div><div class="date-presets">${presets}<button class="filter-chip range-preset" type="button" data-action="clear-date-range" ${hasRange ? "" : "disabled"}>清除</button></div><div class="date-range" aria-label="日期区间"><label><span>从</span><input type="date" id="date-from" data-action="apply-date-range" value="${escapeHtml(state.dateFrom ?? "")}" aria-label="开始日期" ${locked ? "disabled" : ""} /></label><label><span>到</span><input type="date" id="date-to" data-action="apply-date-range" value="${escapeHtml(state.dateTo ?? "")}" aria-label="结束日期" ${locked ? "disabled" : ""} /></label></div><p class="filter-panel-note" data-date-note>${escapeHtml(dateRangeNote())}</p></section>`;
 }
+
+/** 检索组：AI 语义检索开关，复用搜索框的 semantic 模式，不另建一套管线。 */
+function renderAiSearchGroup(): string {
+  const on = searchUi.mode === "ai" || Boolean(state.semanticSearch);
+  const note = state.semanticSearch
+    ? `当前语义检索：${state.semanticSearch}`
+    : "打开后在顶栏搜索框写一句描述（如「去年秋天湖边」），回车执行。";
+  return `<section class="filter-panel-group"><div class="filter-panel-group-head"><h3>检索</h3></div><label class="filter-switch"><input type="checkbox" data-action="filter-ai-search" ${on ? "checked" : ""} /><span>AI 语义检索</span></label><p class="filter-panel-note" data-ai-note>${escapeHtml(note)}</p></section>`;
+}
+
+export function renderFilterPanel(): string {
+  const count = panelFilterCount(state);
+  return `<div class="filter-panel" id="filter-panel" role="dialog" aria-modal="false" aria-label="筛选" data-prefix-lock="${state.datePrefix ? "1" : ""}"><div class="filter-panel-head"><strong>筛选</strong><span class="filter-panel-count" data-filter-count>已选 ${count} 项</span><button class="icon-button filter-panel-close" type="button" data-action="close-filter-panel" aria-label="关闭筛选面板">×</button></div><div class="filter-panel-body">${renderTagFilterGroup()}${renderRatingFilter()}${renderDateRangeControls()}${renderAiSearchGroup()}</div><div class="filter-panel-foot"><button class="text-button" type="button" data-action="reset-filters">重置全部</button><button class="primary-button filter-panel-done" type="button" data-action="close-filter-panel">完成</button></div></div>`;
+}
+
+function filterPanelSlot(): HTMLElement | null {
+  return app.querySelector<HTMLElement>('#overlay-host [data-overlay="filters"]');
+}
+
+/**
+ * 贴按钮定位：左对齐按钮，top = 按钮底部 + 6px，右/下都不越出视口。
+ * 窄屏（≤720px）交给 CSS 的底部抽屉，不写内联几何。
+ */
+function positionFilterPanel(panel: HTMLElement): void {
+  const toggle = app.querySelector<HTMLElement>("#toggle-filter-panel");
+  if (!toggle) return;
+  if (window.matchMedia("(max-width: 720px)").matches) {
+    for (const property of ["left", "top", "width", "max-height"]) panel.style.removeProperty(property);
+    return;
+  }
+  const rect = toggle.getBoundingClientRect();
+  const margin = 12;
+  const width = Math.min(380, Math.max(280, window.innerWidth - 32));
+  // 默认左对齐按钮；右边放不下就改成「右边缘对齐按钮」，比硬贴左边再被
+  // clamp 到视口边缘更像是有意为之。
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) left = rect.right - width;
+  left = Math.max(margin, left);
+  panel.style.width = `${width}px`;
+  panel.style.left = `${left}px`;
+  panel.style.top = `${rect.bottom + FILTER_PANEL_GAP}px`;
+  // 规格上限是 calc(100vh - 120px)；再按按钮的真实位置收一次，底栏才不会被裁掉。
+  const available = window.innerHeight - rect.bottom - FILTER_PANEL_GAP - margin;
+  panel.style.maxHeight = `${Math.max(240, Math.min(window.innerHeight - 120, available))}px`;
+}
+
+/** 面板内标签列表的搜索过滤（纯 DOM 显示切换，不碰 state）。 */
+function filterTagRows(panel: HTMLElement): void {
+  const query = filterPanelTagQuery.trim().toLowerCase();
+  let visible = 0;
+  panel.querySelectorAll<HTMLElement>("[data-tag-list] .tag-filter-row").forEach((row) => {
+    const match = !query || (row.dataset.tagName ?? "").includes(query);
+    row.hidden = !match;
+    if (match) visible += 1;
+  });
+  const empty = panel.querySelector<HTMLElement>("[data-tag-empty]");
+  if (empty) empty.hidden = visible > 0;
+}
+
+function bindFilterPanel(panel: HTMLElement): void {
+  const input = panel.querySelector<HTMLInputElement>("#filter-panel-tag-input");
+  input?.addEventListener("input", () => {
+    filterPanelTagQuery = input.value;
+    filterTagRows(panel);
+  });
+  filterTagRows(panel);
+  const list = panel.querySelector<HTMLElement>("[data-tag-list]");
+  if (list) {
+    list.scrollTop = filterPanelTagScroll;
+    list.addEventListener(
+      "scroll",
+      () => {
+        filterPanelTagScroll = list.scrollTop;
+      },
+      { passive: true },
+    );
+  }
+  // 打开即把光标放进搜索框：标签上百个时，滚着找比打字慢得多（键盘直接可用）。
+  input?.focus();
+}
+
+/**
+ * 原地同步：勾选态、星级、日期值、预设高亮、计数。
+ * 不重建节点 ⇒ 标签列表的滚动位置与搜索框焦点都不会被打断。
+ */
+function syncFilterPanel(panel: HTMLElement): void {
+  setText(panel.querySelector("[data-filter-count]"), `已选 ${panelFilterCount(state)} 项`);
+  const list = panel.querySelector<HTMLElement>("[data-tag-list]");
+  const signature = tagSignature();
+  if (list && list.dataset.signature !== signature) {
+    const scrollTop = list.scrollTop;
+    list.dataset.signature = signature;
+    list.innerHTML = tagRowsHtml();
+    list.scrollTop = scrollTop;
+    filterTagRows(panel);
+  }
+  panel.querySelectorAll<HTMLInputElement>('[data-tag-list] input[data-action="filter-tag"]').forEach((box) => {
+    const id = box.dataset.tagId;
+    if (!id) return;
+    const active = state.tagIds.has(id);
+    if (box.checked !== active) box.checked = active;
+    box.closest(".tag-filter-row")?.classList.toggle("is-active", active);
+  });
+  setText(panel.querySelector("[data-tag-selected]"), `已选 ${state.tagIds.size}/${state.tags.length}`);
+  panel.querySelectorAll<HTMLElement>('[data-action="filter-rating-min"]').forEach((button) => {
+    const active = Number(button.dataset.rating) === state.ratingMin;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const unrated = panel.querySelector<HTMLInputElement>('[data-action="filter-rating-unrated"]');
+  if (unrated && unrated.checked !== (state.ratingEq === 0)) unrated.checked = state.ratingEq === 0;
+  // 日期输入框有焦点时绝不覆盖：那可能正是用户敲到一半的值。
+  const from = panel.querySelector<HTMLInputElement>("#date-from");
+  if (from && document.activeElement !== from && from.value !== (state.dateFrom ?? ""))
+    from.value = state.dateFrom ?? "";
+  const to = panel.querySelector<HTMLInputElement>("#date-to");
+  if (to && document.activeElement !== to && to.value !== (state.dateTo ?? "")) to.value = state.dateTo ?? "";
+  const matched = matchDatePreset(state.dateFrom, state.dateTo);
+  panel.querySelectorAll<HTMLElement>("[data-range-preset]").forEach((button) => {
+    const active = button.dataset.rangePreset === matched;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const clearRange = panel.querySelector<HTMLButtonElement>('[data-action="clear-date-range"]');
+  if (clearRange) clearRange.disabled = !(state.dateFrom || state.dateTo);
+  setText(panel.querySelector("[data-date-note]"), dateRangeNote());
+  const ai = panel.querySelector<HTMLInputElement>('[data-action="filter-ai-search"]');
+  const aiOn = searchUi.mode === "ai" || Boolean(state.semanticSearch);
+  if (ai && ai.checked !== aiOn) ai.checked = aiOn;
+  setText(
+    panel.querySelector("[data-ai-note]"),
+    state.semanticSearch
+      ? `当前语义检索：${state.semanticSearch}`
+      : "打开后在顶栏搜索框写一句描述（如「去年秋天湖边」），回车执行。",
+  );
+}
+
+/** 面板挂载 / 卸载 / 原地同步；由 patchToolbar 每次统一调度。 */
+export function patchFilterPanel(): void {
+  // 任何模态层压上来都直接关掉面板：它非模态、没有焦点陷阱，留在模态底下的
+  // 唯一效果是关掉模态后突然又冒出来。
+  const blocked =
+    state.previewIndex !== null ||
+    state.settingsOpen ||
+    state.backupOpen ||
+    state.editorOpen ||
+    state.mergeModalOpen ||
+    state.tagsManagerOpen ||
+    state.deleteConfirm !== null;
+  if (blocked) filterPanelOpen = false;
+  const slot = filterPanelSlot();
+  const existing = slot?.querySelector<HTMLElement>("#filter-panel") ?? null;
+  if (!filterPanelOpen) {
+    existing?.remove();
+    // 关掉即丢弃搜索词与滚动记忆：重开时是「全部标签」的干净起点。
+    filterPanelTagQuery = "";
+    filterPanelTagScroll = 0;
+    return;
+  }
+  if (!slot) return;
+  const lockKey = state.datePrefix ? "1" : "";
+  if (!existing || existing.dataset.prefixLock !== lockKey) {
+    slot.innerHTML = renderFilterPanel();
+    const panel = slot.querySelector<HTMLElement>("#filter-panel");
+    if (!panel) return;
+    bindFilterPanel(panel);
+    positionFilterPanel(panel);
+    return;
+  }
+  positionFilterPanel(existing);
+  syncFilterPanel(existing);
+}
+
+export function openFilterPanel(): void {
+  if (filterPanelOpen) return;
+  filterPanelOpen = true;
+  patchToolbar();
+}
+
+export function closeFilterPanel(): void {
+  if (!filterPanelOpen) return;
+  // 焦点在面板里（标签搜索框）时，关掉后要把它还给主行按钮，而不是掉到 body。
+  const restoreFocus =
+    document.activeElement instanceof HTMLElement && document.activeElement.closest("#filter-panel") !== null;
+  filterPanelOpen = false;
+  // 关掉即丢弃搜索词与滚动记忆：重开时是「全部标签」的干净起点。
+  filterPanelTagQuery = "";
+  filterPanelTagScroll = 0;
+  patchToolbar();
+  if (restoreFocus) app.querySelector<HTMLElement>("#toggle-filter-panel")?.focus();
+}
+
+export function toggleFilterPanel(): void {
+  if (filterPanelOpen) closeFilterPanel();
+  else openFilterPanel();
+}
+
+// 面板外的点击关掉它。主行按钮自身走 data-action 的切换；整条吸顶筛选条
+// （类型 chip、条件 chips、排序）都算「面板的地盘」，否则一边看面板一边点
+// 类型，面板会被自己关掉，没法连续组合条件。
+document.addEventListener("pointerdown", (event) => {
+  if (!filterPanelOpen) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target) return;
+  if (target.closest("#filter-panel") || target.closest(".sticky-controls")) return;
+  closeFilterPanel();
+});
+
+/** 尺寸变了、内容区滚了，锚点就失效了：直接关掉，而不是让它跟着飘。 */
+window.addEventListener("resize", () => {
+  if (filterPanelOpen) closeFilterPanel();
+});
+
+document.addEventListener(
+  "scroll",
+  (event) => {
+    if (!filterPanelOpen) return;
+    const target = event.target;
+    // 面板内部（标签列表）的滚动是唯一允许的那种，不算。
+    if (target instanceof HTMLElement && target.closest("#filter-panel")) return;
+    closeFilterPanel();
+  },
+  true,
+);
 
 export function scanStatusLabel(progress: ScanProgressDto): string {
   if (progress.total > 0) {
@@ -609,10 +786,8 @@ export function patchToolbar(): void {
   patchErrorBar();
   patchTaskPill();
   setRegionHtml(region("filter-row"), renderPrimaryFilters());
-  // 高级筛选层现在只有委托型控件（日期 / 评分 / 排序），不再需要逐个绑定；
-  // 唯一的输入框已并入顶栏搜索框，由 bindShellEvents 承担。
-  setRegionHtml(region("advanced"), renderAdvancedFiltersInner());
-  syncAdvancedFiltersVisibility();
+  // 条件 chips 与主行分属两个区域：主行是「改」，chips 是「看 + 逐项摘掉」。
+  setRegionHtml(region("filter-chips"), renderFilterChips());
   syncToolbarRight();
   syncSearchInput();
   setRegionHtml(region("selection"), renderSelectionToolbar());
@@ -622,27 +797,8 @@ export function patchToolbar(): void {
     if (scanTop.disabled !== disabled) scanTop.disabled = disabled;
     setText(scanTop, state.scanning ? "扫描中…" : "扫描媒体库");
   }
-  patchTagPopover();
-}
-
-/**
- * 标签弹层：不再随整页重建而卸载重挂，因此列表滚动位置天然保留。
- * 这里只做两件事——该消失时卸载、选中态原地同步。
- */
-export function patchTagPopover(): void {
-  if (!tagPopoverOpen) return;
-  const toggle = app.querySelector<HTMLElement>("#toggle-tag-popover");
-  if (!toggle || state.previewIndex !== null || !state.filtersExpanded) {
-    tagPopoverOpen = false;
-    unmountTagPopover();
-    return;
-  }
-  toggle.classList.add("is-active");
-  toggle.setAttribute("aria-expanded", "true");
-  app.querySelectorAll<HTMLElement>("#tag-popover-list [data-tag-popover-row]").forEach((row) => {
-    const tagId = row.dataset.tagPopoverRow;
-    if (tagId) row.classList.toggle("is-active", state.tagIds.has(tagId));
-  });
+  // 面板挂在 overlay 槽位，不受上面这些区域 patch 影响；这里只做卸载/定位/同步。
+  patchFilterPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -697,22 +853,9 @@ export function syncSearchChrome(): void {
   }
 }
 
-// Registered once at module level: clicking anywhere outside the toolbar tag
-// popover (or its toggle button) dismisses it without a full re-render.
-document.addEventListener("pointerdown", (event) => {
-  if (!tagPopoverOpen) return;
-  const target = event.target as HTMLElement | null;
-  if (target?.closest("#tag-filter-popover") || target?.closest("#toggle-tag-popover")) return;
-  tagPopoverOpen = false;
-  unmountTagPopover();
-});
-
 export function titleBlockHtml(): string {
   const label = primaryDateLabel();
-  const clear = hasAnyFilter(state)
-    ? `<button class="text-button clear-all-filters" id="clear-all-filters" data-action="clear-filters" type="button">清除筛选</button>`
-    : "";
-  return `<div class="eyebrow">${label ? `筛选 · ${label}` : "媒体总览"}</div><h1>${label || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>${clear}`;
+  return `<div class="eyebrow">${label ? `筛选 · ${label}` : "媒体总览"}</div><h1>${label || "所有媒体"}</h1><span class="result-count">${formatCount(state.page.total)} 个项目</span>`;
 }
 
 /**
@@ -721,7 +864,7 @@ export function titleBlockHtml(): string {
  */
 export function statusRegionHtml(): string {
   const firstSeen = state.firstSeenFrom
-    ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用「清除筛选」恢复全部媒体。</span></div></div>`
+    ? `<div class="notice-banner" role="status"><span class="notice-icon">↓</span><div><strong>正在查看新导入</strong><span>按首次入库时间筛选（备份完成后自动扫描的结果）。可用筛选面板的「重置全部」恢复全部媒体。</span></div></div>`
     : "";
   return `${firstSeen}${renderStatusBanner()}`;
 }
@@ -738,35 +881,6 @@ export function syncToolbarRight(): void {
   if (sort && sort.value !== state.sort) sort.value = state.sort;
   const density = host.querySelector<HTMLInputElement>("#density-input");
   if (density && density.value !== String(state.density)) density.value = String(state.density);
-}
-
-export function syncAdvancedFiltersVisibility(): void {
-  const advanced = region("advanced");
-  if (!advanced) return;
-  const hidden = !state.filtersExpanded;
-  if (advanced.hidden !== hidden) advanced.hidden = hidden;
-  advanced.closest(".toolbar")?.classList.toggle("is-filters-expanded", state.filtersExpanded);
-}
-
-export function toggleToolbarTagPopover(): void {
-  if (tagPopoverOpen) {
-    tagPopoverOpen = false;
-    unmountTagPopover();
-    return;
-  }
-  tagPopoverOpen = true;
-  mountTagPopover(true);
-}
-
-export function toggleAdvancedFilters(): void {
-  state.filtersExpanded = !state.filtersExpanded;
-  // Collapsing the toolbar hides the popover's anchor; dismiss it first so
-  // it cannot float orphaned over the grid.
-  if (!state.filtersExpanded && tagPopoverOpen) {
-    tagPopoverOpen = false;
-    unmountTagPopover();
-  }
-  patchToolbar();
 }
 
 export function toolbarRightHtml(): string {

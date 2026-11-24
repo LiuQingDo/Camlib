@@ -37,7 +37,9 @@ export type OverlayId =
   | "merge"
   | "settings"
   | "ai-chat"
-  | "backup";
+  | "backup"
+  /** 筛选面板：无遮罩、无焦点陷阱，由 render/toolbar.ts 自行挂载与定位。 */
+  | "filters";
 
 /** 弹窗容器 → 上次构建它的签名。签名没变就完全不碰 DOM。 */
 export const overlaySignatures = new WeakMap<HTMLElement, string>();
