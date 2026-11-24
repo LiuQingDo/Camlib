@@ -9,6 +9,7 @@ import { escapeHtml } from "../render/text";
 import { applySelectionChrome, currentQueryFields, patchToolbar, scrollToContentTop } from "../render/toolbar";
 import { bumpGridEpoch, patchGrid } from "../render/virtual";
 import { state } from "../state";
+import { showToast } from "./toast";
 
 // Bumps on every full refresh so in-flight load-more/select-all pages from a
 // previous filter cannot append into the new result set.
@@ -88,6 +89,8 @@ export async function refreshMedia(options: RefreshMediaOptions = {}): Promise<v
     state.page = page;
     state.selectedIds.clear();
     state.lastSelectIndex = null;
+    // 结果集换了：旧的 roving 下标指向的是另一批卡片。
+    state.focusIndex = null;
     state.favorites = new Set(state.page.items.filter((item) => item.favorite).map((item) => item.id));
     state.ratings = new Map(state.page.items.filter((item) => item.rating > 0).map((item) => [item.id, item.rating]));
   } catch (error) {
@@ -200,19 +203,46 @@ export async function refreshTags(): Promise<void> {
   }
 }
 
-export async function selectCurrentResults(): Promise<void> {
+/**
+ * 全选当前结果 = 先选**已加载**的这一页（同步、立刻有反馈），跨页全选挂在 toast
+ * 的「选中全部」上。
+ *
+ * 之前一进来就逐页 500 条地拉 id：5000 张的库要发 10 次查询，按一次 Ctrl+A 得
+ * 等一秒多，而且中途换筛选还会作废。现在默认动作是局部的，覆盖不全就明说。
+ */
+export function selectCurrentResults(): void {
   if (!state.library) return;
-  if (state.selectedIds.size >= state.page.total) {
+  const shown = state.page.items.length;
+  const total = state.page.total;
+  if (!total) return;
+  if (state.selectedIds.size >= total) {
     state.selectedIds.clear();
     state.lastSelectIndex = null;
     applySelectionChrome();
     return;
   }
+  if (!shown) return;
+  state.selectedIds = new Set(state.page.items.map((item) => item.id));
+  state.lastSelectIndex = null;
+  applySelectionChrome();
+  if (shown < total) {
+    showToast(`已选当前 ${formatCount(shown)} 项（共 ${formatCount(total)} 项）`, {
+      kind: "info",
+      key: "select-all",
+      timeout: 8000,
+      action: { label: "选中全部", run: () => void selectEveryResult() },
+    });
+  }
+}
+
+/** 跨页全选：逐页拉 id（保持 selectedIds 的语义是「整个结果集」）。 */
+export async function selectEveryResult(): Promise<void> {
+  if (!state.library) return;
   const token = mediaQueryToken;
   try {
     const ids = new Set<string>();
     for (let offset = 0; offset < state.page.total; offset += 500) {
-      const page = await queryMedia({ ...currentQueryFields(), offset, limit: 500 });
+      const page = await fetchMediaPage(offset, 500);
       if (token !== mediaQueryToken) return;
       page.items.forEach((item) => ids.add(item.id));
       if (!page.items.length) break;
@@ -221,6 +251,7 @@ export async function selectCurrentResults(): Promise<void> {
     state.selectedIds = ids;
     state.lastSelectIndex = null;
     applySelectionChrome();
+    showToast(`已选中全部 ${formatCount(ids.size)} 项`, { kind: "success", key: "select-all" });
   } catch (error) {
     if (token !== mediaQueryToken) return;
     state.error = toUserMessage(error, "选择当前结果失败");

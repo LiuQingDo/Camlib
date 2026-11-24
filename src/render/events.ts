@@ -5,10 +5,12 @@ import {
   changeSortMode,
   clearAllFilters,
   clearDateRange,
+  clearSelection,
   commitDensity,
   openMediaCard,
   previewDensity,
   removeFilter,
+  selectDay,
   setAiSearchEnabled,
   setKindFilter,
   setRatingMin,
@@ -19,21 +21,25 @@ import {
   toggleTagFilter,
 } from "../app/bindings/toolbar";
 import { openMergeModal, openTagManager } from "../app/dialogs-ops";
-import {
-  applyBatchFavorite,
-  applyBatchRating,
-  applyBatchTag,
-  requestDeleteSelected,
-  runAiTagging,
-  toggleFavorite,
-} from "../app/media-ops";
+import { applyBatchMeta, requestDeleteSelected, runAiTagging, toggleFavorite, toggleFavoriteSelected } from "../app/media-ops";
 import { loadMore, selectCurrentResults } from "../app/media-query";
+import { handleGridKeydown, handleGridPointerDown, syncGridTabStopIfNeeded } from "../app/selection-nav";
 import { loadThumbnail } from "../media/cache";
 import { state } from "../state";
 import { loadModalAsset, toggleLivePreview } from "../views/preview";
 import { app } from "./context";
 import { applyThumbnailToCard, markThumbnailRetryable } from "./grid";
-import { applySelectionChrome, closeFilterPanel, toggleFilterPanel } from "./toolbar";
+import {
+  batchMetaDraft,
+  closeFilterPanel,
+  closeSelectionMore,
+  openSelectionMore,
+  setSelectionDraftRating,
+  setSelectionDraftTag,
+  setSelectionDraftTagMode,
+  toggleFilterPanel,
+  toggleSelectionMore,
+} from "./toolbar";
 
 // ---------------------------------------------------------------------------
 // 事件委托（S3a）：媒体卡片区 + 粘性工具栏
@@ -60,13 +66,15 @@ export type ClickAction =
   | "load-more"
   | "retry-load-more"
   | "select-current-results"
+  | "select-day"
   | "clear-selection"
   | "batch-ai-tag"
-  | "batch-favorite"
-  | "batch-unfavorite"
-  | "batch-tag-attach"
-  | "batch-tag-detach"
-  | "batch-rating-apply"
+  | "toggle-favorite-selected"
+  | "open-selection-tags"
+  | "toggle-selection-more"
+  | "close-selection-more"
+  | "selection-more-rating"
+  | "apply-batch-meta"
   | "merge-selected"
   | "delete-selected"
   | "filter-kind"
@@ -82,7 +90,14 @@ export type ClickAction =
   | "clear-date-range";
 
 export type ChangeAction =
-  "filter-tag" | "filter-rating-unrated" | "filter-ai-search" | "apply-date-range" | "sort-change" | "density-input";
+  | "filter-tag"
+  | "filter-rating-unrated"
+  | "filter-ai-search"
+  | "apply-date-range"
+  | "sort-change"
+  | "density-input"
+  | "selection-more-tag"
+  | "selection-more-detach";
 
 export type InputAction = "density-input";
 
@@ -96,22 +111,21 @@ export const delegatedClickActions: Record<ClickAction, DelegatedHandler> = {
     void loadMore();
   },
   "select-current-results": () => void selectCurrentResults(),
-  "clear-selection": () => {
-    state.selectedIds.clear();
-    state.lastSelectIndex = null;
-    applySelectionChrome();
-  },
+  "select-day": (button) => selectDay(button.dataset.day ?? ""),
+  "clear-selection": () => clearSelection(),
   "batch-ai-tag": () => {
     const ids = state.page.items
       .filter((item) => state.selectedIds.has(item.id) && item.kind !== "video")
       .map((item) => item.id);
     void runAiTagging(ids);
   },
-  "batch-favorite": () => void applyBatchFavorite(true),
-  "batch-unfavorite": () => void applyBatchFavorite(false),
-  "batch-tag-attach": () => void applyBatchTag(true),
-  "batch-tag-detach": () => void applyBatchTag(false),
-  "batch-rating-apply": () => void applyBatchRating(),
+  // 收藏 / 取消收藏合成一个切换：批里有未收藏的就是「收藏」，全已收藏才是「取消」。
+  "toggle-favorite-selected": () => toggleFavoriteSelected(),
+  "open-selection-tags": () => openSelectionMore({ focusSearch: true }),
+  "toggle-selection-more": () => toggleSelectionMore(),
+  "close-selection-more": () => closeSelectionMore({ restoreFocus: true }),
+  "selection-more-rating": (button) => setSelectionDraftRating(Number(button.dataset.rating)),
+  "apply-batch-meta": () => void applyBatchMeta(batchMetaDraft()),
   "merge-selected": () => void openMergeModal(),
   "delete-selected": () => void requestDeleteSelected(),
   "filter-kind": (chip) => setKindFilter(chip.dataset.kind ?? ""),
@@ -136,6 +150,9 @@ export const delegatedChangeActions: Record<ChangeAction, DelegatedHandler> = {
   "sort-change": (select) => changeSortMode((select as HTMLSelectElement).value),
   // 密度滑块同名动作分两段：拖动中走 input 只改本地，松手走 change 才落盘。
   "density-input": (input) => commitDensity((input as HTMLInputElement).value),
+  "selection-more-tag": (input) =>
+    setSelectionDraftTag(input.dataset.tagId ?? "", (input as HTMLInputElement).checked),
+  "selection-more-detach": (input) => setSelectionDraftTagMode((input as HTMLInputElement).checked),
 };
 
 export const delegatedInputActions: Record<InputAction, DelegatedHandler> = {
@@ -160,20 +177,27 @@ document.addEventListener("change", (event) => dispatchDelegated(delegatedChange
 
 document.addEventListener("input", (event) => dispatchDelegated(delegatedInputActions, event), true);
 
-// 卡片焦点态下的 Enter / Space 打开预览。原监听在卡片上冒泡触发，因此卡片内
-// 任意子元素（含按钮）拿到焦点时按回车同样会打开预览并压掉原生激活。
+// 卡片的键盘选择模型（Space 选中 / Enter 预览 / 方向键移动 / Shift 扩选）。
+// 用捕获阶段在 document 上派发，省掉每次重建卡片都要重绑的监听器；具体落点与
+// 范围计算在 app/selection-nav（纯逻辑可单测）。
+document.addEventListener("keydown", (event) => handleGridKeydown(event), true);
+
+// 点卡也要搬 roving 落点：否则点完第 20 张再按 →，焦点会从上次键盘停的第 1 张跳走。
+document.addEventListener("pointerdown", (event) => handleGridPointerDown(event), true);
+
+// 虚拟滚动把停靠点那张卡回收掉之后要补一个回来，否则 Tab 再也进不了网格。
+// 每帧只在「当前没有 tabindex=0 的卡片」时才动 DOM。
+let tabStopFrame = 0;
 document.addEventListener(
-  "keydown",
-  (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    const target = event.target as Element | null;
-    if (!target || typeof target.closest !== "function") return;
-    const card = target.closest<HTMLElement>('[data-action="open-media"]');
-    if (!card) return;
-    event.preventDefault();
-    openMediaCard(card);
+  "scroll",
+  () => {
+    if (tabStopFrame) return;
+    tabStopFrame = requestAnimationFrame(() => {
+      tabStopFrame = 0;
+      syncGridTabStopIfNeeded();
+    });
   },
-  true,
+  { capture: true, passive: true },
 );
 
 // Delegated handlers survive full re-renders and must be bound only once.

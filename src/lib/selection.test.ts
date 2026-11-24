@@ -46,4 +46,11 @@ describe("collectRangeIds", () => {
   it("handles an empty page", () => {
     expect(collectRangeIds([], 0, 0)).toEqual([]);
   });
+
+  it("follows the display order it is given, not the query order", () => {
+    // 按天分组会重排（同一天的项目聚在一起），范围只能按传进来的这份顺序取：
+    // 网格层传 gridItems，鼠标与键盘因此落在同一批卡片上。
+    const display = ["day1-a", "day1-b", "day2-c", "day1-d"].map((id) => ({ id }));
+    expect(collectRangeIds(display, 0, 2)).toEqual(["day1-a", "day1-b", "day2-c"]);
+  });
 });

@@ -14,7 +14,14 @@ import { formatCount } from "../../lib/format";
 import { previewAssetCache } from "../../media/cache";
 import { app } from "../../render/context";
 import { render, renderSettingsAware } from "../../render/paint";
-import { closeFilterPanel, filterPanelOpen, patchToolbar, updateScanProgressView } from "../../render/toolbar";
+import {
+  closeFilterPanel,
+  closeSelectionMore,
+  filterPanelOpen,
+  patchToolbar,
+  selectionMoreOpen,
+  updateScanProgressView,
+} from "../../render/toolbar";
 import { invalidateGridGeometry, scheduleGridPaint } from "../../render/virtual";
 import { state } from "../../state";
 import { closeAiChatDrawer } from "../../views/ai-chat";
@@ -36,10 +43,11 @@ import { backupRunning, bootstrap, closeBackupPanel, loadBackupHistory, viewNewI
 import { cancelDeleteConfirm } from "../media-ops";
 import { patchBackupOverlay } from "../orchestrate";
 import { showToast } from "../toast";
-import { refreshTags } from "../media-query";
+import { refreshTags, selectCurrentResults } from "../media-query";
 import { closeSettings, loadAiStats, loadSettingsSectionData } from "../settings-ops";
 import { handleCutCompleted, handleEditSaved, handleMergeCompleted } from "./editor";
 import { handlePreviewEscape } from "./preview";
+import { clearSelection } from "./toolbar";
 
 /**
  * 焦点在可输入元素内时，全局快捷键一律让路（Esc 除外：它仍然是"关最上层"）。
@@ -102,6 +110,9 @@ window.addEventListener("keydown", (event) => {
     // Enter 不再在这里当成"确认删除"：焦点默认在取消按钮上，Enter 交还给浏览器
     // 去激活当前聚焦的那个按钮，跟所有普通按钮的行为一致。
   }
+  // 删除确认在屏上时（含 deleting 已置位的那一瞬）不吃任何全局快捷键：
+  // 否则 Ctrl+A / / 会穿过弹窗落到背后的网格上。
+  if (state.deleteConfirm) return;
   if (state.backupOpen) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -121,15 +132,35 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (state.previewIndex === null) {
+    // Ctrl+A 全选当前结果：只在「没有弹窗、不在预览、焦点不在输入框」时成立。
+    // 触发后必须 preventDefault，否则浏览器把整页文字一起选蓝。
+    if ((event.ctrlKey || event.metaKey) && (event.key === "a" || event.key === "A")) {
+      event.preventDefault();
+      selectCurrentResults();
+      return;
+    }
     if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
       event.preventDefault();
       app.querySelector<HTMLInputElement>("#search-input")?.focus();
     }
-    // AI 助手抽屉层级低于预览：仅当没有更高层浮层时才用 Esc 关它。
-    if (state.aiChatOpen && event.key === "Escape") {
-      event.preventDefault();
-      closeAiChatDrawer();
-      return;
+    if (event.key === "Escape") {
+      // 层级从轻到重：筛选面板（上面已拦）→「更多」弹层 → AI 抽屉 → 清空选择。
+      if (selectionMoreOpen) {
+        event.preventDefault();
+        closeSelectionMore({ restoreFocus: true });
+        return;
+      }
+      // AI 助手抽屉层级低于预览：仅当没有更高层浮层时才用 Esc 关它。
+      if (state.aiChatOpen) {
+        event.preventDefault();
+        closeAiChatDrawer();
+        return;
+      }
+      if (state.selectedIds.size) {
+        event.preventDefault();
+        clearSelection();
+        return;
+      }
     }
     return;
   }

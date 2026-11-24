@@ -104,7 +104,7 @@ export const SHELL_HTML = `<div class="shell"><aside class="sidebar" aria-label=
     <div data-region="status"></div>
     <div class="sticky-controls"><div class="toolbar"><div class="filter-row" data-region="filter-row"></div><div class="toolbar-right" data-region="toolbar-right"></div></div><div class="filter-chips" data-region="filter-chips" role="group" aria-label="已选筛选条件"></div><div data-region="selection"></div></div>
     <section class="media-area" aria-live="polite" data-region="media"></section></main></div>
-<div id="overlay-host"><div data-overlay="preview"></div><div data-overlay="confirm"></div><div data-overlay="tag-manager"></div><div data-overlay="editor"></div><div data-overlay="merge"></div><div data-overlay="settings"></div><div data-overlay="ai-chat"></div><div data-overlay="backup"></div><div data-overlay="deleted"></div><div data-overlay="filters"></div></div>
+<div id="overlay-host"><div data-overlay="preview"></div><div data-overlay="confirm"></div><div data-overlay="tag-manager"></div><div data-overlay="editor"></div><div data-overlay="merge"></div><div data-overlay="settings"></div><div data-overlay="ai-chat"></div><div data-overlay="backup"></div><div data-overlay="deleted"></div><div data-overlay="filters"></div><div data-overlay="selection-more"></div></div>
 <div id="toast-host" aria-live="polite"></div>`;
 
 export function renderShell(force = false): void {

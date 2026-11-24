@@ -1473,6 +1473,39 @@ h1 {
   color: #777777;
   font-size: 10px;
 }
+/* 「选择这天」：hover 才出现（它不该和标题抢注意力），但一直留在 DOM 里，
+   键盘/读屏仍能通过鼠标聚焦或 day 分组内的导航到达——tabindex="-1" 是为了
+   不把 100 个天分组变成 100 个 Tab 停靠点。 */
+.day-heading .select-day {
+  margin-left: 4px;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--faint);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity 0.16s ease,
+    color 0.16s ease,
+    background 0.16s ease;
+}
+.media-day-group:hover .day-heading .select-day,
+.day-heading .select-day:focus,
+.day-heading .select-day:focus-visible {
+  opacity: 1;
+}
+.day-heading .select-day:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(255, 255, 255, 0.7);
+}
+[data-theme="dark"] .day-heading .select-day:hover {
+  background: var(--chip-active);
+  border-color: var(--border-soft);
+}
 .media-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--tile-min, 220px), 1fr));
@@ -1528,6 +1561,19 @@ h1 {
 }
 .media-card.is-selected .card-preview {
   box-shadow: inset 0 0 0 2px #111111;
+}
+/* 卡片是整个网格唯一的 Tab 停靠点：焦点环必须实心、够粗，否则玻璃底上根本看不出来。
+   用 outline 而不是 box-shadow，不受选中态的阴影覆盖影响。 */
+.media-card:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+/* 卡片拿到焦点（或 hover）时，卡内「选择 / 收藏」两个圆形按钮才浮现并可点。
+   它们 tabindex="-1"：可点、可读屏访问，但不占 Tab 序列。 */
+.media-card:focus .card-actions,
+.media-card:focus-within .card-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 /* Thumbnail action cluster — quieter glass chips, clearer active states. */
 .card-actions {
@@ -1858,16 +1904,50 @@ h1 {
 }
 .selection-summary {
   min-width: 0;
-  padding: 0 4px;
+  padding: 0 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.selection-hint {
+  color: var(--faint);
+  font-size: 10px;
+}
+/* 分组：高频动作挤在左边，「移入回收站」独占最右，中间一条分隔线。危险动作靠
+   位置和间距隔离，不靠再换一种红——同色系里再加一档红只会让两边都变模糊。 */
+.selection-toolbar .selection-primary {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.selection-toolbar .selection-danger {
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-soft);
+}
+.selection-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.selection-more-caret {
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1;
 }
 .selection-toolbar .danger-button {
-  margin-left: auto;
+  margin-left: 0;
 }
 .selection-button,
-.clear-selection-button,
 .danger-button {
   height: 32px;
   padding: 0 12px;
@@ -1886,21 +1966,18 @@ h1 {
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.9);
 }
 .selection-button:hover,
-.clear-selection-button:hover,
 .danger-button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
+/* 「不可用」要给得出来：以前这些按钮同色同级、也没有禁用态，AI 打标对纯视频
+   选择不生效时看起来像是点坏了。 */
+.selection-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+  transform: none;
+}
 .selection-button:hover {
   background: rgba(255, 255, 255, 0.95);
-}
-.clear-selection-button {
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  color: #666666;
-  background: rgba(255, 255, 255, 0.5);
-}
-.clear-selection-button:hover {
-  color: #111111;
-  background: rgba(255, 255, 255, 0.85);
 }
 .danger-button {
   border: 1px solid rgba(120, 20, 20, 0.28);
@@ -1922,6 +1999,152 @@ h1 {
   cursor: wait;
   opacity: 0.65;
 }
+
+/* --------------------------------------------------------------------------
+   批量「更多」弹层：标签多选 + 评分 + 合并视频，一次「应用」。
+   挂在 #overlay-host 的 [data-overlay="selection-more"] 槽位（fixed），几何由
+   positionSelectionMore() 按「更多」按钮的 rect 算，因此不会被吸顶条裁切。
+   -------------------------------------------------------------------------- */
+.selection-more {
+  position: fixed;
+  z-index: var(--z-overlay);
+  display: flex;
+  max-height: min(520px, calc(100vh - 120px));
+  flex-direction: column;
+  padding: 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  color: var(--ink);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  backdrop-filter: blur(22px) saturate(1.3);
+  -webkit-backdrop-filter: blur(22px) saturate(1.3);
+}
+.selection-more-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 9px;
+}
+.selection-more-head strong {
+  color: var(--ink-strong);
+  font-size: 12px;
+  font-weight: 760;
+}
+.selection-more-head span {
+  flex: 1;
+  color: var(--faint);
+  font-size: 10px;
+}
+.selection-more-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+.selection-more-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.selection-more-group[hidden] {
+  display: none;
+}
+.selection-more-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.selection-more-group-head h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+.selection-more-group-head > span {
+  color: var(--faint);
+  font-size: 10px;
+}
+.selection-more-tags {
+  min-height: 68px;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 3px;
+  border: 1px solid var(--border-hairline);
+  border-radius: 10px;
+  background: var(--inset);
+}
+.selection-more-rating {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.selection-more-rating .star-button svg {
+  width: 18px;
+  height: 18px;
+}
+.selection-more-clear-rating {
+  margin-left: auto;
+}
+.selection-more-clear-rating.is-active {
+  color: var(--ink);
+  background: var(--chip-active);
+}
+.selection-more-merge {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+.selection-more-hint {
+  min-width: 0;
+  color: var(--faint);
+  font-size: 10px;
+}
+.selection-more-note {
+  margin: 10px 2px 0;
+  color: var(--faint);
+  font-size: 10px;
+}
+.selection-more-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-hairline);
+}
+.selection-more-utility {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 2px;
+}
+.selection-more-foot .primary-button {
+  padding: 6px 16px;
+  font-size: 11px;
+}
+.selection-more-foot .primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.selection-more-detach {
+  font-size: 10px;
+}
+@media (max-width: 720px) {
+  .selection-more {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    max-height: 60vh;
+  }
+}
+
 .notice-banner.is-success .notice-icon {
   background: #1f6b3a;
 }
@@ -3827,23 +4050,6 @@ h1 {
   font-size: 11px;
   text-align: center;
 }
-.batch-tag-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: 4px;
-  padding-left: 6px;
-  border-left: 1px solid rgba(0, 0, 0, 0.08);
-}
-.batch-tag-row select {
-  max-width: 110px;
-  padding: 5px 6px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #222222;
-  font-size: 11px;
-}
 .meta-tags-head {
   display: flex;
   align-items: center;
@@ -5577,15 +5783,6 @@ h1 {
 }
 [data-theme="dark"] .selection-button:hover {
   background: var(--surface-solid);
-}
-[data-theme="dark"] .clear-selection-button {
-  border-color: var(--border-soft);
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.05);
-}
-[data-theme="dark"] .clear-selection-button:hover {
-  color: var(--ink);
-  background: var(--chip-active);
 }
 [data-theme="dark"] .danger-button {
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
@@ -7701,14 +7898,6 @@ details.ai-advanced .settings-form {
 }
 [data-theme="dark"] .tag-picker-empty {
   color: var(--faint);
-}
-[data-theme="dark"] .batch-tag-row {
-  border-left-color: var(--border-hairline);
-}
-[data-theme="dark"] .batch-tag-row select {
-  border-color: var(--border-control);
-  background: var(--control-bg);
-  color: var(--ink);
 }
 [data-theme="dark"] .star-empty-label {
   color: var(--faint);

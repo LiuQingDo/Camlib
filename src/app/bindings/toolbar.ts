@@ -1,10 +1,12 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { MediaKind } from "../../api/media";
 import { presetRange, type DatePresetId } from "../../lib/date-range";
+import { UNKNOWN_DAY } from "../../lib/grid";
 import { collectRangeIds } from "../../lib/selection";
 import { app } from "../../render/context";
 import { persistUiPrefs, refreshMedia, render } from "../../render/paint";
 import { patchSidebar } from "../../render/shell";
+import { displayItems } from "../media-order";
 import {
   applySelectionChrome,
   patchToolbar,
@@ -305,7 +307,7 @@ export function toggleCardSelection(button: HTMLElement, event: MouseEvent): voi
 export function toggleSelection(id: string, index: number, range = false): void {
   if (range && state.lastSelectIndex !== null) {
     // Range endpoints are resolved by collectRangeIds; out-of-page rows are skipped.
-    for (const rangeId of collectRangeIds(state.page.items, state.lastSelectIndex, index)) {
+    for (const rangeId of collectRangeIds(displayItems(), state.lastSelectIndex, index)) {
       state.selectedIds.add(rangeId);
     }
     // The range end becomes the next anchor so chained Shift+clicks extend.
@@ -317,4 +319,28 @@ export function toggleSelection(id: string, index: number, range = false): void 
   else state.selectedIds.add(id);
   state.lastSelectIndex = index;
   applySelectionChrome();
+}
+
+/** 清空选择：Esc 与弹层里的「清除选择」共用，锚点一起丢掉。 */
+export function clearSelection(): void {
+  if (!state.selectedIds.size) return;
+  state.selectedIds.clear();
+  state.lastSelectIndex = null;
+  applySelectionChrome();
+}
+
+/**
+ * 「选择这天」：把该天分组里的 id 全部加入选择（只加不减，方便按天累加）。
+ * 分组边界与网格一致（`captureDate ?? "unknown"`），所以计数和标题上的「N 个项目」对得上。
+ */
+export function selectDay(date: string): void {
+  if (!date) return;
+  let changed = false;
+  for (const item of displayItems()) {
+    if ((item.captureDate ?? UNKNOWN_DAY) !== date) continue;
+    if (state.selectedIds.has(item.id)) continue;
+    state.selectedIds.add(item.id);
+    changed = true;
+  }
+  if (changed) applySelectionChrome();
 }

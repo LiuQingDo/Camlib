@@ -1,5 +1,6 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { MediaItemDto, getMediaThumbnail } from "../api/media";
+import { tabStopIndex } from "../lib/focus-nav";
 import { formatDuration, formatSize } from "../lib/format";
 import { UNKNOWN_DAY } from "../lib/grid";
 import { ThumbnailCancelled, cancelQueuedThumbnail, loadThumbnail, thumbnailUrlCache } from "../media/cache";
@@ -47,13 +48,18 @@ export function renderCard(item: MediaItemDto, index: number): string {
   const durationMs = item.durationMs != null && item.durationMs > 0 ? item.durationMs : null;
   const durationBadge = durationMs != null ? `<span class="duration-badge">${formatDuration(durationMs)}</span>` : "";
   const cachedThumb = thumbnailUrlCache.get(item.id);
+  // roving tabindex：整屏卡片里只有一张进入 Tab 序列（state.focusIndex，未进过
+  // 网格时退回第一张），其余靠方向键/点击到达。卡内两个按钮也退出 Tab 序列，
+  // 但保留可点与读屏可访问——100 张卡不该产生 300 个停靠点。
+  const tabStop = tabStopIndex(state.focusIndex, state.page.items.length);
+  const tabIndex = index === tabStop ? "0" : "-1";
   const previewContent = cachedThumb
     ? `<img src="${escapeHtml(cachedThumb)}" alt="" decoding="async" />${isVideo ? `<span class="video-overlay">▶</span>` : ""}`
     : isVideo
       ? `<span class="video-placeholder"><span class="play-mark">▶</span><span>视频</span></span>`
       : `<span class="preview-skeleton" aria-hidden="true"></span>`;
-  return `<article class="media-card ${selected ? "is-selected" : ""}" data-action="open-media" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="0" role="group" aria-label="${escapeHtml(item.displayName)}">
-    <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-action="toggle-select" data-id="${escapeHtml(item.id)}" type="button" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-action="toggle-favorite" data-id="${escapeHtml(item.id)}" type="button" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
+  return `<article class="media-card ${selected ? "is-selected" : ""}" data-action="open-media" data-id="${escapeHtml(item.id)}" data-index="${index}" tabindex="${tabIndex}" role="group" aria-label="${escapeHtml(item.displayName)}">
+    <div class="card-preview ${isVideo ? "is-video" : ""}${cachedThumb ? " has-preview" : ""}" data-preview="${escapeHtml(item.id)}"${cachedThumb ? ' data-loaded="true"' : ""}>${previewContent}<div class="card-actions"><button class="card-action card-select ${selected ? "is-checked" : ""}" data-action="toggle-select" data-id="${escapeHtml(item.id)}" type="button" tabindex="-1" aria-label="${selected ? "取消选择" : "选择"}${escapeHtml(item.displayName)}" aria-pressed="${selected}"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 12.5 10 17l8.5-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="card-action card-favorite ${favorite ? "is-favorite" : ""} ${favoritePending ? "is-pending" : ""}" data-action="toggle-favorite" data-id="${escapeHtml(item.id)}" type="button" tabindex="-1" aria-label="${favorite ? "取消收藏" : "收藏"}${escapeHtml(item.displayName)}" aria-pressed="${favorite}" aria-busy="${favoritePending}" ${favoritePending ? "disabled" : ""}><svg class="icon-star-outline" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="icon-star-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3.8 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.78 7.3 18.25l.9-5.23-3.8-3.7 5.25-.76L12 3.8Z" fill="currentColor"/></svg></button></div><span class="kind-badge kind-${item.kind}">${kindLabel(item.kind)}</span>${item.scanState !== "present" ? `<span class="state-badge">${item.scanState === "missing" ? "离线" : "需检查"}</span>` : ""}${item.burstGroup ? `<span class="burst-badge">连拍</span>` : ""}${durationBadge}</div>
     <div class="card-info"><div class="card-title" title="${escapeHtml(item.displayName)}">${escapeHtml(item.displayName)}</div><div class="card-meta"><span data-meta="date">${formatDate(item.captureDate)}</span><span data-meta="size">${formatSize(item.totalSizeBytes)}</span>${cardRatingHtml(item.rating)}</div></div>
   </article>`;
 }
@@ -62,13 +68,16 @@ export function createDayGroup(date: string): HTMLElement {
   const section = document.createElement("section");
   section.className = "media-day-group";
   section.dataset.day = date;
-  section.innerHTML = `<header class="day-heading"><h2></h2><span></span></header><div class="media-grid"></div>`;
+  // 「选择这天」不参与 Tab 序列（tabindex="-1"）：100 个天分组就是 100 个停靠点，
+  // 会把「Tab 进网格只有 1 个停靠点」这条彻底废掉。它靠 hover / 鼠标聚焦显露，
+  // 键盘侧的范围选择走 Shift+方向键。
+  section.innerHTML = `<header class="day-heading"><h2></h2><span data-day-count></span><button class="select-day" type="button" tabindex="-1" data-action="select-day" data-day="${escapeHtml(date)}" title="选中这一天的全部项目">选择这天</button></header><div class="media-grid"></div>`;
   return section;
 }
 
 export function patchDayGroupHeader(section: HTMLElement, date: string, count: number): void {
   setText(section.querySelector(".day-heading h2"), date === UNKNOWN_DAY ? "日期未知" : formatDate(date));
-  setText(section.querySelector(".day-heading span"), `${count} 个项目`);
+  setText(section.querySelector("[data-day-count]"), `${count} 个项目`);
 }
 
 /**
@@ -77,6 +86,8 @@ export function patchDayGroupHeader(section: HTMLElement, date: string, count: n
  */
 export function patchCardNode(card: HTMLElement, item: MediaItemDto, index: number): void {
   if (card.dataset.index !== String(index)) card.dataset.index = String(index);
+  const tabStop = tabStopIndex(state.focusIndex, state.page.items.length);
+  setAttr(card, "tabindex", index === tabStop ? "0" : "-1");
   const selected = state.selectedIds.has(item.id);
   card.classList.toggle("is-selected", selected);
   const select = card.querySelector<HTMLButtonElement>(".card-select");
@@ -181,6 +192,22 @@ export function recycleCardNode(card: HTMLElement, item: MediaItemDto, index: nu
   if (!fresh) return;
   card.replaceChildren(...Array.from(fresh.childNodes));
   Array.from(fresh.attributes).forEach((attribute) => card.setAttribute(attribute.name, attribute.value));
+}
+
+/**
+ * 把 roving tabindex 同步到当前挂载的卡片上。
+ *
+ * 键盘搬焦点时调用；虚拟滚动把停靠点那张卡收回节点池时也调用一次——否则整个
+ * 网格一张 `tabindex="0"` 都不剩，Tab 键就再也进不来了（此时退回窗口里第一张，
+ * 但不动 `state.focusIndex`：滚动回来还该停在原来那张）。
+ */
+export function applyGridRoving(): void {
+  const cards = [...app.querySelectorAll<HTMLElement>(".media-card")];
+  if (!cards.length) return;
+  const stop = tabStopIndex(state.focusIndex, state.page.items.length);
+  const mounted = cards.some((card) => Number(card.dataset.index) === stop);
+  const effective = mounted ? stop : Number(cards[0].dataset.index ?? 0);
+  for (const card of cards) setAttr(card, "tabindex", Number(card.dataset.index) === effective ? "0" : "-1");
 }
 
 /** 单日卡片列表 keyed reconcile；返回新建（含复用重写）的卡片数量。 */

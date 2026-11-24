@@ -15,9 +15,9 @@ import {
 import { formatCount } from "../lib/format";
 import { modalThumbnailRequests, previewAssetCache, thumbnailRequests, thumbnailUrlCache } from "../media/cache";
 import { app } from "../render/context";
-import { render, showTransientNotice } from "../render/paint";
+import { refreshMedia, render } from "../render/paint";
 import { patchSidebar } from "../render/shell";
-import { applySelectionChrome, patchToolbar, updateFavoriteButton } from "../render/toolbar";
+import { applySelectionChrome, closeSelectionMore, patchToolbar, updateFavoriteButton } from "../render/toolbar";
 import { bumpGridEpoch, patchGrid } from "../render/virtual";
 import { state } from "../state";
 import { invalidatePreviewMeta, loadModalAsset } from "../views/preview";
@@ -81,7 +81,6 @@ export async function applyBatchFavorite(favorite: boolean): Promise<void> {
       state.page.items = state.page.items.filter((item) => !removed.has(item.id));
       state.page.total = Math.max(0, state.page.total - removed.size);
     }
-    state.deleteNotice = favorite ? `已收藏 ${formatCount(ids.length)} 项` : `已取消收藏 ${formatCount(ids.length)} 项`;
   } catch (error) {
     state.error = toUserMessage(error, "批量更新收藏失败");
   } finally {
@@ -95,90 +94,119 @@ export async function applyBatchFavorite(favorite: boolean): Promise<void> {
     return;
   }
   applySelectionChrome();
-  showTransientNotice(state.deleteNotice ?? "");
-  state.deleteNotice = null;
+  // 收藏是唯一给「撤销」的批量动作：它只写一个布尔值，撤销成本可控。标签与评分
+  // 要记住每一项的原值，做不到就别承诺（弹层里已写明不可撤销）。
+  showToast(favorite ? `已收藏 ${formatCount(ids.length)} 项` : `已取消收藏 ${formatCount(ids.length)} 项`, {
+    kind: "success",
+    key: "batch-favorite",
+    action: { label: "撤销", run: () => void undoBatchFavorite(ids, favorite) },
+  });
 }
 
-export async function applyBatchTag(attach: boolean): Promise<void> {
-  if (!state.selectedIds.size || state.tagsBusy) return;
-  const select = app.querySelector<HTMLSelectElement>("#batch-tag-select");
-  const tagId = select?.value.trim();
-  if (!tagId) {
-    state.error = "请先选择标签";
-    patchToolbar();
-    return;
-  }
-  const ids = [...state.selectedIds];
-  state.tagsBusy = true;
-  state.error = null;
-  applySelectionChrome();
+/** 撤销一批收藏写入：把布尔值写回原样，再回滚本地缓存。 */
+async function undoBatchFavorite(ids: string[], applied: boolean): Promise<void> {
   try {
-    if (attach) await attachTagsBatch(ids, tagId);
-    else await detachTagsBatch(ids, tagId);
-    invalidatePreviewMeta(ids);
-    await refreshTags();
-    const tagName = state.tags.find((tag) => tag.id === tagId)?.name ?? "标签";
-    state.deleteNotice = attach
-      ? `已为 ${formatCount(ids.length)} 项添加「${tagName}」`
-      : `已从 ${formatCount(ids.length)} 项移除「${tagName}」`;
+    await setFavoritesBatch(ids, !applied);
   } catch (error) {
-    state.error = toUserMessage(error, "批量更新标签失败");
-  } finally {
-    state.tagsBusy = false;
-  }
-  if (state.error || (state.tagIds.has(tagId) && !attach)) {
-    patchGrid();
-    patchToolbar();
+    showToast(toUserMessage(error, "撤销失败"), { kind: "error", key: "batch-favorite" });
     return;
   }
-  applySelectionChrome();
-  showTransientNotice(state.deleteNotice ?? "");
-  state.deleteNotice = null;
+  invalidatePreviewMeta(ids);
+  for (const id of ids) {
+    if (applied) state.favorites.delete(id);
+    else state.favorites.add(id);
+    updateFavoriteButton(id);
+  }
+  showToast("已撤销上一次收藏操作", { kind: "info", key: "batch-favorite" });
+  // 「只看收藏」下撤销「取消收藏」= 这些项重新属于结果集，但原位置找不回来；
+  // 交给一次真正的重新查询，比在这里猜插入点可靠。
+  if (state.favoriteOnly) void refreshMedia();
+  else {
+    patchGrid();
+    applySelectionChrome();
+  }
 }
 
-export async function applyBatchRating(): Promise<void> {
+/** 收藏切换：只要批里还有一张没收藏，这次动作就是「收藏」。 */
+export function toggleFavoriteSelected(): void {
+  if (!state.selectedIds.size || state.favoritesBusy) return;
+  const allFavorite = [...state.selectedIds].every((id) => state.favorites.has(id));
+  void applyBatchFavorite(!allFavorite);
+}
+
+/** 「更多」弹层一次提交的草稿：标签（多选）+ 评分，标签在前。 */
+export interface BatchMetaDraft {
+  tagIds: string[];
+  rating: number | null;
+  detachTags: boolean;
+}
+
+/**
+ * 批量标签 + 评分一次确认。
+ *
+ * 串行调用既有的 attach/detach 与 rating 命令（后端没有「标签+评分」合并命令，
+ * 这里也不新增）：先标签后评分，标签失败不拦评分；任一失败最后汇总成**一条**
+ * toast——逐条弹会把屏幕铺满，也看不出总共错了几项。
+ */
+export async function applyBatchMeta(draft: BatchMetaDraft): Promise<void> {
   if (!state.selectedIds.size || state.tagsBusy) return;
-  const select = app.querySelector<HTMLSelectElement>("#batch-rating-select");
-  const raw = select?.value.trim();
-  if (raw === "" || raw === undefined) {
-    state.error = "请先选择评分";
-    patchToolbar();
-    return;
-  }
-  const rating = Number(raw);
-  if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
-    state.error = "评分必须是 0–5";
-    patchToolbar();
+  const tagIds = [...new Set(draft.tagIds)];
+  const rating = draft.rating;
+  if (!tagIds.length && rating === null) {
+    showToast("请先选择标签或评分", { kind: "info", key: "batch-meta" });
     return;
   }
   const ids = [...state.selectedIds];
+  const failures: string[] = [];
+  const appliedTags: string[] = [];
   state.tagsBusy = true;
   state.error = null;
   applySelectionChrome();
   try {
-    await setRatingsBatch(ids, rating);
-    invalidatePreviewMeta(ids);
-    for (const id of ids) {
-      if (rating > 0) state.ratings.set(id, rating);
-      else state.ratings.delete(id);
-      const item = state.page.items.find((entry) => entry.id === id);
-      if (item) item.rating = rating;
+    for (const tagId of tagIds) {
+      const name = state.tags.find((tag) => tag.id === tagId)?.name ?? "标签";
+      try {
+        if (draft.detachTags) await detachTagsBatch(ids, tagId);
+        else await attachTagsBatch(ids, tagId);
+        appliedTags.push(name);
+      } catch (error) {
+        failures.push(`标签「${name}」：${toUserMessage(error, "更新失败")}`);
+      }
     }
-    state.deleteNotice =
-      rating === 0 ? `已清除 ${formatCount(ids.length)} 项评分` : `已为 ${formatCount(ids.length)} 项设为 ${rating} 星`;
-  } catch (error) {
-    state.error = toUserMessage(error, "批量设置评分失败");
+    if (rating !== null) {
+      try {
+        await setRatingsBatch(ids, rating);
+        for (const id of ids) {
+          if (rating > 0) state.ratings.set(id, rating);
+          else state.ratings.delete(id);
+          const item = state.page.items.find((entry) => entry.id === id);
+          if (item) item.rating = rating;
+        }
+      } catch (error) {
+        failures.push(`评分：${toUserMessage(error, "设置失败")}`);
+      }
+    }
+    if (appliedTags.length) {
+      invalidatePreviewMeta(ids);
+      await refreshTags();
+    }
   } finally {
     state.tagsBusy = false;
   }
-  if (state.error || state.ratingEq !== null || state.ratingMin !== null) {
+  // 提交即收弹层：草稿已经落地，留在屏幕上只会让人以为还没执行。
+  closeSelectionMore();
+  if (failures.length) {
+    showToast(`批量操作部分失败：${failures.join("；")}`, { kind: "error", key: "batch-meta" });
     patchGrid();
     patchToolbar();
     return;
   }
+  const parts: string[] = [];
+  if (appliedTags.length) parts.push(`${draft.detachTags ? "移除" : "附加"} ${formatCount(appliedTags.length)} 个标签`);
+  if (rating !== null) parts.push(rating === 0 ? "清除评分" : `评分设为 ${rating} 星`);
+  showToast(`已对 ${formatCount(ids.length)} 项${parts.join("、")} · 不可撤销`, { kind: "success", key: "batch-meta" });
+  patchGrid();
   applySelectionChrome();
-  showTransientNotice(state.deleteNotice ?? "");
-  state.deleteNotice = null;
 }
 
 /**
@@ -270,6 +298,8 @@ export function applyDeleteToGrid(result: DeleteResultDto, requestedIds: string[
   for (const id of failed) {
     if (requestedIds.includes(id)) state.selectedIds.add(id);
   }
+  // 卡片被摘掉之后，旧的 roving 下标指向的是已经不存在的行。
+  state.focusIndex = null;
   if (state.previewIndex !== null) {
     const current = state.page.items[state.previewIndex];
     if (!current) state.previewIndex = null;
@@ -286,7 +316,6 @@ export async function requestDeleteSelected(): Promise<void> {
   const ids = [...state.selectedIds];
   state.deleting = true;
   state.deleteResult = null;
-  state.deleteNotice = null;
   state.error = null;
   patchToolbar();
   try {

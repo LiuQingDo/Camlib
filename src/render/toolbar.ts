@@ -6,8 +6,9 @@ import { matchDatePreset, type DatePresetId } from "../lib/date-range";
 import { formatDatePrefix, panelFilterCount, secondaryFilterParts } from "../lib/filters";
 import { formatCount, formatRangeLabel } from "../lib/format";
 import { SortMode, state } from "../state";
-import { app, region, setRegionHtml, setText } from "./context";
+import { app, region, setAttr, setRegionHtml, setText } from "./context";
 import { bindStatusEvents } from "./paint";
+import { starSvg } from "./grid";
 import { escapeHtml, formatDate, groupedFacets } from "./text";
 
 /**
@@ -118,6 +119,8 @@ export function applySelectionChrome(): void {
   });
   // 选择工具栏有独立挂载点，内容不变就不碰 DOM（Shift 连选时这里会被高频调用）。
   setRegionHtml(region("selection"), renderSelectionToolbar());
+  // 「更多」里的「将影响 N 项」跟着选择集走；弹层没开时这里只是一次空查询。
+  patchSelectionMore();
 }
 
 export function updateFavoriteButton(id: string): void {
@@ -478,6 +481,31 @@ document.addEventListener(
   true,
 );
 
+// 「更多」弹层同样挂在 overlay 槽位、按锚点定位：点外面 / 改尺寸 / 内容区滚动
+// 都会让锚点失效，直接收起比让它飘在半空强。工具栏自身算「它的地盘」。
+document.addEventListener("pointerdown", (event) => {
+  if (!selectionMoreOpen) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target) return;
+  if (target.closest("#selection-more") || target.closest(".selection-toolbar")) return;
+  closeSelectionMore();
+});
+
+window.addEventListener("resize", () => {
+  if (selectionMoreOpen) closeSelectionMore();
+});
+
+document.addEventListener(
+  "scroll",
+  (event) => {
+    if (!selectionMoreOpen) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest("#selection-more")) return;
+    closeSelectionMore();
+  },
+  true,
+);
+
 export function scanStatusLabel(progress: ScanProgressDto): string {
   if (progress.total > 0) {
     const phase =
@@ -721,55 +749,350 @@ export function updateScanProgressView(): void {
   if (detail && progress.current) setText(detail, progress.current);
 }
 
-export function renderSelectionToolbar(): string {
-  if (!state.page.total) return "";
-  const allSelected = state.selectedIds.size >= state.page.total;
-  const tagOptions = state.tags
-    .map((tag) => `<option value="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</option>`)
-    .join("");
+// ---------------------------------------------------------------------------
+// 批量选择工具栏
+//
+// 收敛前这里是一行 10 个按钮 + 2 个下拉，全部同级同色：「收藏 / 取消收藏」
+// 「打标 / 移除」并排摆着，点错的成本全靠用户自己读文案。现在只留 4 个高频
+// 动作 + 「更多」，破坏性动作单独挂最右、与高频动作之间用分隔线隔开。
+//
+// 「更多」里的标签与评分是**一次确认**：选完点一次「应用」，先写标签再写评分
+// （标签失败不拦评分），任一失败合并成一条 toast。两者都不可撤销，所以弹层里
+// 常驻一行「将影响 N 项」。
+// ---------------------------------------------------------------------------
+
+/** 「更多」弹层开关。模块级：它不影响任何查询参数，进 state 只会污染刷新判断。 */
+export let selectionMoreOpen = false;
+
+/** 弹层草稿：勾选的标签、目标评分（null = 不修改，0 = 清除）、标签是加还是移除。 */
+const draftTagIds = new Set<string>();
+let draftRating: number | null = null;
+let draftDetachTags = false;
+
+/** 打开后是否把焦点放进标签搜索框（点「标签」进来时为真）。 */
+let selectionMoreFocusPending = false;
+
+/** 标签搜索词与滚动位置：弹层重挂时回填，打了一半的字不该被吃掉。 */
+let selectionMoreTagQuery = "";
+let selectionMoreTagScroll = 0;
+
+/** AI 打标的可用性：只对已加载的照片生效（视频暂不支持）。 */
+function aiTagState(): { disabled: boolean; title: string; label: string } {
   const selectedCount = state.selectedIds.size;
-  // Items selected beyond the loaded pages (select-all) have no local kind;
-  // the video kind filter guarantees them, otherwise judge by loaded rows and
-  // let the merge dialog validate the rest.
-  const unloadedSelected = Math.max(
-    0,
-    selectedCount - state.page.items.filter((item) => state.selectedIds.has(item.id)).length,
-  );
-  const loadedSelectedVideos = state.page.items.filter(
-    (item) => state.selectedIds.has(item.id) && item.kind === "video",
-  ).length;
-  const mergeUnavailable =
-    selectedCount < 2
-      ? "选择两个及以上视频后可合并"
-      : state.kind === "video"
-        ? ""
-        : unloadedSelected > 0
-          ? ""
-          : loadedSelectedVideos < selectedCount
-            ? "所选项目中包含非视频媒体，无法合并"
-            : "";
-  const mergeDisabled = Boolean(
-    mergeUnavailable ||
-    state.mergeBusy ||
-    state.mergeJobId ||
-    state.deleting ||
-    state.favoritesBusy ||
-    state.tagsBusy ||
-    state.availability !== "available",
-  );
-  const mergeTitle = mergeUnavailable || "将所选视频按顺序合并为一个新文件";
-  const aiEligible = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video");
-  const aiDisabled = Boolean(
+  const eligible = state.page.items.filter((item) => state.selectedIds.has(item.id) && item.kind !== "video");
+  const disabled = Boolean(
     state.aiSingleBusy ||
     state.aiJobId ||
     state.availability !== "available" ||
-    (selectedCount > 0 && aiEligible.length === 0),
+    (selectedCount > 0 && eligible.length === 0),
   );
-  const aiTitle =
-    aiEligible.length === 0 && selectedCount > 0
+  const title =
+    eligible.length === 0 && selectedCount > 0
       ? "所选项目中没有可打标的照片（视频暂不支持）"
-      : `对所选 ${formatCount(aiEligible.length)} 张照片执行 AI 打标`;
-  return `<div class="selection-toolbar" aria-label="批量选择工具"><button class="selection-button" id="select-current" data-action="select-current-results" type="button">${allSelected ? "取消全选" : "全选当前结果"}</button><span class="selection-summary">${state.selectedIds.size ? `已选 ${formatCount(state.selectedIds.size)} 项 · Shift+点击可范围选择` : "选择媒体后可批量管理 · Shift+点击可范围选择"}</span>${state.selectedIds.size ? `<button class="clear-selection-button" id="clear-selection" data-action="clear-selection" type="button">清除选择</button><button class="selection-button" id="batch-ai-tag" data-action="batch-ai-tag" type="button" title="${escapeHtml(aiTitle)}" ${aiDisabled ? "disabled" : ""}>${state.aiSingleBusy ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…` : `✦ AI 打标`}</button><button class="selection-button" id="favorite-selected" data-action="batch-favorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "收藏中…" : "批量收藏"}</button><button class="selection-button" id="unfavorite-selected" data-action="batch-unfavorite" type="button" ${state.favoritesBusy || state.deleting ? "disabled" : ""}>${state.favoritesBusy ? "处理中…" : "取消收藏"}</button><span class="batch-tag-row"><select id="batch-tag-select" aria-label="批量标签" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">选择标签…</option>${tagOptions}</select><button class="selection-button" id="batch-tag-attach" data-action="batch-tag-attach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>${state.tagsBusy ? "处理中…" : "打标"}</button><button class="selection-button" id="batch-tag-detach" data-action="batch-tag-detach" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>移除</button><select id="batch-rating-select" aria-label="批量评分" ${state.tagsBusy || state.deleting ? "disabled" : ""}><option value="">评分…</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option><option value="0">清除</option></select><button class="selection-button" id="batch-rating-apply" data-action="batch-rating-apply" type="button" ${state.tagsBusy || state.deleting ? "disabled" : ""}>应用</button></span><button class="selection-button" id="merge-selected" data-action="merge-selected" type="button" title="${escapeHtml(mergeTitle)}" ${mergeDisabled ? "disabled" : ""}>${state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频"}</button><button class="danger-button" id="delete-selected" data-action="delete-selected" type="button" ${state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available" ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button>` : ""}</div>`;
+      : `对所选 ${formatCount(eligible.length)} 张照片执行 AI 打标`;
+  const label = state.aiSingleBusy
+    ? `AI ${formatCount(state.aiSingleDone)} / ${formatCount(state.aiSingleTotal)}…`
+    : "✦ AI 打标";
+  return { disabled, title, label };
+}
+
+/**
+ * 「合并视频」的可见性与禁用原因。
+ *
+ * 判断口径与原来工具栏上那颗按钮一致：选中 < 2 个、混入非视频、媒体库不可用都
+ * 不可用。搬进弹层后仍然「不可用不隐藏」，只给 disabled + 原因 title——隐藏会
+ * 让人以为这个功能被删了。
+ */
+function mergeState(): { visible: boolean; disabled: boolean; title: string; label: string } {
+  const selectedCount = state.selectedIds.size;
+  const loadedSelected = state.page.items.filter((item) => state.selectedIds.has(item.id));
+  const unloadedSelected = Math.max(0, selectedCount - loadedSelected.length);
+  const loadedVideos = loadedSelected.filter((item) => item.kind === "video").length;
+  // 只筛视频时，未加载的选中项可以确定也是视频；其它条件下判断不了，就不显示。
+  const nonVideo = state.kind === "video" ? 0 : loadedSelected.length - loadedVideos;
+  const visible = selectedCount > 0 && nonVideo === 0 && (unloadedSelected === 0 || state.kind === "video");
+  const reason =
+    selectedCount < 2
+      ? "选择两个及以上视频后可合并"
+      : state.mergeBusy || state.mergeJobId
+        ? "正在合并中，请稍候"
+        : state.deleting || state.favoritesBusy || state.tagsBusy
+          ? "正在处理其它批量操作，请稍候"
+          : state.availability !== "available"
+            ? "媒体库不可用，无法合并"
+            : "";
+  return {
+    visible,
+    disabled: Boolean(reason),
+    title: reason || "将所选视频按顺序合并为一个新文件",
+    label: state.mergeBusy || state.mergeJobId ? "合并中…" : "合并视频",
+  };
+}
+
+function ratingLabel(): string {
+  if (draftRating === null) return "不修改";
+  if (draftRating === 0) return "清除评分";
+  return `${draftRating} 星`;
+}
+
+function ratingButtonsHtml(): string {
+  // 星级是「选到第几颗」而不是单选按钮：≤ 目标的星都点亮，和预览里的评分控件一致。
+  const filled = draftRating !== null && draftRating > 0 ? draftRating : 0;
+  const stars = [1, 2, 3, 4, 5]
+    .map((value) => {
+      const active = draftRating === value;
+      return `<button class="star-button${value <= filled ? " is-filled" : ""}" type="button" data-action="selection-more-rating" data-rating="${value}" data-filled="${value <= filled ? "1" : "0"}" aria-pressed="${active}" aria-label="${value} 星">${starSvg(value <= filled)}</button>`;
+    })
+    .join("");
+  return `<span class="star-row" role="group" aria-label="批量评分">${stars}</span><button class="text-button selection-more-clear-rating${draftRating === 0 ? " is-active" : ""}" type="button" data-action="selection-more-rating" data-rating="0" aria-pressed="${draftRating === 0}">清除评分</button>`;
+}
+
+function selectionTagRowsHtml(): string {
+  const tags = sortedTagsByUsage();
+  if (!tags.length) {
+    return `<div class="filter-panel-empty">还没有标签。<button class="text-button" type="button" data-action="open-tag-manager">管理标签</button></div>`;
+  }
+  return `${tags
+    .map((tag) => {
+      const active = draftTagIds.has(tag.id);
+      return `<label class="tag-filter-row${active ? " is-active" : ""}" data-tag-name="${escapeHtml(tag.name.toLowerCase())}"><input type="checkbox" data-action="selection-more-tag" data-tag-id="${escapeHtml(tag.id)}" ${active ? "checked" : ""} /><span class="tag-filter-name">${escapeHtml(tag.name)}${tag.hasAi ? `<i class="ai-badge" aria-label="AI 标签">AI</i>` : ""}</span>${tag.mediaCount != null ? `<span class="tag-filter-count">${formatCount(tag.mediaCount)}</span>` : ""}</label>`;
+    })
+    .join("")}<div class="filter-panel-empty" data-tag-empty hidden>没有匹配的标签</div>`;
+}
+
+export function renderSelectionToolbar(): string {
+  if (!state.page.total) return "";
+  const selectedCount = state.selectedIds.size;
+  const busy = state.deleting || state.favoritesBusy;
+  // 一批里只要有一张没收藏，这次动作就是「收藏」——比两个并排按钮省一半空间。
+  const allFavorite = selectedCount > 0 && [...state.selectedIds].every((id) => state.favorites.has(id));
+  const favoriteLabel = state.favoritesBusy ? "处理中…" : allFavorite ? "取消收藏" : "收藏";
+  const ai = aiTagState();
+  const dangerDisabled =
+    state.deleting || state.favoritesBusy || state.tagsBusy || state.availability !== "available";
+  // 空选择时只留一条「全选」的出路：四个批量动作对着空集合全是死按钮，
+  // 而「更多」里的标签/评分也还没有作用对象。
+  const primary = selectedCount
+    ? `<span class="selection-summary" role="status" aria-live="polite">已选 ${formatCount(selectedCount)} 项</span><button class="selection-button" id="favorite-selected" data-action="toggle-favorite-selected" type="button" aria-pressed="${allFavorite}" ${busy ? "disabled" : ""}>${favoriteLabel}</button><button class="selection-button" id="selection-tags" data-action="open-selection-tags" type="button">标签</button><button class="selection-button" id="batch-ai-tag" data-action="batch-ai-tag" type="button" title="${escapeHtml(ai.title)}" ${ai.disabled ? "disabled" : ""}>${ai.label}</button><button class="selection-button selection-more-toggle" id="selection-more-toggle" data-action="toggle-selection-more" type="button" aria-haspopup="dialog" aria-expanded="${selectionMoreOpen}" aria-controls="selection-more">更多<span class="selection-more-caret" aria-hidden="true">▾</span></button>`
+    : `<span class="selection-summary" role="status" aria-live="polite">未选择</span><button class="selection-button" id="select-all-empty" data-action="select-current-results" type="button">全选当前结果</button><span class="selection-hint">点击卡片选择，或按 Ctrl+A 全选</span>`;
+  const danger = selectedCount
+    ? `<div class="selection-danger"><button class="danger-button" id="delete-selected" data-action="delete-selected" type="button" ${dangerDisabled ? "disabled" : ""}>${state.deleting ? "处理中…" : state.availability !== "available" ? "媒体库不可用" : "移入回收站"}</button></div>`
+    : "";
+  return `<div class="selection-toolbar" aria-label="批量选择工具"><div class="selection-primary">${primary}</div>${danger}</div>`;
+}
+
+/** 「更多」弹层：标签多选 + 评分星级 + 合并视频 + 一次「应用」。 */
+export function renderSelectionMoreMenu(): string {
+  const count = state.selectedIds.size;
+  const merge = mergeState();
+  const busy = state.tagsBusy || state.deleting;
+  return `<div class="selection-more" id="selection-more" role="dialog" aria-modal="false" aria-label="批量标签与评分"><div class="selection-more-head"><strong>标签与评分</strong><span data-selection-more-count>将影响 ${formatCount(count)} 项</span><button class="icon-button selection-more-close" type="button" data-action="close-selection-more" aria-label="关闭">×</button></div><div class="selection-more-body"><section class="selection-more-group"><div class="selection-more-group-head"><h3>标签</h3><label class="filter-switch selection-more-detach"><input type="checkbox" data-action="selection-more-detach" ${draftDetachTags ? "checked" : ""} /><span>移除所选标签</span></label></div><div class="tag-filter-search"><span aria-hidden="true">⌕</span><input id="selection-more-tag-input" type="search" placeholder="搜索标签" value="${escapeHtml(selectionMoreTagQuery)}" aria-label="搜索标签" /></div><div class="selection-more-tags" data-selection-more-tags data-signature="${escapeHtml(tagSignature())}">${selectionTagRowsHtml()}</div></section><section class="selection-more-group"><div class="selection-more-group-head"><h3>评分</h3><span data-selection-more-rating-label>${ratingLabel()}</span></div><div class="selection-more-rating">${ratingButtonsHtml()}</div></section><section class="selection-more-group selection-more-merge" data-selection-more-merge ${merge.visible ? "" : "hidden"}><button class="selection-button" id="selection-more-merge" type="button" data-action="merge-selected" title="${escapeHtml(merge.title)}" ${merge.disabled ? "disabled" : ""}>${merge.label}</button><span class="selection-more-hint">按所选顺序合并为一个新视频</span></section></div><p class="selection-more-note" data-selection-more-note>标签与评分应用后不可撤销 · 将影响 ${formatCount(count)} 项</p><div class="selection-more-foot"><div class="selection-more-utility"><button class="text-button" type="button" data-action="select-current-results">全选</button><button class="text-button" type="button" data-action="clear-selection">清除选择</button></div><button class="primary-button" id="selection-more-apply" type="button" data-action="apply-batch-meta" ${busy ? "disabled" : ""}>应用</button></div></div>`;
+}
+
+function selectionMoreSlot(): HTMLElement | null {
+  return app.querySelector<HTMLElement>('#overlay-host [data-overlay="selection-more"]');
+}
+
+/** 弹层被这些层级压住时直接收起——它非模态、没有焦点陷阱，留着只会挡住内容。 */
+function selectionMoreBlocked(): boolean {
+  return Boolean(
+    state.previewIndex !== null ||
+      state.settingsOpen ||
+      state.backupOpen ||
+      state.editorOpen ||
+      state.mergeModalOpen ||
+      state.tagsManagerOpen ||
+      state.deleteConfirm !== null,
+  );
+}
+
+/** 贴「更多」按钮右下角定位；窄屏交给 CSS 的底部抽屉，不写内联几何。 */
+function positionSelectionMore(panel: HTMLElement): void {
+  const anchor = app.querySelector<HTMLElement>("#selection-more-toggle");
+  if (!anchor) return;
+  if (window.matchMedia("(max-width: 720px)").matches) {
+    for (const property of ["left", "top", "width", "max-height"]) panel.style.removeProperty(property);
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  const margin = 12;
+  const width = Math.min(340, Math.max(280, window.innerWidth - 32));
+  let left = rect.right - width;
+  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+  panel.style.width = `${width}px`;
+  panel.style.left = `${left}px`;
+  panel.style.top = `${rect.bottom + 8}px`;
+  const available = window.innerHeight - rect.bottom - 8 - margin;
+  panel.style.maxHeight = `${Math.max(260, Math.min(window.innerHeight - 140, available))}px`;
+}
+
+/** 标签搜索：纯 DOM 显示切换，不碰 state，也不重建行。 */
+function filterSelectionTagRows(panel: HTMLElement): void {
+  const query = selectionMoreTagQuery.trim().toLowerCase();
+  let visible = 0;
+  panel.querySelectorAll<HTMLElement>("[data-selection-more-tags] .tag-filter-row").forEach((row) => {
+    const match = !query || (row.dataset.tagName ?? "").includes(query);
+    row.hidden = !match;
+    if (match) visible += 1;
+  });
+  const empty = panel.querySelector<HTMLElement>("[data-selection-more-tags] [data-tag-empty]");
+  if (empty) empty.hidden = visible > 0;
+}
+
+function bindSelectionMore(panel: HTMLElement): void {
+  const input = panel.querySelector<HTMLInputElement>("#selection-more-tag-input");
+  input?.addEventListener("input", () => {
+    selectionMoreTagQuery = input.value;
+    filterSelectionTagRows(panel);
+  });
+  filterSelectionTagRows(panel);
+  const list = panel.querySelector<HTMLElement>("[data-selection-more-tags]");
+  if (list) {
+    list.scrollTop = selectionMoreTagScroll;
+    list.addEventListener("scroll", () => (selectionMoreTagScroll = list.scrollTop), { passive: true });
+  }
+  if (selectionMoreFocusPending) {
+    selectionMoreFocusPending = false;
+    input?.focus();
+  }
+}
+
+/** 原地同步：影响数量、勾选态、星级、合并按钮。不重建节点，输入框焦点不丢。 */
+function syncSelectionMore(panel: HTMLElement): void {
+  const count = state.selectedIds.size;
+  setText(panel.querySelector("[data-selection-more-count]"), `将影响 ${formatCount(count)} 项`);
+  setText(
+    panel.querySelector("[data-selection-more-note]"),
+    `标签与评分应用后不可撤销 · 将影响 ${formatCount(count)} 项`,
+  );
+  const list = panel.querySelector<HTMLElement>("[data-selection-more-tags]");
+  const signature = tagSignature();
+  if (list && list.dataset.signature !== signature) {
+    const scrollTop = list.scrollTop;
+    list.dataset.signature = signature;
+    list.innerHTML = selectionTagRowsHtml();
+    list.scrollTop = scrollTop;
+    filterSelectionTagRows(panel);
+  }
+  panel.querySelectorAll<HTMLInputElement>('[data-action="selection-more-tag"]').forEach((box) => {
+    const id = box.dataset.tagId;
+    if (!id) return;
+    const active = draftTagIds.has(id);
+    if (box.checked !== active) box.checked = active;
+    box.closest(".tag-filter-row")?.classList.toggle("is-active", active);
+  });
+  const detach = panel.querySelector<HTMLInputElement>('[data-action="selection-more-detach"]');
+  if (detach && detach.checked !== draftDetachTags) detach.checked = draftDetachTags;
+  setText(panel.querySelector("[data-selection-more-rating-label]"), ratingLabel());
+  const filled = draftRating !== null && draftRating > 0 ? draftRating : 0;
+  panel.querySelectorAll<HTMLElement>('[data-action="selection-more-rating"]').forEach((button) => {
+    const value = Number(button.dataset.rating);
+    const active = value === draftRating;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+    if (!button.classList.contains("star-button")) return;
+    const on = value > 0 && value <= filled;
+    button.classList.toggle("is-filled", on);
+    // 星星的实心/描边是两段不同 SVG，只换 class 不会变；用 data-filled 记住
+    // 当前画的是哪一版，避免每次同步都重写 innerHTML。
+    if (button.dataset.filled !== (on ? "1" : "0")) {
+      button.dataset.filled = on ? "1" : "0";
+      button.innerHTML = starSvg(on);
+    }
+  });
+  const merge = mergeState();
+  const mergeSection = panel.querySelector<HTMLElement>("[data-selection-more-merge]");
+  if (mergeSection) mergeSection.hidden = !merge.visible;
+  const mergeButton = panel.querySelector<HTMLButtonElement>("#selection-more-merge");
+  if (mergeButton) {
+    mergeButton.disabled = merge.disabled;
+    setAttr(mergeButton, "title", merge.title);
+    setText(mergeButton, merge.label);
+  }
+  const apply = panel.querySelector<HTMLButtonElement>("#selection-more-apply");
+  if (apply) apply.disabled = state.tagsBusy || state.deleting;
+}
+
+/** 弹层挂载 / 卸载 / 原地同步；由 patchToolbar 与 applySelectionChrome 统一调度。 */
+export function patchSelectionMore(): void {
+  const slot = selectionMoreSlot();
+  const existing = slot?.querySelector<HTMLElement>("#selection-more") ?? null;
+  // 选择清空或更高层弹窗压上来：收起即可（这里只摘节点，不再回调 patchToolbar，
+  // 否则 patchToolbar → patchSelectionMore → close → patchToolbar 会绕成环）。
+  if (!selectionMoreOpen || !state.selectedIds.size || selectionMoreBlocked()) {
+    if (selectionMoreOpen && (!state.selectedIds.size || selectionMoreBlocked())) {
+      selectionMoreOpen = false;
+      // 这里不重画工具栏（会绕成递归），但 aria-expanded 得当场纠正。
+      app.querySelector<HTMLElement>("#selection-more-toggle")?.setAttribute("aria-expanded", "false");
+    }
+    existing?.remove();
+    return;
+  }
+  if (!slot) return;
+  if (!existing) {
+    slot.innerHTML = renderSelectionMoreMenu();
+    const panel = slot.querySelector<HTMLElement>("#selection-more");
+    if (!panel) return;
+    bindSelectionMore(panel);
+    positionSelectionMore(panel);
+    return;
+  }
+  positionSelectionMore(existing);
+  syncSelectionMore(existing);
+}
+
+export function openSelectionMore(options: { focusSearch?: boolean } = {}): void {
+  if (!state.selectedIds.size) return;
+  const focusSearch = options.focusSearch ?? true;
+  if (selectionMoreOpen) {
+    if (focusSearch) app.querySelector<HTMLInputElement>("#selection-more-tag-input")?.focus();
+    return;
+  }
+  selectionMoreOpen = true;
+  selectionMoreFocusPending = focusSearch;
+  patchToolbar();
+}
+
+export function closeSelectionMore(options: { restoreFocus?: boolean } = {}): void {
+  if (!selectionMoreOpen) return;
+  selectionMoreOpen = false;
+  selectionMoreFocusPending = false;
+  selectionMoreTagQuery = "";
+  selectionMoreTagScroll = 0;
+  draftTagIds.clear();
+  draftRating = null;
+  draftDetachTags = false;
+  patchToolbar();
+  // Esc / 关闭按钮：焦点还给「更多」，别掉到 body。
+  if (options.restoreFocus) app.querySelector<HTMLElement>("#selection-more-toggle")?.focus();
+}
+
+export function toggleSelectionMore(): void {
+  if (selectionMoreOpen) closeSelectionMore({ restoreFocus: true });
+  else openSelectionMore();
+}
+
+export function setSelectionDraftTag(tagId: string, checked: boolean): void {
+  if (!tagId) return;
+  if (checked) draftTagIds.add(tagId);
+  else draftTagIds.delete(tagId);
+  patchSelectionMore();
+}
+
+export function setSelectionDraftTagMode(detach: boolean): void {
+  draftDetachTags = detach;
+  patchSelectionMore();
+}
+
+export function setSelectionDraftRating(value: number | null): void {
+  // 再点一次同一颗星 = 取消选择（不改评分），与筛选面板的 ≥N★ 语义一致。
+  draftRating = draftRating === value ? null : value;
+  patchSelectionMore();
+}
+
+/** 弹层「应用」要提交的草稿。标签与评分一次提交，标签在前。 */
+export function batchMetaDraft(): { tagIds: string[]; rating: number | null; detachTags: boolean } {
+  return { tagIds: [...draftTagIds], rating: draftRating, detachTags: draftDetachTags };
 }
 
 export function patchToolbar(): void {
@@ -785,6 +1108,8 @@ export function patchToolbar(): void {
   syncToolbarRight();
   syncSearchInput();
   setRegionHtml(region("selection"), renderSelectionToolbar());
+  // 弹层挂在 overlay 槽位，不受上面这些区域 patch 影响；这里只做卸载/定位/同步。
+  patchSelectionMore();
   const scanTop = app.querySelector<HTMLButtonElement>("#scan-top-button");
   if (scanTop) {
     const disabled = state.availability !== "available";

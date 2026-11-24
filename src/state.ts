@@ -115,11 +115,15 @@ export interface AppState {
   favoritePendingIds: Set<string>;
   favoritesBusy: boolean;
   lastSelectIndex: number | null;
+  /**
+   * roving tabindex 的落点：网格里唯一 tabindex="0" 的卡片下标（展示顺序，即
+   * 卡片上的 data-index）。null = 还没用键盘进过网格，停靠点退回第一张。
+   */
+  focusIndex: number | null;
   deleting: boolean;
   deleteConfirm: { preview: DeletePreviewDto; ids: string[] } | null;
   deleteProgress: DeleteProgressDto | null;
   deleteResult: DeleteResultDto | null;
-  deleteNotice: string | null;
   /** 侧栏「已删除」只读列表：浮层开关与最近一次查询结果。 */
   deletedOpen: boolean;
   deletedLoading: boolean;
@@ -312,11 +316,11 @@ export const state: AppState = {
   favoritePendingIds: new Set(),
   favoritesBusy: false,
   lastSelectIndex: null,
+  focusIndex: null,
   deleting: false,
   deleteConfirm: null,
   deleteProgress: null,
   deleteResult: null,
-  deleteNotice: null,
   deletedOpen: false,
   deletedLoading: false,
   deletedItems: [],
