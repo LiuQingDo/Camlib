@@ -5,7 +5,14 @@ import { ConflictPolicy, listBackupRunItems } from "../../api/media";
 import { app, bind, bindAll, region } from "../../render/context";
 import { openSettings, refreshMedia } from "../../render/paint";
 import { patchSidebar } from "../../render/shell";
-import { patchToolbar, resetSidebarExpansionForSelection, searchUi, toggleTaskPill } from "../../render/toolbar";
+import {
+  patchToolbar,
+  resetSidebarExpansionForSelection,
+  searchUi,
+  syncSearchChrome,
+  toggleTaskPill,
+  type SearchMode,
+} from "../../render/toolbar";
 import { onGridScroll } from "../../render/virtual";
 import { state } from "../../state";
 import { dismissNotice, runNoticeAction } from "../notices";
@@ -32,26 +39,175 @@ import {
   viewRecentImports,
 } from "../library";
 import { toggleTheme } from "../settings-ops";
-import { exitSemanticSearch } from "./toolbar";
+import { clearAllFilters, clearFiltersKeepSearch, commitSemanticSearch, exitSemanticSearch } from "./toolbar";
+
+/** 边打边筛的停顿阈值：明显短于人的下一次思考，长于连续按键的间隔。 */
+const SEARCH_DEBOUNCE_MS = 250;
+
+/** 防抖句柄。搜索框是骨架里的静态节点，模块级变量与它同生命周期。 */
+let searchCommitTimer: number | null = null;
+
+function cancelSearchCommit(): void {
+  if (searchCommitTimer === null) return;
+  window.clearTimeout(searchCommitTimer);
+  searchCommitTimer = null;
+}
+
+/**
+ * 普通模式提交：把搜索框内容提交为 `state.search` 并刷新。
+ *
+ * `resetScroll` 只对显式动作（Enter / 搜索按钮 / 清空）为 true：输入路径由
+ * 防抖走 false，否则每敲一个字视图都被拽回顶部。空提交不发请求，避免
+ * 同一关键词被 Enter 与按钮重复查一遍。
+ */
+function commitTextSearch(resetScroll: boolean): void {
+  cancelSearchCommit();
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  // 以 DOM 的实际值为准：程序化写入（清空、模式切换）不必再手抄一份草稿。
+  if (input) searchUi.draft = input.value;
+  const next = searchUi.draft.trim();
+  let changed = next !== state.search;
+  // 兜底：普通搜索与 AI 搜索互斥（commitSemanticSearch 也是这么收尾的）。
+  // 两条路径同时生效时后端语义优先，输入了词却仍有结果走 AI，看起来像没反应。
+  if (next && state.semanticSearch) {
+    state.semanticSearch = null;
+    searchUi.semantic = "";
+    state.semanticMeta = null;
+    state.semanticMode = null;
+    changed = true;
+  }
+  if (!changed) return;
+  state.search = next;
+  void refreshMedia({ resetScroll });
+}
+
+/** AI 模式提交：草稿写回 `searchUi.semantic` 后交给既有的语义检索管线。 */
+function commitAiSearch(): void {
+  cancelSearchCommit();
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  if (input) searchUi.semantic = input.value;
+  syncSearchChrome();
+  commitSemanticSearch();
+}
+
+function commitSearch(resetScroll: boolean): void {
+  if (searchUi.mode === "ai") commitAiSearch();
+  else commitTextSearch(resetScroll);
+}
+
+/** 输入防抖：清空立即生效，有词才等 250ms（手写定时器，不引依赖）。 */
+function scheduleSearchCommit(): void {
+  cancelSearchCommit();
+  // AI 检索是一次真实的上游调用，不能每敲一个字发一次：只认 Enter / 按钮。
+  if (searchUi.mode === "ai") return;
+  if (!searchUi.draft.trim()) {
+    commitTextSearch(true);
+    return;
+  }
+  searchCommitTimer = window.setTimeout(() => {
+    searchCommitTimer = null;
+    commitTextSearch(false);
+  }, SEARCH_DEBOUNCE_MS);
+}
+
+/** 清空搜索：只清搜索词，不动筛选条件，焦点留在输入框。 */
+function clearSearch(): void {
+  cancelSearchCommit();
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  const hadSemantic = Boolean(state.semanticSearch);
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  searchUi.draft = "";
+  searchUi.semantic = "";
+  if (hadSemantic) {
+    state.semanticSearch = null;
+    state.semanticMeta = null;
+    state.semanticMode = null;
+  }
+  syncSearchChrome();
+  if (searchUi.mode === "ai") {
+    // AI 模式没有防抖兜底，条件真的变了才值得再查一次。
+    if (hadSemantic) void refreshMedia({ resetScroll: true });
+    return;
+  }
+  if (state.search) {
+    state.search = "";
+    void refreshMedia({ resetScroll: true });
+  }
+}
+
+/**
+ * 搜索模式切换（普通 ⇄ AI）。
+ *
+ * 两个草稿各留一份，但同一时刻只让一种条件生效：切走时清掉对方条件，
+ * 否则 `fetchMediaPage` 仍会优先走语义路径，普通搜索词看起来完全没起作用。
+ */
+export function setSearchMode(mode: SearchMode): void {
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  if (searchUi.mode === mode) {
+    input?.focus();
+    return;
+  }
+  cancelSearchCommit();
+  searchUi.mode = mode;
+  let changed = false;
+  if (mode === "ai") {
+    if (state.search) {
+      state.search = "";
+      changed = true;
+    }
+    searchUi.draft = "";
+    if (input) input.value = searchUi.semantic;
+  } else {
+    if (state.semanticSearch) {
+      state.semanticSearch = null;
+      state.semanticMeta = null;
+      state.semanticMode = null;
+      changed = true;
+    }
+    searchUi.semantic = "";
+    if (input) input.value = searchUi.draft;
+  }
+  syncSearchChrome();
+  input?.focus();
+  if (changed) void refreshMedia({ resetScroll: true });
+  // 条件没变也要过一遍 patchToolbar：它顺手把「模式刚变」记下来，
+  // 下一次重绘才不会把输入框当成另一套草稿强行改写。
+  else patchToolbar();
+}
 
 /** 骨架里的静态节点（搜索框、顶栏扫描按钮）：终身只绑一次。 */
 export function bindShellEvents(): void {
   const searchInput = app.querySelector<HTMLInputElement>("#search-input");
   if (searchInput) {
     bind(searchInput, "input", () => {
-      searchUi.draft = searchInput.value;
+      if (searchUi.mode === "ai") searchUi.semantic = searchInput.value;
+      else searchUi.draft = searchInput.value;
+      syncSearchChrome();
+      scheduleSearchCommit();
     });
     bind(searchInput, "keydown", (event) => {
-      if ((event as KeyboardEvent).key !== "Enter") return;
-      event.preventDefault();
-      state.search = searchUi.draft.trim();
-      void refreshMedia();
+      const key = (event as KeyboardEvent).key;
+      if (key === "Enter") {
+        event.preventDefault();
+        commitSearch(true);
+        return;
+      }
+      if (key === "Escape") {
+        // 空框的 Esc 不归这里：让全局快捷键继续处理（退出预览等）。
+        if (!searchInput.value && !state.search && !state.semanticSearch) return;
+        event.preventDefault();
+        event.stopPropagation();
+        clearSearch();
+      }
+      // 失焦刻意不提交：用户点走是要离开搜索框，不是要执行查询。
     });
   }
-  bind(app.querySelector("#search-button"), "click", () => {
-    state.search = searchUi.draft.trim();
-    void refreshMedia();
-  });
+  bind(app.querySelector("#search-clear"), "click", () => clearSearch());
+  bind(app.querySelector("#search-mode"), "click", () => setSearchMode(searchUi.mode === "ai" ? "text" : "ai"));
+  bind(app.querySelector("#search-button"), "click", () => commitSearch(true));
   bind(app.querySelector("#scan-top-button"), "click", () => void scanLibrary());
   // 侧栏「导入照片…」是骨架里的静态节点：在这里绑一次，不依赖 patchSidebar。
   bindAll('[data-nav="import"]', "click", () => void openBackupPanel());
@@ -236,9 +392,8 @@ export function bindSidebarEvents(): void {
     state.aiSingleBusy = false;
   });
   bind(app.querySelector("#ai-semantic-focus"), "click", () => {
-    state.filtersExpanded = true;
-    patchToolbar();
-    app.querySelector<HTMLInputElement>("#semantic-search-input")?.focus();
+    // 侧栏入口与搜索框的 ✦ 是同一个开关：切到 AI 模式并把光标放进搜索框。
+    setSearchMode("ai");
   });
 }
 
@@ -280,7 +435,7 @@ export function bindStatusEvents(): void {
   });
 }
 
-/** 网格空态里的「选择文件夹 / 手动输入路径」表单。 */
+/** 网格空态里的「选择文件夹 / 手动输入路径」表单与两条出路按钮。 */
 export function bindEmptyStateEvents(): void {
   const area = region("media");
   if (!area) return;
@@ -290,4 +445,6 @@ export function bindEmptyStateEvents(): void {
     const input = area.querySelector<HTMLInputElement>("#library-path");
     if (input?.value.trim()) void connectLibrary(input.value.trim());
   });
+  bind(area.querySelector("#empty-clear-filters"), "click", () => clearFiltersKeepSearch());
+  bind(area.querySelector("#empty-clear-all"), "click", () => clearAllFilters());
 }

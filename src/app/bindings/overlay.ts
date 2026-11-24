@@ -2,7 +2,7 @@
 import { cancelAiChat } from "../../api/ai";
 import { app, bind, bindAll } from "../../render/context";
 import { bindMergeModalEvents, bindSettingsEvents, openSettings, render } from "../../render/paint";
-import { patchToolbar, searchUi } from "../../render/toolbar";
+import { searchUi } from "../../render/toolbar";
 import { state } from "../../state";
 import { aiChatUi, autoGrowAiChatInput, closeAiChatDrawer, sendAiChatMessage } from "../../views/ai-chat";
 import { adaptDialogToMedia } from "../../views/dialogs";
@@ -69,10 +69,9 @@ export function bindOverlayEvents(): void {
   bindAll("[data-chat-search]", "click", (event) => {
     const query = ((event.currentTarget as HTMLElement).dataset.chatSearch || "").trim();
     if (!query) return;
-    // 先让语义输入框渲染出查询词，commitSemanticSearch 才能取到。
+    // 搜索框只有一个：写进语义草稿，commitSemanticSearch 会切到 AI 模式并把词
+    // 回填到输入框（不再需要先展开折叠筛选层）。
     searchUi.semantic = query;
-    state.filtersExpanded = true;
-    patchToolbar();
     commitSemanticSearch();
   });
   const chatInput = app.querySelector<HTMLTextAreaElement>("#ai-chat-input");

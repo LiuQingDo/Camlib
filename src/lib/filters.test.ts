@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeFilterParts,
   extensionsToInput,
   hasAnyFilter,
+  hasNonSearchFilter,
   parseExtensionsInput,
   secondaryFilterParts,
   type FilterState,
@@ -136,5 +138,61 @@ describe("secondaryFilterParts", () => {
 
   it("keeps search and kind out of the collapsible-panel summary", () => {
     expect(secondaryFilterParts(baseState({ search: "x", kind: "photo" }))).toEqual([]);
+  });
+});
+
+describe("hasNonSearchFilter", () => {
+  it("is false for a bare search term", () => {
+    expect(hasNonSearchFilter(baseState({ search: "海边" }))).toBe(false);
+    expect(hasNonSearchFilter(baseState())).toBe(false);
+  });
+
+  it("is true as soon as any filter stacks on the search term", () => {
+    expect(hasNonSearchFilter(baseState({ kind: "photo" }))).toBe(true);
+    expect(hasNonSearchFilter(baseState({ search: "x", tagIds: new Set(["t1"]) }))).toBe(true);
+    expect(hasNonSearchFilter(baseState({ search: "x", favoriteOnly: true }))).toBe(true);
+    expect(hasNonSearchFilter(baseState({ search: "x", ratingEq: 0 }))).toBe(true);
+    expect(hasNonSearchFilter(baseState({ search: "x", dateTo: "2026-01-01" }))).toBe(true);
+  });
+});
+
+describe("activeFilterParts", () => {
+  it("lists nothing when the query is unfiltered", () => {
+    expect(activeFilterParts(baseState())).toEqual([]);
+  });
+
+  it("prints the search term and every stacked filter", () => {
+    const parts = activeFilterParts(
+      baseState({
+        search: "海边",
+        kind: "video",
+        favoriteOnly: true,
+        burstOnly: true,
+        tagIds: new Set(["a", "b"]),
+        dateFrom: "2025-01-01",
+        dateTo: "2025-12-31",
+        ratingMin: 3,
+      }),
+    );
+    expect(parts).toEqual([
+      "搜索「海边」",
+      "类型：视频",
+      "仅收藏",
+      "仅连拍",
+      "标签 2 个",
+      "日期：2025-01-01 ~ 2025-12-31",
+      "评分 ≥ 3 星",
+    ]);
+  });
+
+  it("names the semantic query and an open-ended date range", () => {
+    expect(activeFilterParts(baseState({ semanticSearch: "海边的日落" }))).toEqual(["AI 搜索「海边的日落」"]);
+    expect(activeFilterParts(baseState({ datePrefix: "2025-03" }))).toEqual(["日期：2025-03"]);
+    expect(activeFilterParts(baseState({ dateFrom: "2025-01-01" }))).toEqual(["日期：2025-01-01 ~ 最新"]);
+  });
+
+  it("reads rating 0 as unrated-only and keeps exact rating over the minimum", () => {
+    expect(activeFilterParts(baseState({ ratingEq: 0 }))).toEqual(["未评分"]);
+    expect(activeFilterParts(baseState({ ratingEq: 4, ratingMin: 3 }))).toEqual(["评分 4 星"]);
   });
 });

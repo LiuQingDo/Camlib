@@ -1,7 +1,7 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { DialogSize } from "../api/infrastructure";
 import { LibraryMergeGroupDto } from "../api/media";
-import { hasAnyFilter } from "../lib/filters";
+import { activeFilterParts, hasAnyFilter, hasNonSearchFilter } from "../lib/filters";
 import { formatCount, formatEtaSeconds, formatSize, formatSpeed } from "../lib/format";
 import { app } from "../render/context";
 import { bindMergeFooterEvents, bindMergeModalEvents, persistUiPrefs, updateSettingsPanel } from "../render/paint";
@@ -448,9 +448,33 @@ export function renderLibraryEmpty(): string {
     return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会建立可搜索的索引。</p><div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div></div>`;
   if (!state.library)
     return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
-  if (!state.page.total)
-    return `<div class="empty-state"><span class="empty-icon">✦</span><h2>${hasAnyFilter(state) ? "没有匹配的媒体" : "媒体库还是空的"}</h2><p>${hasAnyFilter(state) ? "试试调整搜索或筛选条件。" : "点击右上角“扫描媒体库”开始建立索引。"}</p></div>`;
+  if (!state.page.total) return renderNoMatchEmpty();
   return "";
+}
+
+/**
+ * 查询为空态：说清「为什么空」和「哪条条件在起作用」，再给两条出路。
+ * 没有筛选条件是另一种情况（媒体库真的空），提示去扫描，不装作筛选问题。
+ */
+function renderNoMatchEmpty(): string {
+  if (!hasAnyFilter(state))
+    return `<div class="empty-state"><span class="empty-icon">◎</span><h2>媒体库还是空的</h2><p>点击右上角“扫描媒体库”开始建立索引。</p></div>`;
+  const conditions = activeFilterParts(state);
+  const searching = Boolean(state.search || state.semanticSearch);
+  const lead = searching
+    ? "没有媒体命中当前搜索：文件名、标签和 AI 描述都查过了。"
+    : "当前筛选条件没有匹配到任何媒体。";
+  const hint = hasNonSearchFilter(state) ? "以下条件同时生效，去掉任意一条都可能出现结果。" : "换个关键词试试。";
+  const chips = conditions.map((part) => `<li class="empty-condition">${escapeHtml(part)}</li>`).join("");
+  // 「保留搜索词」只在确实同时存在搜索词和其他筛选时才有意义。
+  const keepSearch = Boolean(state.search) && hasNonSearchFilter(state);
+  const actions = [
+    keepSearch
+      ? `<button class="outline-button" type="button" id="empty-clear-filters">清除筛选，保留搜索词</button>`
+      : "",
+    `<button class="primary-button" type="button" id="empty-clear-all">清空全部</button>`,
+  ].join("");
+  return `<div class="empty-state"><span class="empty-icon">✦</span><h2>没有匹配的媒体</h2><p>${escapeHtml(lead)}</p><p class="empty-hint">${escapeHtml(hint)}</p><ul class="empty-conditions">${chips}</ul><div class="empty-actions">${actions}</div></div>`;
 }
 
 export function renderTagManager(): string {

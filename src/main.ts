@@ -16,7 +16,6 @@ import { bindEditorFooterEvents } from "./app/bindings/editor";
 import { bindPreviewMetaEvents } from "./app/bindings/preview";
 import { bindSettingsEvents } from "./app/bindings/settings";
 import { bindEmptyStateEvents, bindShellEvents, bindSidebarEvents, bindStatusEvents } from "./app/bindings/shell";
-import { bindToolbarEvents } from "./app/bindings/toolbar";
 import { bootstrap, persistUiPrefs, probeFfmpeg } from "./app/library";
 import { loadMoreScrollRoot, refreshMedia, updateLoadMoreFooter } from "./app/media-query";
 import { render, renderSettingsAware } from "./app/orchestrate";
@@ -46,7 +45,6 @@ installPaint({
   bindShellEvents,
   bindSidebarEvents,
   bindStatusEvents,
-  bindToolbarEvents,
   bindEmptyStateEvents,
   bindMergeModalEvents,
   bindMergeFooterEvents,

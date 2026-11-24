@@ -6,15 +6,24 @@ import { hasAnyFilter, secondaryFilterParts } from "../lib/filters";
 import { formatCount, formatRangeLabel } from "../lib/format";
 import { SortMode, state } from "../state";
 import { app, region, setRegionHtml, setText } from "./context";
-import { bindStatusEvents, bindToolbarEvents, refreshMedia } from "./paint";
+import { bindStatusEvents, refreshMedia } from "./paint";
 import { escapeHtml, formatDate, groupedFacets } from "./text";
 
+/**
+ * 搜索框的两种模式：普通检索（文件名 / 标签 / 描述）与 AI 语义检索。
+ * 两个草稿分开存，切换模式不会把另一边打了一半的字吃掉；同一时刻只有
+ * 一种模式的条件生效（提交时由 app 层清掉另一边）。
+ */
+export type SearchMode = "text" | "ai";
+
 // Keep the text being composed separate from the submitted query so typing
-// never refreshes the media grid. This also preserves unsent text on redraws.
+// never refreshes the media grid on every keystroke. This also preserves
+// unsent text on redraws.
 /** 搜索框草稿：输入不触发刷新，提交才刷新（与 semantic 分开保存）。 */
-export const searchUi = {
+export const searchUi: { draft: string; semantic: string; mode: SearchMode } = {
   draft: "",
   semantic: "",
+  mode: "text",
 };
 // Same draft discipline for the semantic (natural-language) search box.
 export let tagPopoverOpen = false;
@@ -262,7 +271,7 @@ export function renderAdvancedFiltersInner(): string {
         : "";
     tagBlock = `<div class="filter-group filter-group-tags"><span class="filter-group-label">标签</span>${chips}${moreButton}<button class="filter-chip filter-chip-manage" type="button" id="open-tag-manager" data-action="open-tag-manager">管理</button></div>`;
   }
-  return `<div class="filter-group filter-group-semantic"><span class="filter-group-label">AI</span><div class="search-box semantic-search"><span aria-hidden="true">✦</span><input id="semantic-search-input" value="${escapeHtml(searchUi.semantic)}" placeholder="自然语言找照片，如：去年秋天湖边" aria-label="AI 搜索" /><button class="search-button" id="semantic-search-button" type="button">搜索</button></div></div><span class="filter-divider" aria-hidden="true"></span>${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
+  return `${tagBlock}<span class="filter-divider" aria-hidden="true"></span>${renderDateRangeControls()}<span class="filter-divider" aria-hidden="true"></span>${renderRatingFilter()}${hasSecondaryFilter() ? `<button class="text-button advanced-clear" data-action="clear-filters" type="button">清除筛选</button>` : ""}`;
 }
 
 export function renderRatingFilter(): string {
@@ -600,7 +609,9 @@ export function patchToolbar(): void {
   patchErrorBar();
   patchTaskPill();
   setRegionHtml(region("filter-row"), renderPrimaryFilters());
-  if (setRegionHtml(region("advanced"), renderAdvancedFiltersInner())) bindToolbarEvents();
+  // 高级筛选层现在只有委托型控件（日期 / 评分 / 排序），不再需要逐个绑定；
+  // 唯一的输入框已并入顶栏搜索框，由 bindShellEvents 承担。
+  setRegionHtml(region("advanced"), renderAdvancedFiltersInner());
   syncAdvancedFiltersVisibility();
   syncToolbarRight();
   syncSearchInput();
@@ -643,11 +654,47 @@ export function patchTagPopover(): void {
 // 末尾的委托层，这里不重复绑定。
 // ---------------------------------------------------------------------------
 
-/** 搜索框草稿回填：只在没有焦点时写，输入期间绝不覆盖用户正在打的字。 */
+/** 上一次渲染时搜索框所处的模式：用来判断是否需要强制换掉输入框里的草稿。 */
+let renderedSearchMode: SearchMode = searchUi.mode;
+
+/**
+ * 搜索框回填 + 外观同步。
+ *
+ * 值只在没有焦点时写：输入期间覆盖用户正在打的字是最刺眼的一类 bug。
+ * 例外是「模式刚变」——那时输入框里是另一套草稿，必须换成本模式的内容，
+ * 否则会停在上一模式的词上，看着像词被吞了。
+ */
 export function syncSearchInput(): void {
   const input = app.querySelector<HTMLInputElement>("#search-input");
-  if (!input || document.activeElement === input) return;
-  if (input.value !== searchUi.draft) input.value = searchUi.draft;
+  if (!input) return;
+  const draft = searchUi.mode === "ai" ? searchUi.semantic : searchUi.draft;
+  const modeChanged = renderedSearchMode !== searchUi.mode;
+  renderedSearchMode = searchUi.mode;
+  if ((document.activeElement !== input || modeChanged) && input.value !== draft) input.value = draft;
+  syncSearchChrome();
+}
+
+/** 搜索框外观：模式态、占位文案与清空按钮的显隐。 */
+export function syncSearchChrome(): void {
+  const input = app.querySelector<HTMLInputElement>("#search-input");
+  const box = app.querySelector<HTMLElement>("#search-box");
+  const clear = app.querySelector<HTMLButtonElement>("#search-clear");
+  const mode = app.querySelector<HTMLButtonElement>("#search-mode");
+  const ai = searchUi.mode === "ai";
+  box?.classList.toggle("is-ai", ai);
+  if (input) {
+    const placeholder = ai ? "描述你要找的照片，如：去年秋天湖边" : "搜索文件名、标签、描述";
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    input.setAttribute("aria-label", ai ? "AI 搜索：描述你要找的照片" : "搜索文件名、标签与 AI 描述");
+  }
+  if (clear) clear.hidden = !(input?.value ?? (ai ? searchUi.semantic : searchUi.draft)).length;
+  if (mode) {
+    mode.classList.toggle("is-active", ai);
+    mode.setAttribute("aria-pressed", String(ai));
+    const title = ai ? "切换回普通搜索" : "切换到 AI 搜索";
+    if (mode.title !== title) mode.title = title;
+    mode.setAttribute("aria-label", title);
+  }
 }
 
 // Registered once at module level: clicking anywhere outside the toolbar tag

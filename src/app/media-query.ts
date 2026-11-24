@@ -55,7 +55,19 @@ export async function fetchMediaPage(offset: number, limit: number): Promise<Med
   return queryMedia({ ...currentQueryFields(), offset, limit });
 }
 
-export async function refreshMedia(): Promise<void> {
+/** Options for a full refresh; only the scroll behaviour is configurable. */
+export interface RefreshMediaOptions {
+  /**
+   * Jump the media area back to the top after the new page lands.
+   * Defaults to `true` — a filter change starts a new list, so landing
+   * mid-page on unrelated items is disorienting. Live search passes `false`:
+   * scrolling to the top on every keystroke fights the user.
+   */
+  resetScroll?: boolean;
+}
+
+export async function refreshMedia(options: RefreshMediaOptions = {}): Promise<void> {
+  const resetScroll = options.resetScroll ?? true;
   if (!state.library) {
     renderSettingsAware();
     return;
@@ -86,8 +98,10 @@ export async function refreshMedia(): Promise<void> {
       state.loading = false;
       renderSettingsAware();
       // A filter change starts a new result list; keep the viewport at the top
-      // so the user does not land mid-page on unrelated items.
-      if (!state.settingsOpen) scrollToContentTop();
+      // so the user does not land mid-page on unrelated items. Live search opts
+      // out: the result list churns on every keystroke, and re-anchoring the
+      // viewport each time makes typing feel like the page is fighting back.
+      if (resetScroll && !state.settingsOpen) scrollToContentTop();
     }
   }
 }

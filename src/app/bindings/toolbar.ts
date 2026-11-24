@@ -1,31 +1,14 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { MediaKind } from "../../api/media";
 import { collectRangeIds } from "../../lib/selection";
-import { app, bind } from "../../render/context";
+import { app } from "../../render/context";
 import { persistUiPrefs, refreshMedia, render } from "../../render/paint";
 import { applySelectionChrome, resetSidebarExpansionForSelection, searchUi } from "../../render/toolbar";
 import { invalidateGridGeometry, scheduleGridPaint } from "../../render/virtual";
 import { Density, SortMode, state } from "../../state";
 
-/** 工具栏展开区（高级筛选）里需要逐个绑定的输入框。 */
-export function bindToolbarEvents(): void {
-  const semanticInput = app.querySelector<HTMLInputElement>("#semantic-search-input");
-  if (semanticInput) {
-    bind(semanticInput, "input", () => {
-      searchUi.semantic = semanticInput.value;
-    });
-    bind(semanticInput, "keydown", (event) => {
-      if ((event as KeyboardEvent).key !== "Enter") return;
-      event.preventDefault();
-      commitSemanticSearch();
-    });
-  }
-  bind(app.querySelector("#semantic-search-button"), "click", () => commitSemanticSearch());
-}
-
-export function clearAllFilters(): void {
-  state.search = "";
-  searchUi.draft = "";
+/** 清掉除搜索词以外的全部筛选条件：空态两条出路共用同一份清单。 */
+function resetFilterConditions(): void {
   state.kind = undefined;
   state.favoriteOnly = false;
   state.burstOnly = false;
@@ -40,6 +23,23 @@ export function clearAllFilters(): void {
   searchUi.semantic = "";
   state.semanticMeta = null;
   state.semanticMode = null;
+}
+
+export function clearAllFilters(): void {
+  state.search = "";
+  searchUi.draft = "";
+  searchUi.mode = "text";
+  resetFilterConditions();
+  resetSidebarExpansionForSelection();
+  void refreshMedia();
+}
+
+/**
+ * 空态出路之一：清掉所有筛选，但保留搜索词。
+ * 搜索词是用户刚刚敲进去的，丢掉就得重打；筛选是点出来的，重选成本低。
+ */
+export function clearFiltersKeepSearch(): void {
+  resetFilterConditions();
   resetSidebarExpansionForSelection();
   void refreshMedia();
 }
@@ -155,17 +155,24 @@ export function commitDensity(value: string): void {
 export function exitSemanticSearch(): void {
   state.semanticSearch = null;
   searchUi.semantic = "";
+  // 搜索框回到普通模式：AI 词已经作废，留着模式标记会让人以为还在 AI 里。
+  searchUi.mode = "text";
   state.semanticMeta = null;
   state.semanticMode = null;
   void refreshMedia();
 }
 
-/** Commit the semantic search box: empty input exits back to normal filters. */
+/**
+ * Commit the semantic search box: empty input exits back to normal filters.
+ * The draft is owned by `searchUi.semantic` — the shell input writes it on
+ * every keystroke, so this never has to read the DOM (and stays usable from
+ * the AI chat drawer's「搜索」chip, where the input may not even be visible).
+ */
 export function commitSemanticSearch(): void {
-  const input = app.querySelector<HTMLInputElement>("#semantic-search-input");
-  const draft = (input?.value ?? searchUi.semantic).trim();
+  const draft = searchUi.semantic.trim();
   searchUi.semantic = draft;
   state.semanticSearch = draft || null;
+  searchUi.mode = draft ? "ai" : "text";
   // A committed semantic query replaces the plain filename search so the two
   // do not fight; other filters stay (the result banner explains precedence).
   state.search = "";

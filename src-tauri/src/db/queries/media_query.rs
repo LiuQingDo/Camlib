@@ -21,10 +21,20 @@ impl Repository {
         if query.burst_only {
             conditions.push("m.burst_group IS NOT NULL".to_owned());
         }
+        // Free-text search spans four sources with one shared pattern: the file
+        // name, user tags, AI tags, and the AI caption. All four branches bind
+        // the same placeholder index — the pattern is pushed once, so the LIKE
+        // escaping entered through `escape_like` stays identical everywhere.
         if let Some(search) = query.search.filter(|value| !value.trim().is_empty()) {
+            let index = values.len() + 1;
             conditions.push(format!(
-                "m.display_name LIKE ?{} ESCAPE '\\'",
-                values.len() + 1
+                "(m.display_name LIKE ?{index} ESCAPE '\\' \
+                 OR EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id \
+                            WHERE mt.media_item_id = m.id AND t.name LIKE ?{index} ESCAPE '\\') \
+                 OR EXISTS (SELECT 1 FROM media_ai_tags mat JOIN tags t ON t.id = mat.tag_id \
+                            WHERE mat.media_item_id = m.id AND t.name LIKE ?{index} ESCAPE '\\') \
+                 OR EXISTS (SELECT 1 FROM media_ai ai \
+                            WHERE ai.media_item_id = m.id AND ai.caption LIKE ?{index} ESCAPE '\\'))"
             ));
             values.push(format!("%{}%", escape_like(&search)));
         }
@@ -541,5 +551,131 @@ mod tests {
             .map(|media| media.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, ["later-import", "backup-import"]);
+    }
+
+    /// Search hits any of the four sources: file name, user tag, AI tag,
+    /// AI caption. Sorted ids keep the assertion independent of sort mode.
+    #[test]
+    fn media_query_search_matches_name_user_tag_ai_tag_and_caption() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        for (id, name) in [
+            ("by-name", "beach-sunset.jpg"),
+            ("by-user-tag", "IMG_0001.JPG"),
+            ("by-ai-tag", "IMG_0002.JPG"),
+            ("by-caption", "IMG_0003.JPG"),
+            ("unrelated", "IMG_0004.JPG"),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.display_name = name.to_owned();
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let user_tag = repository
+            .create_tag(NewTag {
+                id: "tag-sea".into(),
+                name: "海边".into(),
+                color: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        repository
+            .attach_tag("by-user-tag", &user_tag.id, "2026-01-01T00:00:00Z")
+            .unwrap();
+        repository
+            .replace_ai_tags(
+                "by-ai-tag",
+                &["日落".to_owned()],
+                "ai-tag-",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+        repository
+            .upsert_media_ai(MediaAiUpsert {
+                media_item_id: "by-caption",
+                caption: Some("湖边的日落，天空泛橙"),
+                tags_json: None,
+                ai_model: Some("test-model"),
+                status: "success",
+                error_message: None,
+                processed_at: Some("2026-01-01T00:00:00Z"),
+            })
+            .unwrap();
+
+        let search_ids = |term: &str| -> Vec<String> {
+            let mut found = repository
+                .query_media(MediaQuery {
+                    library_id: "library-1".into(),
+                    search: Some(term.into()),
+                    limit: 20,
+                    ..Default::default()
+                })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|media| media.id)
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+
+        // File name.
+        assert_eq!(search_ids("beach"), ["by-name"]);
+        // User tag name.
+        assert_eq!(search_ids("海边"), ["by-user-tag"]);
+        // AI tag name.
+        assert_eq!(search_ids("日落"), ["by-ai-tag", "by-caption"]);
+        // AI caption only (no tag carries this word).
+        assert_eq!(search_ids("天空"), ["by-caption"]);
+        // One term, several sources: the OR does not drop any of them.
+        assert_eq!(
+            search_ids("IMG_000"),
+            ["by-ai-tag", "by-caption", "by-user-tag", "unrelated"]
+        );
+        // No hit at all.
+        assert!(search_ids("不存在的关键词").is_empty());
+        // Blank search stays a no-op instead of matching everything via `%%`.
+        assert_eq!(search_ids("   ").len(), 5);
+    }
+
+    /// `%` and `_` must match literally, not as LIKE wildcards.
+    #[test]
+    fn media_query_search_escapes_like_wildcards() {
+        let repository = Repository::open_in_memory().unwrap();
+        repository.create_library(library()).unwrap();
+
+        for (id, name) in [
+            ("percent-literal", "50%off.jpg"),
+            ("percent-plain", "50abc.jpg"),
+            ("underscore-literal", "a_b.jpg"),
+            ("underscore-plain", "axb.jpg"),
+        ] {
+            let mut media = item(id, MediaKind::Photo);
+            media.display_name = name.to_owned();
+            repository.upsert_media_item(media).unwrap();
+        }
+
+        let search_ids = |term: &str| -> Vec<String> {
+            let mut found = repository
+                .query_media(MediaQuery {
+                    library_id: "library-1".into(),
+                    search: Some(term.into()),
+                    limit: 20,
+                    ..Default::default()
+                })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|media| media.id)
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+
+        assert_eq!(search_ids("50%"), ["percent-literal"]);
+        assert_eq!(search_ids("a_b"), ["underscore-literal"]);
+        // A trailing wildcard would have matched both rows; escaping keeps one.
+        assert_eq!(search_ids("50%off").len(), 1);
     }
 }

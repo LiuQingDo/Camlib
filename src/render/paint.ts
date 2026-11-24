@@ -21,9 +21,16 @@ export type UiPrefsPatch = {
   uiDialogSizes?: Record<string, DialogSize>;
 };
 
+/**
+ * Structural copy of `app/media-query`'s refresh options. Kept here so the
+ * facade never imports the implementation module (that import is what would
+ * close the render → app → render cycle this file exists to break).
+ */
+export type RefreshMediaOptions = { resetScroll?: boolean };
+
 export type PaintHost = {
   render: () => void;
-  refreshMedia: () => Promise<void>;
+  refreshMedia: (options?: RefreshMediaOptions) => Promise<void>;
   renderSettingsAware: () => void;
   updateSettingsPanel: (options?: { animate?: boolean }) => void;
   persistUiPrefs: (input: UiPrefsPatch) => Promise<void>;
@@ -34,7 +41,6 @@ export type PaintHost = {
   bindShellEvents: () => void;
   bindSidebarEvents: () => void;
   bindStatusEvents: () => void;
-  bindToolbarEvents: () => void;
   bindEmptyStateEvents: () => void;
   bindMergeModalEvents: () => void;
   bindMergeFooterEvents: () => void;
@@ -63,7 +69,6 @@ const facade: PaintHost = {
   bindShellEvents,
   bindSidebarEvents,
   bindStatusEvents,
-  bindToolbarEvents,
   bindEmptyStateEvents,
   bindMergeModalEvents,
   bindMergeFooterEvents,
@@ -93,8 +98,8 @@ export function render(): void {
   paint().render();
 }
 
-export function refreshMedia(): Promise<void> {
-  return paint().refreshMedia();
+export function refreshMedia(options?: RefreshMediaOptions): Promise<void> {
+  return paint().refreshMedia(options);
 }
 
 export function renderSettingsAware(): void {
@@ -135,10 +140,6 @@ export function bindSidebarEvents(): void {
 
 export function bindStatusEvents(): void {
   paint().bindStatusEvents();
-}
-
-export function bindToolbarEvents(): void {
-  paint().bindToolbarEvents();
 }
 
 export function bindEmptyStateEvents(): void {
