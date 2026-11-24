@@ -16,6 +16,7 @@ import {
 import { onGridScroll } from "../../render/virtual";
 import { state } from "../../state";
 import { dismissNotice, runNoticeAction } from "../notices";
+import { openDeletedPanel } from "../deleted-ops";
 import { openTagManager } from "../dialogs-ops";
 import { patchBackupOverlay, patchErrorBar, patchTaskPill } from "../orchestrate";
 import { cancelTask } from "../tasks";
@@ -363,8 +364,9 @@ function applyFavoritesPreset(): void {
 
 /** 侧栏一级导航统一分派（[data-nav]）。 */
 function handleSidebarNav(nav: string | undefined): void {
-  // 没有媒体库时预设筛选无处可落（库卡本身就是首启 CTA），只放行「导入照片」。
-  if (!state.library && nav !== "import") return;
+  // 没有媒体库时预设筛选无处可落（库卡本身就是首启 CTA）。放行「导入照片」与
+  // 「已删除」：后者只读审计库，没有库时会给出明确提示，而不是点了没反应。
+  if (!state.library && nav !== "import" && nav !== "deleted") return;
   switch (nav) {
     case "all":
       clearAllFilters();
@@ -381,8 +383,10 @@ function handleSidebarNav(nav: string | undefined): void {
     case "import":
       void openBackupPanel();
       return;
+    case "deleted":
+      void openDeletedPanel();
+      return;
     default:
-      // "deleted" 留给后续半场：按钮已 disabled，这里只兜住意外触发。
       return;
   }
 }

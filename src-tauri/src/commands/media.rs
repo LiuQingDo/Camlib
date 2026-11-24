@@ -159,6 +159,49 @@ pub fn media_open_folder(
         .map_err(|error| AppError::io(format!("打开资源管理器失败: {error}")))
 }
 
+/// Read-only audit list of recycled media. Derived entirely from
+/// `deletion_logs`; an item recycled several times appears once (newest).
+#[tauri::command]
+pub fn list_deleted_items(
+    library_id: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    state: State<'_, InfrastructureState>,
+) -> Result<db::DeletedItemsPage, AppError> {
+    state.with_infrastructure(|infrastructure| {
+        infrastructure
+            .repository()
+            .list_deleted_items(&library_id, limit.unwrap_or(100), offset.unwrap_or(0))
+            .map_err(InfrastructureError::database)
+    })
+}
+
+/// Open Explorer for a recycled media row. The file normally sits in the
+/// Windows recycle bin, so the original folder is revealed instead; when both
+/// are gone this fails with a specific message rather than doing nothing.
+#[tauri::command]
+pub fn deleted_open_folder(
+    library_id: String,
+    relative_path: String,
+    state: State<'_, InfrastructureState>,
+) -> Result<(), AppError> {
+    let root = state.with_infrastructure(|infrastructure| {
+        let library = infrastructure
+            .repository()
+            .get_library(&library_id)
+            .map_err(InfrastructureError::database)?
+            .ok_or_else(|| InfrastructureError::InvalidPath("媒体库不存在".to_owned()))?;
+        Ok(PathBuf::from(library.root_path))
+    })?;
+    let target = deletion::resolve_recycled_media_location(&root, &relative_path)?;
+    let opened = if target.is_dir() {
+        tauri_plugin_opener::open_path(&target, None::<&str>)
+    } else {
+        tauri_plugin_opener::reveal_item_in_dir(&target)
+    };
+    opened.map_err(|error| AppError::io(format!("打开资源管理器失败: {error}")))
+}
+
 #[tauri::command]
 pub fn favorite_set(
     media_item_id: String,

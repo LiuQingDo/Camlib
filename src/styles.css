@@ -651,10 +651,6 @@ button.library-entry:hover {
   color: inherit;
   background: rgba(255, 255, 255, 0.4);
 }
-/* 即将支持的项：按钮禁用但保留可见，鼠标停在整行上给出原因。 */
-.sidebar-nav-disabled {
-  display: block;
-}
 .sidebar-nav-count {
   margin-left: auto;
   padding-left: 6px;
@@ -3994,6 +3990,189 @@ h1 {
 .tag-manager-footer .outline-button {
   padding: 7px 12px;
   font-size: 11px;
+}
+
+/* ── 已删除：只读审计列表 ────────────────────────────────────────────────
+   配色全部走 CSS 变量：深浅两套主题共用一份规则，不另开 [data-theme] 覆盖。
+   行高固定、表头与行共用同一套 grid 列宽，列才对得齐。 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.deleted-backdrop {
+  z-index: 40;
+}
+.deleted-panel {
+  display: flex;
+  width: min(940px, calc(100vw - 48px));
+  height: min(74vh, 660px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  background: var(--bg-elevated);
+  box-shadow:
+    var(--shadow),
+    var(--glass-specular);
+  backdrop-filter: blur(20px) saturate(130%);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  animation: modal-in 0.28s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+}
+.deleted-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 12px;
+}
+.deleted-header h2 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 17px;
+}
+.deleted-header span {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.deleted-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 20px 12px;
+}
+.deleted-table-head,
+.deleted-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 128px 152px 176px;
+  gap: 12px;
+  align-items: center;
+}
+.deleted-table-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-elevated);
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.deleted-table-head > :first-child {
+  grid-column: span 2;
+}
+.deleted-row {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-hairline);
+  border-radius: 12px;
+}
+.deleted-row:hover {
+  background: var(--chip-hover);
+}
+.deleted-thumb {
+  display: grid;
+  width: 42px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: 9px;
+  background: var(--inset);
+  color: var(--faint);
+  font-size: 13px;
+}
+.deleted-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.deleted-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deleted-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deleted-kind,
+.deleted-time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.deleted-time {
+  font-variant-numeric: tabular-nums;
+}
+.deleted-open {
+  justify-self: end;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.deleted-state {
+  display: flex;
+  min-height: 180px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.deleted-state strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+.deleted-state.is-error {
+  color: var(--danger);
+}
+.deleted-state.is-error .outline-button {
+  margin-top: 4px;
+}
+.deleted-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px 14px;
+  border-top: 1px solid var(--border-hairline);
+  color: var(--faint);
+  font-size: 10.5px;
+}
+@media (max-width: 880px) {
+  .deleted-panel {
+    width: calc(100vw - 24px);
+  }
+  /* 窄屏先牺牲「类型」列：名称 / 时间 / 操作是判断要用到的三样。 */
+  .deleted-table-head,
+  .deleted-row {
+    grid-template-columns: 42px minmax(0, 1fr) 140px 158px;
+  }
+  .deleted-kind,
+  .deleted-table-head > :nth-child(2) {
+    display: none;
+  }
 }
 
 .live-preview,

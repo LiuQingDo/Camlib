@@ -7,8 +7,9 @@
 /// They are serde-compatible with the TypeScript contracts in `src/api/media.ts`.
 pub mod dto {
     pub use super::{
-        BackupRun, BackupStatus, ConflictPolicy, Library, LibraryState, MediaFile, MediaFileRole,
-        MediaItem, MediaItemDetails, MediaKind, MediaPage, ScanState, Tag,
+        BackupRun, BackupStatus, ConflictPolicy, DeletedItem, DeletedItemsPage, Library,
+        LibraryState, MediaFile, MediaFileRole, MediaItem, MediaItemDetails, MediaKind, MediaPage,
+        ScanState, Tag,
     };
 }
 

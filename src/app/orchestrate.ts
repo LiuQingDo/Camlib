@@ -22,9 +22,11 @@ import {
 } from "../views/dialogs";
 import { closeEditor, renderEditor } from "../views/editor";
 import { loadModalAsset, patchPreviewFrame, renderPreview } from "../views/preview";
+import { renderDeletedPanel } from "../views/deleted";
 import { renderSettingsPanel, updateSettingsPanel } from "../views/settings";
-import { bindOverlayEvents } from "./bindings/overlay";
+import { bindDeletedOverlayEvents, bindOverlayEvents } from "./bindings/overlay";
 import { handlePreviewEscape } from "./bindings/preview";
+import { closeDeletedPanel } from "./deleted-ops";
 import { closeMergeModal, closeTagManager } from "./dialogs-ops";
 import { pruneDetachedTraps, trapDialogFocus } from "./focus";
 import { cancelDeleteConfirm } from "./media-ops";
@@ -38,6 +40,8 @@ export type OverlayId =
   | "settings"
   | "ai-chat"
   | "backup"
+  /** 侧栏「已删除」：只读审计列表，模态浮层。 */
+  | "deleted"
   /** 筛选面板：无遮罩、无焦点陷阱，由 render/toolbar.ts 自行挂载与定位。 */
   | "filters";
 
@@ -78,6 +82,8 @@ function overlayEscHandler(id: OverlayId): (() => void) | undefined {
       return closeEditor;
     case "merge":
       return closeMergeModal;
+    case "deleted":
+      return closeDeletedPanel;
     default:
       return undefined;
   }
@@ -326,6 +332,23 @@ export function patchBackupOverlay(): boolean {
   return rebuilt;
 }
 
+/** 侧栏「已删除」浮层：内容只由 state 决定，网格与其它弹窗不受影响。 */
+export function patchDeletedOverlay(): boolean {
+  const rebuilt = patchOverlay(
+    "deleted",
+    state.deletedOpen
+      ? `${state.deletedLoading ? 1 : 0}:${state.deletedError ?? ""}:${state.deletedTotal}:${state.deletedItems
+          .map((item) => `${item.id}@${item.deletedAt}`)
+          .join("|")}`
+      : "closed",
+    renderDeletedPanel,
+  );
+  // 浮层内容只在打开时才有，启动期的 bindOverlayEvents 抓不到这些节点：
+  // 重建后立刻绑，否则 ×、页脚关闭、点遮罩全是死按钮。
+  if (rebuilt) bindDeletedOverlayEvents();
+  return rebuilt;
+}
+
 export function renderOverlays(): void {
   // 骨架被强制重建过（换媒体库）时，旧容器连同陷阱一起脱离了文档：
   // 不清掉的话 inert 计数会卡在 >0，整个界面被锁死。
@@ -369,6 +392,7 @@ export function renderOverlays(): void {
       renderAiChatDrawer,
     ) || changed;
   changed = patchBackupOverlay() || changed;
+  changed = patchDeletedOverlay() || changed;
   if (changed) {
     bindOverlayEvents();
     // 新弹窗需要恢复保存的几何尺寸并补上拖拽手柄（两者都自带幂等判断）。

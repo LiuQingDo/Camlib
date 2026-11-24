@@ -109,6 +109,8 @@ pub fn run() {
             commands::media::media_date_facets,
             commands::media::media_get,
             commands::media::media_open_folder,
+            commands::media::list_deleted_items,
+            commands::media::deleted_open_folder,
             commands::media::favorite_set,
             commands::media::favorite_set_batch,
             commands::media::tag_list,

@@ -44,6 +44,7 @@ import {
   VideoMergeMode,
   VideoMergeProgressDto,
 } from "./api/media";
+import type { DeletedItemDto } from "./api/deleted";
 import type { AiPanelView } from "./lib/ai-providers";
 
 export type SortMode = UiSortMode;
@@ -119,6 +120,13 @@ export interface AppState {
   deleteProgress: DeleteProgressDto | null;
   deleteResult: DeleteResultDto | null;
   deleteNotice: string | null;
+  /** 侧栏「已删除」只读列表：浮层开关与最近一次查询结果。 */
+  deletedOpen: boolean;
+  deletedLoading: boolean;
+  deletedItems: DeletedItemDto[];
+  /** 后端去重后的总数；可能大于已加载的 100 条。 */
+  deletedTotal: number;
+  deletedError: string | null;
   backupOpen: boolean;
   backupSources: BackupVolumeDto[];
   backupPreview: BackupPreviewDto | null;
@@ -309,6 +317,11 @@ export const state: AppState = {
   deleteProgress: null,
   deleteResult: null,
   deleteNotice: null,
+  deletedOpen: false,
+  deletedLoading: false,
+  deletedItems: [],
+  deletedTotal: 0,
+  deletedError: null,
   backupOpen: false,
   backupSources: [],
   backupPreview: null,

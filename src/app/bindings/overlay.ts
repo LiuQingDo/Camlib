@@ -14,6 +14,7 @@ import {
   togglePreviewImmersive,
   togglePreviewInfo,
 } from "../../views/preview";
+import { closeDeletedPanel, loadDeletedItems, openDeletedItemFolder } from "../deleted-ops";
 import { cancelDeleteConfirm, openFolderForItem, runConfirmedDelete } from "../media-ops";
 import { bindTagManagerEvents } from "./dialogs";
 import { bindEditorEvents } from "./editor";
@@ -93,4 +94,28 @@ export function bindOverlayEvents(): void {
   bindMergeModalEvents();
   bindTagManagerEvents();
   bindSettingsEvents();
+}
+
+/**
+ * 「已删除」浮层的绑定。
+ *
+ * 不能塞进 bindOverlayEvents()：那个函数只在启动与整体重建时跑，而浮层内容是
+ * 「点开」那一刻才 patch 进空容器的——那时页面上还没有 #close-deleted，`bind()`
+ * 对 null 静默返回，于是 ×、页脚「关闭」、点遮罩三个关闭入口全是死按钮。
+ * 改由 patchDeletedOverlay() 在每次重建 DOM 之后调用，绑到的必然是刚插入的节点；
+ * `bind()` 自带节点级幂等标记，重建后重绑不会叠加监听器。
+ */
+export function bindDeletedOverlayEvents(): void {
+  if (!state.deletedOpen) return;
+  // 只读列表。没有还原按钮——还原只在 Windows 回收站里做。
+  bind(app.querySelector("#close-deleted"), "click", () => closeDeletedPanel());
+  bind(app.querySelector("#deleted-close-footer"), "click", () => closeDeletedPanel());
+  bind(app.querySelector("#deleted-retry"), "click", () => void loadDeletedItems());
+  bind(app.querySelector("#deleted-backdrop"), "click", (event) => {
+    if (event.target === event.currentTarget) closeDeletedPanel();
+  });
+  bindAll("[data-open-deleted]", "click", (event) => {
+    const relativePath = (event.currentTarget as HTMLElement).dataset.openDeleted;
+    if (relativePath) void openDeletedItemFolder(relativePath);
+  });
 }

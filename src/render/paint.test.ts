@@ -11,6 +11,7 @@ import {
   bindPreviewMetaEvents,
   bindEditorFooterEvents,
   loadMoreScrollRoot,
+  patchDeletedOverlay,
   openSettings,
   persistUiPrefs,
   refreshMedia,
@@ -45,6 +46,7 @@ describe("installPaint", () => {
         bindSettingsEvents,
         bindPreviewMetaEvents,
         bindEditorFooterEvents,
+        patchDeletedOverlay,
       }),
     ).toThrow(/门面自身/);
   });
@@ -71,6 +73,7 @@ describe("installPaint", () => {
       // 只错一个：其余都是真实实现，这一项是门面壳。
       bindPreviewMetaEvents,
       bindEditorFooterEvents: () => undefined,
+      patchDeletedOverlay: noop,
     };
     expect(() => installPaint(host)).toThrow(/bindPreviewMetaEvents/);
   });
@@ -98,6 +101,7 @@ describe("installPaint", () => {
       bindSettingsEvents: () => undefined,
       bindPreviewMetaEvents: () => undefined,
       bindEditorFooterEvents: () => undefined,
+      patchDeletedOverlay: () => undefined,
     });
     render();
     expect(rendered).toBe(1);

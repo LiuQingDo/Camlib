@@ -325,6 +325,43 @@ pub fn resolve_media_file(root: &Path, relative: &str) -> Result<PathBuf, crate:
     Ok(canonical_file)
 }
 
+/// Resolve where Explorer should point for media the app already recycled.
+///
+/// A file that went to the Windows recycle bin no longer exists on disk, so
+/// the surviving original directory is the useful fallback — and when that is
+/// gone too the caller gets a specific error instead of a silent no-op. The
+/// returned path is canonicalized and containment-checked in both branches.
+pub fn resolve_recycled_media_location(
+    root: &Path,
+    relative: &str,
+) -> Result<PathBuf, crate::errors::AppError> {
+    let (canonical_root, candidate) = lexical_candidate(root, relative)?;
+    if candidate.is_file() {
+        let canonical_file = fs::canonicalize(&candidate)
+            .map_err(|e| crate::errors::AppError::media_missing(format!("媒体文件不可用: {e}")))?;
+        if !canonical_file.starts_with(&canonical_root) {
+            return Err(crate::errors::AppError::path_outside_root(
+                "媒体路径越过媒体库根目录",
+            ));
+        }
+        return Ok(canonical_file);
+    }
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| crate::errors::AppError::media_missing("媒体相对路径没有上级目录"))?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+        crate::errors::AppError::media_missing(format!(
+            "文件与其原目录都已不存在，无法在资源管理器中打开: {relative}"
+        ))
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(crate::errors::AppError::path_outside_root(
+            "媒体路径越过媒体库根目录",
+        ));
+    }
+    Ok(canonical_parent)
+}
+
 fn lexical_candidate(
     root: &Path,
     relative: &str,
@@ -566,6 +603,29 @@ mod tests {
         let resolved = resolve_media_file(root.path(), r"2026\01\ok.jpg").unwrap();
         assert!(resolved.is_file());
         assert!(resolved.starts_with(fs::canonicalize(root.path()).unwrap()));
+    }
+
+    #[test]
+    fn recycled_location_falls_back_to_parent_and_reports_missing_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("2026").join("08")).unwrap();
+        fs::write(root.path().join("2026").join("08").join("gone.JPG"), b"x").unwrap();
+
+        // Still on disk (e.g. restored by hand): point at the file itself.
+        let existing = resolve_recycled_media_location(root.path(), "2026/08/gone.JPG").unwrap();
+        assert!(existing.is_file());
+
+        fs::remove_file(root.path().join("2026").join("08").join("gone.JPG")).unwrap();
+        let parent = resolve_recycled_media_location(root.path(), "2026/08/gone.JPG").unwrap();
+        assert!(parent.is_dir(), "recycled file falls back to its folder");
+
+        // Both the file and its directory are gone: a specific error, not a silent no-op.
+        let error = resolve_recycled_media_location(root.path(), "2026/09/gone.JPG").unwrap_err();
+        assert_eq!(error.code, crate::errors::ErrorCode::MediaMissing);
+        assert!(error.message.contains("2026/09/gone.JPG"));
+
+        // Traversal stays rejected even though nothing has to exist.
+        assert!(resolve_recycled_media_location(root.path(), "../outside.jpg").is_err());
     }
 
     #[test]

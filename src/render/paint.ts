@@ -47,6 +47,8 @@ export type PaintHost = {
   bindSettingsEvents: () => void;
   bindPreviewMetaEvents: (panel: HTMLElement, item: MediaItemDto) => void;
   bindEditorFooterEvents: (modal: HTMLElement) => void;
+  /** 侧栏「已删除」浮层：只读列表，独立签名，不牵动网格。 */
+  patchDeletedOverlay: () => void;
 };
 
 let host: PaintHost | null = null;
@@ -75,6 +77,7 @@ const facade: PaintHost = {
   bindSettingsEvents,
   bindPreviewMetaEvents,
   bindEditorFooterEvents,
+  patchDeletedOverlay,
 };
 
 /** 由 main.ts 在启动装配阶段调用一次。 */
@@ -164,4 +167,8 @@ export function bindPreviewMetaEvents(panel: HTMLElement, item: MediaItemDto): v
 
 export function bindEditorFooterEvents(modal: HTMLElement): void {
   paint().bindEditorFooterEvents(modal);
+}
+
+export function patchDeletedOverlay(): void {
+  paint().patchDeletedOverlay();
 }

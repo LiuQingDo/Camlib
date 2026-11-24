@@ -18,7 +18,7 @@ import { bindSettingsEvents } from "./app/bindings/settings";
 import { bindEmptyStateEvents, bindShellEvents, bindSidebarEvents, bindStatusEvents } from "./app/bindings/shell";
 import { bootstrap, persistUiPrefs, probeFfmpeg } from "./app/library";
 import { loadMoreScrollRoot, refreshMedia, updateLoadMoreFooter } from "./app/media-query";
-import { render, renderSettingsAware } from "./app/orchestrate";
+import { patchDeletedOverlay, render, renderSettingsAware } from "./app/orchestrate";
 import { openSettings } from "./app/settings-ops";
 import { showTransientNotice } from "./app/ui";
 import { initLiquidGlass, setGlassObserverPaused, syncLiquidGlass } from "./liquid-glass";
@@ -51,6 +51,7 @@ installPaint({
   bindSettingsEvents,
   bindPreviewMetaEvents,
   bindEditorFooterEvents,
+  patchDeletedOverlay,
 });
 
 initLiquidGlass();
