@@ -17,7 +17,7 @@ import {
   regionForBaseUrl,
   resolveProviderId,
 } from "../lib/ai-providers";
-import { formatCaptureAt, formatCount, formatEtaSeconds, formatSize, formatSpeed, truncatePath } from "../lib/format";
+import { formatCaptureAt, formatCount, formatSize, truncatePath } from "../lib/format";
 import { app } from "../render/context";
 import { bindSettingsEvents, persistUiPrefs, render } from "../render/paint";
 import {
@@ -25,12 +25,11 @@ import {
   escapeHtml,
   facetTotal,
   libraryAvailabilityLabel,
-  pathBaseName,
   scanRunStatusLabel,
 } from "../render/text";
 import { scanPercentLabel, scanStatusLabel } from "../render/toolbar";
 import { SettingsSection, state } from "../state";
-import { DIALOG_SPECS, applyDialogSizes, mergeGroupMatches } from "./dialogs";
+import { DIALOG_SPECS, applyDialogSizes } from "./dialogs";
 
 export const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "library", label: "媒体库" },
@@ -88,22 +87,6 @@ export function renderSettingsLibrarySection(): string {
 export function renderSettingsIndexSection(): string {
   const summary = state.indexSummary;
   const runs = state.scanRuns;
-  const mergePreview = state.libraryMergePreview;
-  const mergeProgress = state.libraryMergeProgress;
-  const mergeRunning = Boolean(state.libraryMergeJobId) || mergeProgress?.state === "running";
-  const mergePercent =
-    mergeProgress && mergeProgress.bytesTotal > 0
-      ? Math.min(100, Math.max(0, Math.round((mergeProgress.bytesProcessed / mergeProgress.bytesTotal) * 100)))
-      : 0;
-  const selectedGroups = mergePreview
-    ? mergePreview.groups.filter((group) => state.libraryMergeSelected.has(group.destinationRelative))
-    : [];
-  const selectedBytes = selectedGroups.reduce((sum, group) => sum + group.sizeBytes, 0);
-  const selectedSegments = selectedGroups.reduce((sum, group) => sum + group.sources.length, 0);
-  const mergeSpaceOk = !mergePreview || mergePreview.freeBytes === null || mergePreview.freeBytes >= selectedBytes;
-  const mergeQuery = state.libraryMergeFilter.trim().toLowerCase();
-  const visibleGroups = mergePreview ? mergePreview.groups.filter((group) => mergeGroupMatches(group, mergeQuery)) : [];
-  const canStartMerge = Boolean(mergePreview) && selectedGroups.length > 0 && mergeSpaceOk && !mergeRunning;
   return `<div class="settings-section-body">
     <div class="settings-status-card">
       <h3>索引摘要</h3>
@@ -151,64 +134,10 @@ export function renderSettingsIndexSection(): string {
     </div>
     <div class="settings-status-card">
       <h3>整理历史分段</h3>
-      <div class="settings-note">把媒体库里相机自动截断的分段视频无损合并成完整长视频。只合并同一 VID_日期_时间、且末尾序号连续的文件；时间不同的相邻序号（例如 150035_122 和 150534_123）不会合并。生成预览后可以勾选其中几组，不必一次处理全部。合并成功后可选把原分段移入回收站，并自动增量扫描入库。</div>
-      ${state.libraryMergeNotice ? `<div class="settings-note">${escapeHtml(state.libraryMergeNotice)}</div>` : ""}
-      ${
-        mergePreview
-          ? `<div class="settings-stat-grid">
-        <div><span>已选</span><strong>${formatCount(selectedGroups.length)} / ${formatCount(mergePreview.groupCount)} 组</strong></div>
-        <div><span>分段</span><strong>${formatCount(selectedSegments)}</strong></div>
-        <div><span>大小</span><strong>${formatSize(selectedBytes)}</strong></div>
-        <div><span>目标剩余</span><strong class="${mergeSpaceOk ? "" : "is-danger"}">${mergePreview.freeBytes === null ? "不可用" : formatSize(mergePreview.freeBytes)}</strong></div>
-      </div>
-      ${
-        mergePreview.groupCount === 0
-          ? `<div class="settings-note">没有需要合并的分段视频。</div>`
-          : `
-      <div class="merge-pick-tools">
-        <input id="library-merge-filter" value="${escapeHtml(state.libraryMergeFilter)}" placeholder="筛选文件名或时间戳" aria-label="筛选分段" ${mergeRunning ? "disabled" : ""} />
-        <button class="text-button" type="button" id="library-merge-select-visible" ${mergeRunning || visibleGroups.length === 0 ? "disabled" : ""}>${mergeQuery ? "全选当前" : "全选"}</button>
-        <button class="text-button" type="button" id="library-merge-clear-visible" ${mergeRunning || visibleGroups.length === 0 ? "disabled" : ""}>${mergeQuery ? "清除当前" : "全不选"}</button>
-      </div>
-      <div class="merge-pick-list" id="library-merge-list">${visibleGroups.map((group) => `<label class="merge-pick"><input type="checkbox" data-merge-dest="${escapeHtml(group.destinationRelative)}" ${state.libraryMergeSelected.has(group.destinationRelative) ? "checked" : ""} ${mergeRunning ? "disabled" : ""} /><span class="merge-pick-name">${escapeHtml(group.sources.map(pathBaseName).join(" + "))}</span><span class="merge-pick-meta">→ ${escapeHtml(group.fileName)} · ${formatSize(group.sizeBytes)}</span></label>`).join("")}${visibleGroups.length === 0 ? `<div class="settings-note">没有符合筛选的分组。</div>` : ""}</div>
-      ${selectedGroups.length === 0 ? `<div class="settings-note">请至少勾选一组再合并。</div>` : ""}
-      ${selectedGroups.length > 0 && !mergeSpaceOk ? `<div class="settings-note is-danger">所选分段需要的空间超过目标盘剩余，无法开始合并。</div>` : ""}`
-      }`
-          : `<div class="settings-note">${state.libraryMergeLoading ? "正在扫描分段…" : "先生成预览，再勾选要合并的组。"}</div>`
-      }
+      <div class="settings-note">已移到「导入照片」抽屉的「整理分段」标签页：生成预览、勾选分组、合并、进度与取消都在那里完成，这里不再重复一套。</div>
       <div class="settings-actions">
-        <button class="outline-button" type="button" id="library-merge-preview" ${!state.library || state.availability !== "available" || mergeRunning || state.libraryMergeLoading ? "disabled" : ""}>${state.libraryMergeLoading ? "扫描中…" : mergePreview ? "刷新预览" : "生成预览"}</button>
-        <button class="primary-button" type="button" id="library-merge-start" ${canStartMerge ? "" : "disabled"}>${mergeRunning ? "合并中…" : selectedGroups.length > 0 && mergePreview && selectedGroups.length < mergePreview.groupCount ? `合并所选 ${formatCount(selectedGroups.length)}` : "开始合并"}</button>
+        <button class="outline-button" type="button" id="settings-open-merge-tab">打开整理分段</button>
       </div>
-      ${mergePreview && mergePreview.groupCount > 0 && !mergeRunning ? `<label class="settings-note"><input type="checkbox" id="library-merge-recycle" ${state.libraryMergeRecycle ? "checked" : ""} /> 合并成功后把原分段移入回收站（可再从回收站恢复）</label>` : ""}
-      ${
-        state.libraryMergeConfirm
-          ? `<div class="settings-confirm">
-        <p>将合并已勾选的 ${formatCount(selectedGroups.length)} 组（约 ${formatSize(selectedBytes)}，共 ${formatCount(mergePreview?.groupCount ?? 0)} 组可选）。合并过程用 ffmpeg 无损拼接，源分段在校验成功前不会删除。${state.libraryMergeRecycle ? "成功后原分段会移入回收站。" : "原分段会保留在库里。"}是否开始？</p>
-        <div class="settings-actions">
-          <button class="outline-button" type="button" id="library-merge-confirm-cancel">取消</button>
-          <button class="primary-button" type="button" id="library-merge-confirm-start">确认合并</button>
-        </div>
-      </div>`
-          : ""
-      }
-      ${
-        mergeProgress
-          ? `<div class="scan-banner" role="status" aria-live="polite">
-        <div class="scan-copy">
-          ${mergeProgress.state === "running" ? `<span class="spinner"></span>` : ""}
-          <span>${mergeProgress.state === "completed" ? "分段整理完成" : mergeProgress.state === "cancelled" ? "分段整理已取消" : mergeProgress.state === "failed" ? "分段整理失败" : "正在合并分段"}</span>
-          <strong>${mergeProgress.state === "running" ? `${mergePercent}%` : `${formatCount(mergeProgress.groupProcessed)} / ${formatCount(mergeProgress.groupTotal)} 组`}</strong>
-          ${mergeRunning ? `<button class="text-button" type="button" id="library-merge-cancel">取消</button>` : ""}
-        </div>
-        <div class="progress-track${mergeProgress.state === "running" && mergeProgress.bytesTotal <= 0 ? " is-indeterminate" : ""}">
-          <span style="width:${mergeProgress.state === "running" && mergeProgress.bytesTotal <= 0 ? "35%" : `${mergePercent}%`}"></span>
-        </div>
-        <div class="scan-current">${escapeHtml(mergeProgress.currentFile || (mergeProgress.state === "running" ? "准备中" : ""))} · ${formatCount(mergeProgress.groupProcessed)} / ${formatCount(mergeProgress.groupTotal)} 组 · ${formatSize(mergeProgress.bytesProcessed)} / ${formatSize(mergeProgress.bytesTotal)}${mergeProgress.speedBytesPerSec > 0 ? ` · ${formatSpeed(mergeProgress.speedBytesPerSec)}` : ""}${mergeProgress.etaSeconds ? ` · 剩余 ${formatEtaSeconds(mergeProgress.etaSeconds)}` : ""}</div>
-        <div class="backup-note">${mergeProgress.state === "running" ? "取消会在当前分段的安全点停止：未提交的临时文件会删除；已合并完成的文件会保留。" : mergeProgress.error ? escapeHtml(mergeProgress.error) : ""}</div>
-      </div>`
-          : ""
-      }
     </div>
     <div class="settings-status-card">
       <h3>最近扫描</h3>

@@ -5,7 +5,7 @@ import { filterProviderPresets, findProfile, pickerPresets } from "../../lib/ai-
 import { app } from "../../render/context";
 import { persistUiPrefs, render } from "../../render/paint";
 import { SettingsSection, state } from "../../state";
-import { applyDialogSizes, mergeGroupMatches } from "../../views/dialogs";
+import { applyDialogSizes } from "../../views/dialogs";
 import {
   aiModelCountHint,
   commitDialogSizeInputs,
@@ -15,11 +15,8 @@ import {
 } from "../../views/settings";
 import {
   cancelCurrentScan,
-  cancelLibraryMergeJob,
-  loadLibraryMergePreview,
   openBackupPanel,
-  refreshMergeSelectionView,
-  startLibraryMergeJob,
+  switchImportTab,
 } from "../library";
 import {
   addAiProvider,
@@ -158,62 +155,11 @@ export function bindSettingsBodyEvents(): void {
   app
     .querySelector<HTMLButtonElement>("#settings-purge-missing-confirm")
     ?.addEventListener("click", () => void purgeMissingEntries());
-  app
-    .querySelector<HTMLButtonElement>("#library-merge-preview")
-    ?.addEventListener("click", () => void loadLibraryMergePreview());
-  app.querySelector<HTMLButtonElement>("#library-merge-start")?.addEventListener("click", () => {
-    if (!state.libraryMergePreview || state.libraryMergeSelected.size === 0) return;
-    state.libraryMergeConfirm = true;
-    updateSettingsPanel();
-  });
-  app.querySelector<HTMLInputElement>("#library-merge-filter")?.addEventListener("input", (event) => {
-    state.libraryMergeFilter = (event.target as HTMLInputElement).value;
-    refreshMergeSelectionView();
-  });
-  app.querySelector<HTMLButtonElement>("#library-merge-select-visible")?.addEventListener("click", () => {
-    if (!state.libraryMergePreview) return;
-    const query = state.libraryMergeFilter.trim().toLowerCase();
-    const next = new Set(state.libraryMergeSelected);
-    for (const group of state.libraryMergePreview.groups) {
-      if (mergeGroupMatches(group, query)) next.add(group.destinationRelative);
-    }
-    state.libraryMergeSelected = next;
-    state.libraryMergeConfirm = false;
-    refreshMergeSelectionView();
-  });
-  app.querySelector<HTMLButtonElement>("#library-merge-clear-visible")?.addEventListener("click", () => {
-    if (!state.libraryMergePreview) return;
-    const query = state.libraryMergeFilter.trim().toLowerCase();
-    const next = new Set(state.libraryMergeSelected);
-    for (const group of state.libraryMergePreview.groups) {
-      if (mergeGroupMatches(group, query)) next.delete(group.destinationRelative);
-    }
-    state.libraryMergeSelected = next;
-    state.libraryMergeConfirm = false;
-    refreshMergeSelectionView();
-  });
-  app.querySelector<HTMLElement>("#library-merge-list")?.addEventListener("change", (event) => {
-    const box = event.target;
-    if (!(box instanceof HTMLInputElement) || !box.dataset.mergeDest) return;
-    const next = new Set(state.libraryMergeSelected);
-    if (box.checked) next.add(box.dataset.mergeDest);
-    else next.delete(box.dataset.mergeDest);
-    state.libraryMergeSelected = next;
-    state.libraryMergeConfirm = false;
-    refreshMergeSelectionView();
-  });
-  app.querySelector<HTMLButtonElement>("#library-merge-confirm-cancel")?.addEventListener("click", () => {
-    state.libraryMergeConfirm = false;
-    updateSettingsPanel();
-  });
-  app
-    .querySelector<HTMLButtonElement>("#library-merge-confirm-start")
-    ?.addEventListener("click", () => void startLibraryMergeJob());
-  app
-    .querySelector<HTMLButtonElement>("#library-merge-cancel")
-    ?.addEventListener("click", () => void cancelLibraryMergeJob());
-  app.querySelector<HTMLInputElement>("#library-merge-recycle")?.addEventListener("change", (event) => {
-    state.libraryMergeRecycle = (event.target as HTMLInputElement).checked;
+  // 分段整理整块已迁到导入抽屉的「整理分段」标签页，设置里只留这个入口。
+  app.querySelector<HTMLButtonElement>("#settings-open-merge-tab")?.addEventListener("click", () => {
+    closeSettings();
+    switchImportTab("merge");
+    void openBackupPanel();
   });
   app
     .querySelector<HTMLButtonElement>("#settings-choose-thumbnail")

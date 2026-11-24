@@ -27,16 +27,28 @@ import {
   bootstrap,
   cancelCurrentBackup,
   cancelCurrentScan,
+  cancelLibraryMergeConfirm,
+  cancelLibraryMergeJob,
   chooseLibraryFolder,
   closeBackupPanel,
   connectLibrary,
   createBackupPreview,
+  goBackBackupStep,
+  loadLibraryMergePreview,
   openBackupPanel,
+  refreshBackupSources,
+  refreshMergeSelectionView,
+  requestLibraryMerge,
+  restartBackupFlow,
   retryCurrentBackup,
   saveBackupConflict,
   saveBackupMerge,
   scanLibrary,
+  setMergeSelectionVisible,
   startConfirmedBackup,
+  startLibraryMergeJob,
+  switchImportTab,
+  toggleMergeGroup,
   viewNewImports,
 } from "../library";
 import { toggleTheme } from "../settings-ops";
@@ -219,6 +231,9 @@ export function bindShellEvents(): void {
  * 备份抽屉是 overlay 槽位里的动态内容，每次 patch 都会换掉内部节点。
  * 在静态宿主上做一次委托，比每次重建后重绑十几个 id 稳，也不会和
  * patchBackupOverlay 的调用顺序耦合。
+ *
+ * 抽屉现在有两个标签页（从相机导入 / 整理分段），分段整理那一套 id 与它在
+ * 设置页时完全一致（library-merge-*），迁过来只是换了容器，委托这里一并接住。
  */
 function bindBackupDrawerEvents(): void {
   const host = app.querySelector<HTMLElement>('[data-overlay="backup"]');
@@ -237,6 +252,35 @@ function bindBackupDrawerEvents(): void {
     }
     if (target.closest("#close-backup")) {
       closeBackupPanel();
+      return;
+    }
+    const tab = target.closest<HTMLElement>("[data-import-tab]");
+    if (tab) {
+      const id = tab.dataset.importTab;
+      if (id === "import" || id === "merge") switchImportTab(id);
+      return;
+    }
+    // 折叠块的默认动作在事件之后执行：这里存的是「即将变成」的状态，重建后不弹回。
+    const advanced = target.closest<HTMLDetailsElement>("details.backup-advanced");
+    if (advanced && target.closest("summary")) {
+      state.backupAdvancedOpen = !advanced.open;
+      return;
+    }
+    const detail = target.closest<HTMLDetailsElement>("details.backup-detail");
+    if (detail && target.closest("summary")) {
+      state.backupDetailOpen = !detail.open;
+      return;
+    }
+    if (target.closest("#backup-step-back")) {
+      goBackBackupStep();
+      return;
+    }
+    if (target.closest("#backup-restart")) {
+      restartBackupFlow();
+      return;
+    }
+    if (target.closest("#backup-refresh-sources")) {
+      void refreshBackupSources();
       return;
     }
     if (target.closest("#backup-preview-button")) {
@@ -264,6 +308,35 @@ function bindBackupDrawerEvents(): void {
       closeBackupPanel();
       return;
     }
+    // 整理分段：预览 / 合并 / 全选 / 确认 / 取消，与设置页时的调用完全一致。
+    if (target.closest("#library-merge-preview")) {
+      void loadLibraryMergePreview();
+      return;
+    }
+    if (target.closest("#library-merge-start")) {
+      requestLibraryMerge();
+      return;
+    }
+    if (target.closest("#library-merge-select-visible")) {
+      setMergeSelectionVisible(true);
+      return;
+    }
+    if (target.closest("#library-merge-clear-visible")) {
+      setMergeSelectionVisible(false);
+      return;
+    }
+    if (target.closest("#library-merge-confirm-cancel")) {
+      cancelLibraryMergeConfirm();
+      return;
+    }
+    if (target.closest("#library-merge-confirm-start")) {
+      void startLibraryMergeJob();
+      return;
+    }
+    if (target.closest("#library-merge-cancel")) {
+      void cancelLibraryMergeJob();
+      return;
+    }
     const runRow = target.closest<HTMLElement>("[data-backup-run]");
     if (runRow) toggleBackupRun(runRow.dataset.backupRun);
   });
@@ -272,21 +345,31 @@ function bindBackupDrawerEvents(): void {
     if (!(target instanceof HTMLElement)) return;
     if (target.id === "backup-source") {
       state.backupSourceId = (target as HTMLSelectElement).value || null;
+      // 换了源盘，旧摘要对应的不是这个盘：作废回到选择步。
+      invalidateBackupPreview();
+      patchBackupOverlay();
       return;
     }
     if (target.id === "backup-target") {
       state.backupTargetId = (target as HTMLSelectElement).value || null;
+      invalidateBackupPreview();
+      patchBackupOverlay();
       return;
     }
     if (target.id === "backup-ignore") {
       state.backupIgnoreExtensions = (target as HTMLInputElement).value;
+      // 高级选项收起时右侧摘要要跟着改，否则「不隐藏默认值」就落空了。
+      invalidateBackupPreview();
+      patchBackupOverlay();
       return;
     }
     if (target.id === "backup-conflict") {
+      invalidateBackupPreview();
       void saveBackupConflict((target as HTMLSelectElement).value as ConflictPolicy);
       return;
     }
     if (target.id === "backup-merge") {
+      invalidateBackupPreview();
       void saveBackupMerge((target as HTMLSelectElement).value === "on");
       return;
     }
@@ -296,8 +379,30 @@ function bindBackupDrawerEvents(): void {
       // would otherwise keep advertising the previous setting.
       if (state.backupPreview) void createBackupPreview();
       else patchBackupOverlay();
+      return;
+    }
+    if (target.id === "library-merge-recycle") {
+      state.libraryMergeRecycle = (target as HTMLInputElement).checked;
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.dataset.mergeDest && state.libraryMergePreview) {
+      toggleMergeGroup(target.dataset.mergeDest, target.checked);
     }
   });
+  // 筛选框走 input（边打边筛）：只换 merge 体，焦点与光标由 patch 自己恢复。
+  bind(host, "input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "library-merge-filter") return;
+    state.libraryMergeFilter = target.value;
+    refreshMergeSelectionView();
+  });
+}
+
+/** 改任何影响预览的选项：旧摘要作废，回到选择步重新预览。 */
+function invalidateBackupPreview(): void {
+  if (!state.backupPreview) return;
+  state.backupPreview = null;
+  if (state.backupStep === "confirm") state.backupStep = "select";
 }
 
 function toggleBackupRun(runId: string | undefined): void {
@@ -381,6 +486,8 @@ function handleSidebarNav(nav: string | undefined): void {
       openTagManager();
       return;
     case "import":
+      // 侧栏入口的意图就是「从相机导入」：即使上次停在整理分段，也回到第一页。
+      switchImportTab("import");
       void openBackupPanel();
       return;
     case "deleted":

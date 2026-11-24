@@ -2689,6 +2689,193 @@ h1 {
   flex-shrink: 0;
   color: #666666;
 }
+/* ── 导入抽屉：标签页 / 高级折叠 / 首屏大数字 ─────────────────────────── */
+.import-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0 18px 10px;
+  padding: 3px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.05);
+}
+.import-tab {
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  color: #666666;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.import-tab:hover {
+  color: #222222;
+}
+.import-tab.is-active {
+  color: #111111;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.backup-step-back {
+  height: 24px;
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 10px;
+}
+.backup-step.is-failed {
+  color: #6b1515;
+  background: rgba(255, 235, 235, 0.72);
+}
+/* 高级选项与明细：默认收起，summary 右侧常显当前生效值 */
+details.backup-advanced,
+details.backup-detail {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+details.backup-advanced > summary,
+details.backup-detail > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #555555;
+  font-size: 11px;
+  font-weight: 650;
+  list-style: none;
+  cursor: pointer;
+}
+details.backup-advanced > summary::-webkit-details-marker,
+details.backup-detail > summary::-webkit-details-marker {
+  display: none;
+}
+details.backup-advanced > summary::before,
+details.backup-detail > summary::before {
+  display: inline-block;
+  content: "\25B8";
+  transition: transform 0.15s ease;
+}
+details.backup-advanced[open] > summary::before,
+details.backup-detail[open] > summary::before {
+  transform: rotate(90deg);
+}
+.backup-advanced-current {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: #8a8a8a;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+details.backup-advanced .backup-form {
+  margin-top: 10px;
+}
+details.backup-detail .backup-summary {
+  margin-top: 8px;
+}
+.backup-detail-title {
+  margin-top: 10px;
+  color: #8a8a8a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.backup-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+.backup-hero-stats > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.045);
+}
+.backup-hero-stats span {
+  color: #777777;
+  font-size: 10px;
+  font-weight: 650;
+}
+.backup-hero-stats strong {
+  overflow: hidden;
+  color: #111111;
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.backup-hero-stats em {
+  color: #9a9a9a;
+  font-size: 10px;
+  font-style: normal;
+}
+.backup-hero-stats > div.is-danger strong,
+.backup-hero-stats > div.is-danger em {
+  color: #6b1515;
+}
+.backup-conflict-line {
+  margin-top: 8px;
+  color: #444444;
+  font-size: 11px;
+  line-height: 1.5;
+}
+/* 有同名文件时结论要看得见：覆盖/跳过都不是小事。 */
+.backup-conflict-line.is-warning {
+  color: #8a5a12;
+}
+/* 无盘空态：三行排查 + 刷新 */
+.backup-empty {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.04);
+}
+.backup-empty strong {
+  display: block;
+  color: #222222;
+  font-size: 11px;
+  font-weight: 700;
+}
+.backup-empty-steps {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+  color: #555555;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.backup-empty .outline-button {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 11px;
+}
+.backup-merge .settings-stat-grid {
+  margin-top: 10px;
+}
+/* merge 体外面多包了一层 #import-merge-body，首块的分隔线要一并去掉。 */
+#import-merge-body > .backup-step-block:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.backup-merge-recycle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.backup-merge-recycle input {
+  margin: 0;
+}
 .scan-banner {
   display: block;
   background: rgba(255, 255, 255, 0.55);
@@ -6201,6 +6388,65 @@ h1 {
 [data-theme="dark"] .backup-note.is-danger {
   color: var(--danger);
   background: var(--danger-soft);
+}
+[data-theme="dark"] .import-tabs {
+  background: var(--inset-strong);
+}
+[data-theme="dark"] .import-tab {
+  color: var(--muted);
+}
+[data-theme="dark"] .import-tab:hover {
+  color: var(--ink);
+}
+[data-theme="dark"] .import-tab.is-active {
+  color: var(--ink-strong);
+  background: var(--surface-strong);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+[data-theme="dark"] .backup-step.is-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+[data-theme="dark"] details.backup-advanced,
+[data-theme="dark"] details.backup-detail {
+  border-top-color: var(--border-hairline);
+}
+[data-theme="dark"] details.backup-advanced > summary,
+[data-theme="dark"] details.backup-detail > summary {
+  color: var(--muted);
+}
+[data-theme="dark"] .backup-advanced-current,
+[data-theme="dark"] .backup-detail-title {
+  color: var(--faint);
+}
+[data-theme="dark"] .backup-hero-stats > div {
+  background: var(--inset-strong);
+}
+[data-theme="dark"] .backup-hero-stats span,
+[data-theme="dark"] .backup-hero-stats em {
+  color: var(--muted);
+}
+[data-theme="dark"] .backup-hero-stats strong {
+  color: var(--ink);
+}
+[data-theme="dark"] .backup-hero-stats > div.is-danger strong,
+[data-theme="dark"] .backup-hero-stats > div.is-danger em {
+  color: var(--danger);
+}
+[data-theme="dark"] .backup-conflict-line {
+  color: var(--muted);
+}
+[data-theme="dark"] .backup-conflict-line.is-warning {
+  color: var(--warning);
+}
+[data-theme="dark"] .backup-empty {
+  background: var(--inset-strong);
+}
+[data-theme="dark"] .backup-empty strong {
+  color: var(--ink);
+}
+[data-theme="dark"] .backup-empty-steps {
+  color: var(--muted);
 }
 [data-theme="dark"] .backup-step {
   color: var(--muted);

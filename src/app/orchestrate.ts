@@ -250,6 +250,10 @@ function backupOverlaySignature(): string {
   const preview = state.backupPreview;
   const progress = state.backupProgress;
   return [
+    state.importTab,
+    state.backupStep,
+    state.backupAdvancedOpen ? "advanced" : "basic",
+    state.backupDetailOpen ? "detail" : "folded",
     state.backupLoading ? "loading" : "idle",
     state.availability,
     state.backupSources.map((source) => `${source.id}:${source.volumeLabel ?? ""}:${source.rootPath}`).join(","),

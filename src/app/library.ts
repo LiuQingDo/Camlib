@@ -38,8 +38,9 @@ import { refreshMedia, render, renderSettingsAware } from "../render/paint";
 import { renderShell } from "../render/shell";
 import { willCopyCount } from "../render/text";
 import { patchToolbar, resetSidebarExpansionForSelection, searchUi } from "../render/toolbar";
-import { SortMode, state } from "../state";
-import { sanitizeDialogSizes } from "../views/dialogs";
+import { ImportTab, SortMode, state } from "../state";
+import { patchImportMergeView } from "../views/backup";
+import { mergeGroupMatches, sanitizeDialogSizes } from "../views/dialogs";
 import { updateSettingsPanel } from "../views/settings";
 import { refreshTags } from "./media-query";
 import { patchBackupOverlay } from "./orchestrate";
@@ -165,6 +166,14 @@ export async function openBackupPanel(): Promise<void> {
   backupTrigger = active instanceof HTMLElement ? active : null;
   state.backupOpen = true;
   state.backupPreview = null;
+  // 重开抽屉：跑着的任务回到 running；上一次的终态结果继续展示，其余从选择步开始。
+  state.backupStep = backupRunning()
+    ? "running"
+    : state.backupProgress?.state === "completed"
+      ? "done"
+      : state.backupProgress?.state === "failed"
+        ? "failed"
+        : "select";
   state.backupLoading = true;
   patchBackupOverlay();
   focusBackupDrawer();
@@ -199,6 +208,59 @@ export function closeBackupPanel(options: { restoreFocus?: boolean } = {}): void
   if (options.restoreFocus !== false) trigger?.focus();
 }
 
+/** 抽屉标签页：分段整理的数据都在 state 里，切 tab 只换一屏 DOM。 */
+export function switchImportTab(tab: ImportTab): void {
+  if (state.importTab === tab) return;
+  state.importTab = tab;
+  patchBackupOverlay();
+}
+
+/** 步骤条「上一步」：只在确认步出现，回到选择步并作废旧摘要。 */
+export function goBackBackupStep(): void {
+  if (state.backupStep !== "confirm") return;
+  state.backupStep = "select";
+  // 选项随时可能再改，旧预览不再对应当前设置；而且一次运行会消耗预览，
+  // 留着它只会让人以为还能直接开始。
+  state.backupPreview = null;
+  patchBackupUi();
+}
+
+/** 「再导入一次」：回到第 1 步，清掉上一轮的预览/进度/结果入口（历史保留）。 */
+export function restartBackupFlow(): void {
+  state.backupStep = "select";
+  state.backupPreview = null;
+  state.backupProgress = null;
+  state.backupFailedItems = [];
+  state.backupLastRunId = null;
+  patchBackupUi();
+}
+
+/** 无盘空态的「刷新」：复用发现命令，不重开抽屉。 */
+export async function refreshBackupSources(): Promise<void> {
+  if (backupRunning()) return;
+  state.backupLoading = true;
+  state.error = null;
+  // 盘符可能已经换了：旧预览对应的源盘未必还在，作废回到选择步。
+  state.backupPreview = null;
+  state.backupStep = "select";
+  patchBackupUi();
+  try {
+    const sources = await discoverBackupSources();
+    state.backupSources = sources;
+    if (!state.backupSourceId || !sources.some((source) => source.id === state.backupSourceId)) {
+      state.backupSourceId = sources[0]?.id ?? null;
+    }
+    if (!state.backupTargetId || !state.libraries.some((library) => library.id === state.backupTargetId)) {
+      state.backupTargetId = state.library?.id ?? state.libraries[0]?.id ?? null;
+    }
+  } catch (error) {
+    state.error = toUserMessage(error, "刷新相机盘失败");
+  } finally {
+    state.backupLoading = false;
+    patchBackupUi();
+  }
+}
+
 export async function createBackupPreview(): Promise<void> {
   const sourceSelect = app.querySelector<HTMLSelectElement>("#backup-source");
   const targetSelect = app.querySelector<HTMLSelectElement>("#backup-target");
@@ -229,8 +291,10 @@ export async function createBackupPreview(): Promise<void> {
       mergeSegments: state.backupMergeSegments,
       deepVerify: state.backupDeepVerify,
     });
+    state.backupStep = "confirm";
   } catch (error) {
     state.error = toUserMessage(error, "生成备份预览失败");
+    state.backupStep = state.backupPreview ? "confirm" : "select";
   } finally {
     state.backupLoading = false;
     patchBackupUi();
@@ -279,6 +343,7 @@ export async function startConfirmedBackup(): Promise<void> {
   state.backupLastRunId = preview.backupRunId;
   state.backupProgress = null;
   state.backupFailedItems = [];
+  state.backupStep = "running";
   patchBackupUi();
   try {
     const start = await startBackup(preview.backupRunId, preview.id);
@@ -286,6 +351,8 @@ export async function startConfirmedBackup(): Promise<void> {
     state.backupLastRunId = start.backupRunId;
   } catch (error) {
     state.error = toUserMessage(error, "无法开始备份");
+    // 任务没起来：退回确认步，别把界面停在「正在备份」。
+    state.backupStep = "confirm";
   } finally {
     state.backupLoading = false;
     patchBackupUi();
@@ -314,6 +381,7 @@ export async function retryCurrentBackup(): Promise<void> {
     state.backupLastRunId = start.backupRunId;
     state.backupProgress = null;
     state.backupFailedItems = [];
+    state.backupStep = "running";
   } catch (error) {
     state.error = toUserMessage(error, "重试备份失败");
   } finally {
@@ -430,48 +498,80 @@ export async function cancelCurrentScan(): Promise<void> {
   }
 }
 
+/**
+ * 分段整理的界面现在挂在导入抽屉的「整理分段」标签页（设置里只留入口）。
+ * 刷新目标跟着当时可见的容器走：抽屉开着就只 patch merge 体，否则退回设置面板。
+ */
+function refreshMergeView(): void {
+  if (state.backupOpen && state.importTab === "merge") patchImportMergeView();
+  else updateSettingsPanel({ animate: false });
+}
+
+/** 勾选 / 筛选后的局部刷新：整块重建会丢筛选框焦点与列表滚动。 */
 export function refreshMergeSelectionView(): void {
-  const content = app.querySelector<HTMLElement>("#settings-content");
-  const contentScroll = content?.scrollTop ?? 0;
-  const list = app.querySelector<HTMLElement>("#library-merge-list");
-  const listScroll = list?.scrollTop ?? 0;
-  const filter = app.querySelector<HTMLInputElement>("#library-merge-filter");
-  const filterFocused = document.activeElement === filter;
-  const cursor = filter?.selectionStart ?? null;
-  updateSettingsPanel({ animate: false });
-  const nextContent = app.querySelector<HTMLElement>("#settings-content");
-  if (nextContent) nextContent.scrollTop = contentScroll;
-  const nextList = app.querySelector<HTMLElement>("#library-merge-list");
-  if (nextList) nextList.scrollTop = listScroll;
-  const nextFilter = app.querySelector<HTMLInputElement>("#library-merge-filter");
-  if (filterFocused && nextFilter) {
-    nextFilter.focus();
-    if (cursor !== null) nextFilter.setSelectionRange(cursor, cursor);
+  patchImportMergeView();
+}
+
+/** 「全选当前 / 清除当前」：只作用于筛选命中项（无筛选即全部）。 */
+export function setMergeSelectionVisible(select: boolean): void {
+  const preview = state.libraryMergePreview;
+  if (!preview) return;
+  const query = state.libraryMergeFilter.trim().toLowerCase();
+  const next = new Set(state.libraryMergeSelected);
+  for (const group of preview.groups) {
+    if (!mergeGroupMatches(group, query)) continue;
+    if (select) next.add(group.destinationRelative);
+    else next.delete(group.destinationRelative);
   }
+  state.libraryMergeSelected = next;
+  state.libraryMergeConfirm = false;
+  refreshMergeSelectionView();
+}
+
+/** 勾选 / 取消一组。 */
+export function toggleMergeGroup(destinationRelative: string, checked: boolean): void {
+  const next = new Set(state.libraryMergeSelected);
+  if (checked) next.add(destinationRelative);
+  else next.delete(destinationRelative);
+  state.libraryMergeSelected = next;
+  state.libraryMergeConfirm = false;
+  refreshMergeSelectionView();
+}
+
+/** 「开始合并」先落到确认块，再执行。 */
+export function requestLibraryMerge(): void {
+  if (!state.libraryMergePreview || state.libraryMergeSelected.size === 0) return;
+  state.libraryMergeConfirm = true;
+  refreshMergeSelectionView();
+}
+
+export function cancelLibraryMergeConfirm(): void {
+  state.libraryMergeConfirm = false;
+  refreshMergeSelectionView();
 }
 
 export async function loadLibraryMergePreview(): Promise<void> {
   if (!state.library || state.libraryMergeLoading) return;
   if (state.availability !== "available") {
-    state.settingsError = state.libraryStatusReason || "媒体库不可用";
-    updateSettingsPanel();
+    state.libraryMergeNotice = state.libraryStatusReason || "媒体库不可用";
+    refreshMergeView();
     return;
   }
   state.libraryMergeLoading = true;
   state.libraryMergeConfirm = false;
   state.libraryMergeNotice = null;
-  updateSettingsPanel();
+  refreshMergeView();
   try {
     state.libraryMergePreview = await previewLibraryMerge(state.library.id);
     state.libraryMergeSelected = new Set(state.libraryMergePreview.groups.map((group) => group.destinationRelative));
     state.libraryMergeFilter = "";
   } catch (error) {
-    state.settingsError = toUserMessage(error, "扫描分段失败");
+    state.libraryMergeNotice = toUserMessage(error, "扫描分段失败");
     state.libraryMergePreview = null;
     state.libraryMergeSelected = new Set();
   } finally {
     state.libraryMergeLoading = false;
-    updateSettingsPanel();
+    refreshMergeView();
   }
 }
 
@@ -479,13 +579,12 @@ export async function startLibraryMergeJob(): Promise<void> {
   if (!state.library || !state.libraryMergePreview || state.libraryMergeJobId) return;
   state.libraryMergeConfirm = false;
   state.libraryMergeNotice = null;
-  state.settingsError = null;
   try {
     const destinations = state.libraryMergePreview.groups
       .filter((group) => state.libraryMergeSelected.has(group.destinationRelative))
       .map((group) => group.destinationRelative);
     if (destinations.length === 0) {
-      updateSettingsPanel({ animate: false });
+      refreshMergeView();
       return;
     }
     const selectedBytes = state.libraryMergePreview.groups
@@ -509,11 +608,11 @@ export async function startLibraryMergeJob(): Promise<void> {
       errors: [],
       error: null,
     };
-    updateSettingsPanel();
+    refreshMergeView();
   } catch (error) {
     state.libraryMergeJobId = null;
-    state.settingsError = toUserMessage(error, "无法开始分段整理");
-    updateSettingsPanel();
+    state.libraryMergeNotice = toUserMessage(error, "无法开始分段整理");
+    refreshMergeView();
   }
 }
 
@@ -523,8 +622,8 @@ export async function cancelLibraryMergeJob(): Promise<void> {
   try {
     await cancelLibraryMerge(jobId);
   } catch (error) {
-    state.settingsError = toUserMessage(error, "无法取消分段整理");
-    updateSettingsPanel();
+    state.libraryMergeNotice = toUserMessage(error, "无法取消分段整理");
+    refreshMergeView();
   }
 }
 

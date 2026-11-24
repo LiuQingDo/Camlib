@@ -66,15 +66,15 @@
 
 ## 5. 验收标准
 
-- [ ] 第 1 步默认只看到 2 个下拉 + 一个「高级选项」折叠；收起时能看到当前策略摘要。
-- [ ] 展开高级选项可改 4 项，改完收起后摘要同步更新。
-- [ ] 第 2 步首屏只看到 3 个数字 + 1 行冲突结论；「查看明细」可展开全部统计与合并分组。
-- [ ] 步骤条：从确认返回选择不丢选项；取消后不停留在「3.执行」；完成后可「再导入一次」。
-- [ ] 未检测到相机盘时显示三步排查 + 刷新按钮，点击刷新能重新探测。
-- [ ] 设置里不再有「整理历史分段」的完整工具，只有一句指向 + 跳转按钮。
-- [ ] 导入抽屉「整理分段」tab 内：生成预览、勾选、合并、回收原分段、进度、取消全部可用。
-- [ ] 抽屉在两个 tab 间切换，已选源/目标/预览不丢失。
-- [ ] `pnpm test` / `pnpm lint` / `pnpm build` 全绿（涉及 ffmpeg 的手动路径需实测一次）。
+- [x] 第 1 步默认只看到 2 个下拉 + 一个「高级选项」折叠；收起时能看到当前策略摘要。
+- [x] 展开高级选项可改 4 项，改完收起后摘要同步更新。
+- [x] 第 2 步首屏只看到 3 个数字 + 1 行冲突结论；「查看明细」可展开全部统计与合并分组。
+- [x] 步骤条：从确认返回选择不丢选项；取消后不停留在「3.执行」；完成后可「再导入一次」。
+- [x] 未检测到相机盘时显示三步排查 + 刷新按钮，点击刷新能重新探测。
+- [x] 设置里不再有「整理历史分段」的完整工具，只有一句指向 + 跳转按钮。
+- [x] 导入抽屉「整理分段」tab 内：生成预览、勾选、合并、回收原分段、进度、取消全部可用。
+- [x] 抽屉在两个 tab 间切换，已选源/目标/预览不丢失。
+- [x] `pnpm test` / `pnpm lint` / `pnpm build` 全绿（涉及 ffmpeg 的手动路径需实测一次）。
 
 ---
 
@@ -132,3 +132,43 @@ Tauri 2 + Vite + 原生 TypeScript（strict，禁止 any）+ Rust + SQLite，Win
 | 分段整理迁移漏路径              | 合并按钮无响应 / 进度不动  | 迁移后按 6 条路径逐条实测；绑定用 `app.querySelector`，不依赖设置容器             |
 | 步骤状态机与现有 patch 逻辑冲突 | 抽屉重开后回到错误步骤     | `backupStep` 与 `backupProgress.state` 单向同步，只在开始/取消/完成三处写         |
 | 回滚                            | 中                         | 拆两个 commit：① 表单降噪 + 状态机；② 分段整理迁移                                |
+
+---
+
+## 8. 实现备注（本次落地）
+
+**结构**
+
+- `views/backup.ts` 拆成 8 个渲染片：`renderBackupPanel`（外壳 + tab）、`renderStepsBar`、`renderSourceStep`、
+  `renderSourceEmptyState`、`renderAdvancedOptions`、`renderPreviewBlock`、`renderProgressBlock`、
+  `renderHistoryBlock`、`renderImportFooter`、`renderMergeSegmentsBody`。
+- 迁移的 DOM 块原样保留 id：`#library-merge-preview / -start / -filter / -list / -select-visible /
+  -clear-visible / -recycle / -confirm-cancel / -confirm-start / -cancel`，类名仍用 `.merge-pick*` /
+  `.settings-stat-grid` / `.settings-confirm`；只换容器（`#import-merge-body`）。
+- 局部刷新 `patchImportMergeView()`：只换 `#import-merge-body` 的 innerHTML，手动保存抽屉滚动、分组列表滚动、
+  筛选框焦点与光标——勾选/筛选是高频操作，整块重建抽屉会丢焦点。
+
+**状态机**
+
+- `state.backupStep`（`select|confirm|running|done|failed`）只在五处写：`openBackupPanel`（重开时按
+  `backupRunning()`/终态恢复）、`createBackupPreview`（成功→confirm）、`startConfirmedBackup`/`retryCurrentBackup`
+  （→running）、`onBackupProgress`（running / done / failed）。
+- **取消回到 `select`，不是 `confirm`**：`backup_start` 后端要求 run 仍处于 `Preview` 态，一次运行会消耗预览，
+  留在确认步只会给出一个必然失败的「开始备份」。因此终态时一并清 `backupPreview`，取消后回到第 1 步。
+  取消的结果卡（已复制数量 + 「继续未完成文件」）仍留在第 1 步下方，重试入口没有被藏起来。
+- 「上一步」只在 `confirm` 出现（`select` 没有上一屏，`done/failed` 的出口是「再导入一次」），运行中隐藏。
+- 折叠态记在 `state.backupAdvancedOpen` / `backupDetailOpen`：改一个高级选项会重建抽屉，不记就会弹回。
+  两者都进了 `backupOverlaySignature()`（连同 `backupStep`、`importTab`）。
+
+**埋点坑（已处理）**
+
+- 任一影响预览的选项变化（源盘/目标/冲突策略/合并分段/忽略扩展名）都会 `invalidateBackupPreview()`：
+  旧摘要作废并退回选择步，否则摘要会写着「按 A 策略」而实际按 B 执行。
+- 分段整理的错误提示从 `state.settingsError` 改落 `state.libraryMergeNotice`——设置页已无这套 UI，
+  继续写 settingsError 等于静默失败。命令与 `libraryMerge*` 状态一律未改。
+
+**未做**
+
+- 「首次打开抽屉时 summary 有一次高亮脉冲」（§7 风险缓解项），本轮未实现。
+- 真实相机盘的端到端实测（含 ffmpeg 合并）需在 Tauri 环境接硬件执行；本轮以渲染层单测
+  （`src/views/backup.test.ts`，8 项）+ 逐条路径调用链核对代替，6 条分段整理路径的控件与事件绑定均已核对。

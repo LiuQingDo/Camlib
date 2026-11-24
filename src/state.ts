@@ -51,6 +51,18 @@ export type SortMode = UiSortMode;
 
 export type Density = 1 | 2 | 3 | 4 | 5;
 
+/**
+ * 导入流程的显式步骤。
+ *
+ * 原来步骤条由「有没有 preview / progress 是什么状态」反推，于是取消一次备份后
+ * progress 仍是终态、步骤条就永远停在「3. 执行」。现在每一步都由动作显式推进，
+ * 取消回到 confirm，完成才进 done，失败进 failed。
+ */
+export type BackupStep = "select" | "confirm" | "running" | "done" | "failed";
+
+/** 导入抽屉的两个标签页：相机导入 / 分段整理。 */
+export type ImportTab = "import" | "merge";
+
 /** One requested cut range of the video editor; the active one drives the handles. */
 export type EditorSegment = { inMs: number; outMs: number; merge: boolean };
 
@@ -132,6 +144,14 @@ export interface AppState {
   deletedTotal: number;
   deletedError: string | null;
   backupOpen: boolean;
+  /** 显式步骤状态机：select → confirm → running → done / failed。 */
+  backupStep: BackupStep;
+  /** 抽屉当前标签页。分段整理的数据都在 libraryMerge* 里，切 tab 不丢。 */
+  importTab: ImportTab;
+  /** 高级选项折叠态：改一个选项就会重建抽屉，展开状态不能跟着丢。 */
+  backupAdvancedOpen: boolean;
+  /** 第 2 步「查看明细」折叠态，同上。 */
+  backupDetailOpen: boolean;
   backupSources: BackupVolumeDto[];
   backupPreview: BackupPreviewDto | null;
   backupLoading: boolean;
@@ -327,6 +347,10 @@ export const state: AppState = {
   deletedTotal: 0,
   deletedError: null,
   backupOpen: false,
+  backupStep: "select",
+  importTab: "import",
+  backupAdvancedOpen: false,
+  backupDetailOpen: false,
   backupSources: [],
   backupPreview: null,
   backupLoading: false,

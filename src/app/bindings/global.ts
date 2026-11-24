@@ -25,6 +25,7 @@ import {
 import { invalidateGridGeometry, scheduleGridPaint } from "../../render/virtual";
 import { state } from "../../state";
 import { closeAiChatDrawer } from "../../views/ai-chat";
+import { patchImportMergeView } from "../../views/backup";
 import { applyDialogSizes, mergeUpdateFooter } from "../../views/dialogs";
 import { closeEditor } from "../../views/editor";
 import { editorUpdateFooter } from "../../views/editor/shared";
@@ -301,12 +302,17 @@ void onBackupProgress((progress) => {
   if (!state.backupJobId && progress.state === "running") return;
   state.backupProgress = progress;
   if (progress.state === "running") {
+    state.backupStep = "running";
     // 抽屉开着就原地改数字；抽屉关着时任务胶囊接管进度。
     patchBackupOverlay();
     patchToolbar();
     return;
   }
   state.backupJobId = null;
+  // 取消回到选择步：后端只允许从 Preview 态启动，预览已被这一次运行消耗，
+  // 留在确认步只会给出一个必然失败的「开始备份」。
+  state.backupStep = progress.state === "completed" ? "done" : progress.state === "failed" ? "failed" : "select";
+  state.backupPreview = null;
   if (progress.state === "failed") state.error = progress.error ?? "备份失败";
   if (progress.state === "completed") {
     // 结果入口不再依赖内容流：toast 常驻 8s，带「查看」直达新导入结果。
@@ -346,6 +352,8 @@ void onLibraryMergeProgress((progress) => {
   if (progress.state === "running") {
     state.libraryMergeJobId = progress.jobId;
     if (state.settingsOpen) updateSettingsPanel();
+    // 抽屉停在「整理分段」时要跟着走；没开或停在别的 tab 时这里什么都不做。
+    patchImportMergeView();
     return;
   }
   state.libraryMergeJobId = null;
@@ -371,6 +379,8 @@ void onLibraryMergeProgress((progress) => {
     render();
     void bootstrap();
   }
+  // render()/bootstrap() 不一定重建抽屉（签名未变），终态要自己补一次。
+  patchImportMergeView();
 });
 
 void onAiProgress((progress) => {
