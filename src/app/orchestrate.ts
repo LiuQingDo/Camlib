@@ -20,10 +20,14 @@ import {
   renderTagManager,
   setupDialogResizing,
 } from "../views/dialogs";
-import { renderEditor } from "../views/editor";
+import { closeEditor, renderEditor } from "../views/editor";
 import { loadModalAsset, patchPreviewFrame, renderPreview } from "../views/preview";
 import { renderSettingsPanel, updateSettingsPanel } from "../views/settings";
 import { bindOverlayEvents } from "./bindings/overlay";
+import { handlePreviewEscape } from "./bindings/preview";
+import { closeMergeModal, closeTagManager } from "./dialogs-ops";
+import { pruneDetachedTraps, trapDialogFocus } from "./focus";
+import { cancelDeleteConfirm } from "./media-ops";
 
 export type OverlayId =
   | "preview"
@@ -49,15 +53,67 @@ function cancelLeave(host: HTMLElement): void {
 }
 
 /**
+ * 弹窗容器的焦点陷阱释放函数。按容器（`[data-overlay]`）而不是按
+ * `[role="dialog"]` 记账：合并弹窗换内容时整个 dialog 会被 outerHTML 替换，
+ * 挂在 dialog 上的 keydown 监听会连节点一起消失，挂在容器上才活得下来。
+ */
+const overlayTraps = new WeakMap<HTMLElement, (restoreFocus?: boolean) => void>();
+
+/**
+ * Esc 归各弹窗自己：陷阱只把 Esc 交给最上层，不再由全局 keydown 按状态猜顺序。
+ * 没登记的两个（设置 / 导入抽屉）Esc 阶梯里还有二级确认与运行中提示，
+ * 仍然留在全局分派里——此处返回 undefined，`trapDialogFocus` 便不拦 Esc。
+ */
+function overlayEscHandler(id: OverlayId): (() => void) | undefined {
+  switch (id) {
+    case "preview":
+      return handlePreviewEscape;
+    case "confirm":
+      return cancelDeleteConfirm;
+    case "tag-manager":
+      return closeTagManager;
+    case "editor":
+      return closeEditor;
+    case "merge":
+      return closeMergeModal;
+    default:
+      return undefined;
+  }
+}
+
+/** 摘掉容器上的焦点陷阱，并（默认）把焦点还给打开前的元素。 */
+function releaseOverlayFocus(host: HTMLElement, restoreFocus = true): void {
+  const release = overlayTraps.get(host);
+  if (!release) return;
+  overlayTraps.delete(host);
+  release(restoreFocus);
+}
+
+/**
+ * 内容刚插进容器：模态弹窗（`[role="dialog"][aria-modal="true"]`）才建陷阱。
+ * AI 助手抽屉虽然也是 `role="dialog"`，但没有 `aria-modal`、没有遮罩、关着也能
+ * 继续操作网格——它是非模态面板，锁住背景反而是错的。
+ * 先摘旧陷阱再建新的——签名重建时旧记录里的 previousFocus 已经过期。
+ */
+function applyOverlayFocus(host: HTMLElement, id: OverlayId): void {
+  releaseOverlayFocus(host, false);
+  if (!host.querySelector('[role="dialog"][aria-modal="true"]')) return;
+  overlayTraps.set(host, trapDialogFocus(host, { onClose: overlayEscHandler(id) }));
+}
+
+/**
  * 退场：先给根节点挂 `.is-leaving` 播一段淡出，再清空容器。
  *
  * 原来关闭是直接把容器 `innerHTML` 清空——画面上是硬切，观感上像"闪没了"。
  * 现在多留 140ms：根节点淡出、容器 `pointer-events:none`（CSS），期间点击不会
  * 落到正在消失的按钮上；这 140ms 里若又打开了同一个弹窗，cancelLeave 撤掉定时器
  * 直接换新内容。
+ *
+ * 焦点在动画开始前就还回去：让用户等 140ms 才拿回键盘焦点是没道理的。
  */
 function leaveOverlay(host: HTMLElement, signature: string): void {
   cancelLeave(host);
+  releaseOverlayFocus(host);
   overlaySignatures.set(host, signature);
   const root = host.firstElementChild as HTMLElement | null;
   if (!root) {
@@ -91,6 +147,7 @@ export function patchOverlay(id: OverlayId, signature: string, produce: () => st
   const html = produce();
   if (!html) {
     if (!host.firstChild) {
+      releaseOverlayFocus(host);
       overlaySignatures.set(host, signature);
       return false;
     }
@@ -102,6 +159,8 @@ export function patchOverlay(id: OverlayId, signature: string, produce: () => st
   host.innerHTML = html;
   // 新插入的玻璃面板要重建位移贴图；动画正在跑的那几帧先摘掉折射带。
   beginOverlayTransition(OVERLAY_ENTER_MS);
+  // 焦点进弹窗 + 背景 inert：内容建好之后、下一次按键之前。
+  applyOverlayFocus(host, id);
   return true;
 }
 
@@ -133,6 +192,7 @@ export function patchPreviewOverlay(): { rebuilt: boolean; load: boolean } {
     // 已经关着（含退场动画还在跑的这 140ms）：别再重排一次退场定时器。
     if (overlaySignatures.get(host) === "closed") return { rebuilt: false, load: false };
     if (!host.firstChild) {
+      releaseOverlayFocus(host);
       overlaySignatures.set(host, "closed");
       return { rebuilt: false, load: false };
     }
@@ -146,6 +206,7 @@ export function patchPreviewOverlay(): { rebuilt: boolean; load: boolean } {
     overlaySignatures.set(host, "open");
     host.innerHTML = renderPreview();
     beginOverlayTransition(OVERLAY_ENTER_MS);
+    applyOverlayFocus(host, "preview");
     rebuilt = true;
   }
 
@@ -264,6 +325,9 @@ export function patchBackupOverlay(): boolean {
 }
 
 export function renderOverlays(): void {
+  // 骨架被强制重建过（换媒体库）时，旧容器连同陷阱一起脱离了文档：
+  // 不清掉的话 inert 计数会卡在 >0，整个界面被锁死。
+  pruneDetachedTraps();
   let changed = false;
   const preview = patchPreviewOverlay();
   changed = preview.rebuilt || changed;

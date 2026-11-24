@@ -64,7 +64,9 @@
   --nav-hover: rgba(255, 255, 255, 0.5);
   --nav-active: rgba(255, 255, 255, 0.78);
   --scroll-thumb: rgba(0, 0, 0, 0.22);
-  --focus-ring: rgba(0, 0, 0, 0.2);
+  /* 焦点环：实色而不是半透明——玻璃底上 rgba(0,0,0,.2) 对比不足，等于没有。
+     浅色主题用近黑，深色主题用纯白，两者在各自的底色上都是实心描边。 */
+  --focus-ring: #111111;
   --skeleton-highlight: rgba(255, 255, 255, 0.52);
   --card-preview-bg: rgba(0, 0, 0, 0.06);
   --stage-tint: rgba(0, 0, 0, 0.04);
@@ -119,7 +121,7 @@
   --nav-hover: rgba(255, 255, 255, 0.08);
   --nav-active: rgba(255, 255, 255, 0.12);
   --scroll-thumb: rgba(255, 255, 255, 0.2);
-  --focus-ring: rgba(255, 255, 255, 0.28);
+  --focus-ring: #ffffff;
   --skeleton-highlight: rgba(255, 255, 255, 0.1);
   --card-preview-bg: rgba(0, 0, 0, 0.35);
   --stage-tint: rgba(0, 0, 0, 0.35);
@@ -184,12 +186,16 @@ button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
+/* 键盘焦点环：2px 实色 + 2px 间距。玻璃面板上原来的 3px 半透明环看起来像
+   一层脏边，既不像焦点也挡不住"我到底在哪"——现在改成实心描边，浅色近黑、
+   深色纯白，两种主题下都能一眼认出来。 */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 [tabindex="0"]:focus-visible {
-  outline: 3px solid var(--focus-ring);
-  outline-offset: 3px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* Embedded window chrome — same surface as the app body (MiMo-style), not a glass strip. */
@@ -264,6 +270,13 @@ select:focus-visible,
   min-height: 0;
   gap: 14px;
   padding: 0 var(--shell-pad) var(--shell-pad);
+}
+/* 弹窗打开时背景锁定（app/focus.ts 挂 inert）。inert 本身已经同时挡住点击与
+   焦点，这里补一条 pointer-events 兜住还不支持 inert 的内核。 */
+.shell[inert] {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .sidebar {
   position: relative;
@@ -5747,7 +5760,7 @@ h1 {
   transform: translateX(16px);
 }
 .ai-switch input:focus-visible + .ai-switch-track {
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 /* 还没添加供应商时开关不可用：保持形态但不给点击暗示 */
 .ai-switch input:disabled + .ai-switch-track {

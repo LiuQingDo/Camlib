@@ -1,6 +1,7 @@
 // 由 main.ts 拆分而来：仅做搬移，未改动逻辑。
 import { DialogSize } from "../api/infrastructure";
 import { LibraryMergeGroupDto } from "../api/media";
+import { focusInside } from "../app/focus";
 import { activeFilterParts, hasAnyFilter, hasNonSearchFilter } from "../lib/filters";
 import { formatCount, formatEtaSeconds, formatSize, formatSpeed } from "../lib/format";
 import { app } from "../render/context";
@@ -340,7 +341,7 @@ export function renderDeleteConfirm(): string {
       <p class="confirm-recycle">文件不会被永久粉碎。你可以从系统回收站恢复原文件；Camlib 只从索引中标记为已删除。</p>
       <div class="confirm-summary"><div class="confirm-summary-label">将处理的文件</div><ul>${summaryLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}${more ? `<li class="confirm-more">…以及另外 ${formatCount(preview.summary.length - 8)} 个文件</li>` : ""}</ul></div>
     </div>
-    <footer class="confirm-actions"><button class="outline-button" id="cancel-delete-confirm-footer" type="button">取消</button><button class="danger-button confirm-danger" id="confirm-delete" type="button">移入回收站</button></footer>
+    <footer class="confirm-actions"><button class="outline-button" id="cancel-delete-confirm-footer" type="button" data-autofocus>取消</button><button class="danger-button confirm-danger" id="confirm-delete" type="button">移入回收站</button></footer>
   </div></div>`;
 }
 
@@ -421,9 +422,25 @@ export function renderMergeFooterInner(): string {
     </span>`;
 }
 
+/**
+ * 换节点前记住焦点元素的识别特征，换完按它找回来。
+ * 合并弹窗每次改模式 / 调顺序都会整块替换 dialog，焦点跟着旧节点一起消失；
+ * 直接退回"第一个可聚焦元素"会让焦点每次跳到右上角的关闭按钮上。
+ */
+function rememberFocusSelector(root: HTMLElement): string | undefined {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !root.contains(active)) return undefined;
+  if (active.dataset.mergeMode) return `[data-merge-mode="${active.dataset.mergeMode}"]`;
+  if (active.dataset.mergeUp !== undefined) return `[data-merge-up="${active.dataset.mergeUp}"]`;
+  if (active.dataset.mergeDown !== undefined) return `[data-merge-down="${active.dataset.mergeDown}"]`;
+  if (active.id) return `#${active.id}`;
+  return undefined;
+}
+
 export function updateMergeModal(): void {
   const dialog = app.querySelector<HTMLElement>("#merge-videos-modal .merge-modal");
   if (!dialog) return;
+  const focusSelector = rememberFocusSelector(dialog);
   dialog.outerHTML = renderMergeDialog();
   // dialog 是新的，但 backdrop 还是原来那个——清掉容器级标记让 binder 重跑。
   const backdrop = app.querySelector<HTMLElement>("#merge-videos-modal");
@@ -432,6 +449,9 @@ export function updateMergeModal(): void {
   // The replaced dialog lost its inline geometry and resize handles.
   applyDialogSizes();
   setupDialogResizing();
+  // 换掉的是整个 [role="dialog"] 节点，焦点不动就掉到 body 上了，下次按 Tab
+  // 会直接跳到标题栏的窗口按钮。按原按钮的特征放回去，实在找不到才退回第一个。
+  if (backdrop) focusInside(backdrop, focusSelector);
 }
 
 export function mergeUpdateFooter(): void {

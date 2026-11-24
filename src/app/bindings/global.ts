@@ -22,7 +22,6 @@ import { applyDialogSizes, mergeUpdateFooter } from "../../views/dialogs";
 import { closeEditor } from "../../views/editor";
 import { editorUpdateFooter } from "../../views/editor/shared";
 import {
-  closePreview,
   movePreview,
   toggleLivePreview,
   togglePreviewFullscreen,
@@ -31,19 +30,32 @@ import {
   togglePreviewMute,
   togglePreviewPlayback,
 } from "../../views/preview";
-import { previewUi } from "../../views/preview/state";
 import { updateSettingsPanel } from "../../views/settings";
 import { closeMergeModal, closeTagManager } from "../dialogs-ops";
 import { backupRunning, bootstrap, closeBackupPanel, loadBackupHistory, viewNewImports } from "../library";
-import { cancelDeleteConfirm, runConfirmedDelete } from "../media-ops";
+import { cancelDeleteConfirm } from "../media-ops";
 import { patchBackupOverlay } from "../orchestrate";
 import { showToast } from "../toast";
 import { refreshTags } from "../media-query";
 import { closeSettings, loadAiStats, loadSettingsSectionData } from "../settings-ops";
 import { handleCutCompleted, handleEditSaved, handleMergeCompleted } from "./editor";
-import { rerenderPreviewMetaPanel } from "./preview";
+import { handlePreviewEscape } from "./preview";
+
+/**
+ * 焦点在可输入元素内时，全局快捷键一律让路（Esc 除外：它仍然是"关最上层"）。
+ *
+ * 原来这个判断只写在预览分支里，于是"在 AI 助手输入框里敲 / "会跳到搜索框、
+ * 在标签名输入框里按方向键会切图。提到最前面统一拦一次。
+ */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA";
+}
 
 window.addEventListener("keydown", (event) => {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (event.key !== "Escape" && isTypingTarget(event.target)) return;
   if (state.editorOpen) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -87,11 +99,8 @@ window.addEventListener("keydown", (event) => {
       cancelDeleteConfirm();
       return;
     }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void runConfirmedDelete();
-      return;
-    }
+    // Enter 不再在这里当成"确认删除"：焦点默认在取消按钮上，Enter 交还给浏览器
+    // 去激活当前聚焦的那个按钮，跟所有普通按钮的行为一致。
   }
   if (state.backupOpen) {
     if (event.key === "Escape") {
@@ -125,29 +134,11 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
-  const target = event.target as HTMLElement | null;
-  const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable === true;
-  // The preview tag picker swallows Escape first so it closes without taking
-  // the whole preview down, even while its search input holds focus.
-  if (previewUi.tagPickerOpen && event.key === "Escape") {
-    event.preventDefault();
-    previewUi.tagPickerOpen = false;
-    previewUi.tagPickerQuery = "";
-    rerenderPreviewMetaPanel();
-    return;
-  }
-  if (typing) return;
+  // 预览的 Esc 阶梯（全屏 → 沉浸 → 标签选择器 → 关预览）只有一份实现：
+  // 焦点在弹窗里时由焦点陷阱先调它，这里兜住焦点落在弹窗外的破例情况。
   if (event.key === "Escape") {
-    // Fullscreen Escape should only leave fullscreen, not close the modal.
-    if (document.fullscreenElement) {
-      void document.exitFullscreen().catch(() => undefined);
-      return;
-    }
-    if (state.previewImmersive) {
-      togglePreviewImmersive(false);
-      return;
-    }
-    closePreview();
+    event.preventDefault();
+    handlePreviewEscape();
     return;
   }
   if (event.key === "ArrowLeft" || event.key === "ArrowUp") {

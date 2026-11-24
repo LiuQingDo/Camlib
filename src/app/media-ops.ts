@@ -307,13 +307,18 @@ export async function requestDeleteSelected(): Promise<void> {
  * 成功：一条 4s 自动收的 toast；部分失败：常驻 toast + 「查看 N 条失败」——
  * 十几行错误明细不塞进 toast，推进错误条那条可折叠、可重试的通知里。
  *
+ * 关于「撤销」：这里刻意不给。应用只把文件送进 Windows 回收站、不在索引里保留
+ * 恢复所需的信息，也没有能力把回收站里的条目还原回原路径；opener 只有 open-url /
+ * open-path（前者要 ACL scope、后者要求路径真实存在），都打不开 `shell:RecycleBinFolder`。
+ * 所以文案只说清"去哪儿找"，不给一个点了没用的按钮，更不写假的撤销。
+ *
  * 落点放在 app 层而不是 renderDeleteFeedback()：重试要调 requestDeleteSelected()，
  * 而 render/toolbar 不能反向 import app/media-ops（会成环）。
  */
 function emitDeleteResultFeedback(result: DeleteResultDto): void {
   const summary = `媒体 ${formatCount(result.mediaCount)} 项 · 成功回收 ${formatCount(result.filesRecycled)} 个文件 · 本就缺失 ${formatCount(result.filesAlreadyMissing)} · 失败 ${formatCount(result.failedFiles)}`;
   if (result.failedFiles <= 0) {
-    showToast(`已移入回收站 · ${summary}`, { kind: "success", key: "delete-result" });
+    showToast(`已移入回收站 · 可在系统回收站恢复 · ${summary}`, { kind: "success", key: "delete-result" });
     return;
   }
   showToast(`删除部分完成 · ${summary}`, {
@@ -363,7 +368,10 @@ export async function runConfirmedDelete(): Promise<void> {
     state: "running",
   };
   state.error = null;
-  patchToolbar();
+  // 确认即退场：deleteConfirm 已经被清空，这里必须真的重绘一次。只 patchToolbar
+  // 的话弹窗 DOM 会留在屏幕上——用户点完「移入回收站」看到的仍是一个弹窗，
+  // 焦点陷阱也无处释放（提示改走底部 toast 与任务胶囊）。
+  render();
   try {
     const result = await deleteMediaItems(state.library.id, confirm.ids);
     state.deleteResult = result;

@@ -7,7 +7,7 @@ import { refreshMedia } from "../../render/paint";
 import { patchToolbar } from "../../render/toolbar";
 import { state } from "../../state";
 import { aiChatUi, openAiChatDrawer } from "../../views/ai-chat";
-import { closePreview, invalidatePreviewMeta } from "../../views/preview";
+import { closePreview, invalidatePreviewMeta, togglePreviewImmersive } from "../../views/preview";
 import { renderMetaPanel } from "../../views/preview/meta";
 import { previewUi } from "../../views/preview/state";
 import { openTagManager } from "../dialogs-ops";
@@ -178,6 +178,33 @@ export async function applyPreviewTag(
     state.error = toUserMessage(error, "更新标签失败");
     patchToolbar();
   }
+}
+
+/**
+ * 预览的 Esc：唯一实现，一次只退一层。
+ *
+ * 顺序有讲究：全屏 → 沉浸 → 标签选择器 → 关预览。原来是散在全局 keydown 的
+ * 预览分支里的一段特判，现在焦点陷阱（app/focus.ts）与全局分派都调这里，
+ * 不会再出现"两处各写一遍、改一处忘一处"。
+ */
+export function handlePreviewEscape(): void {
+  if (document.fullscreenElement) {
+    // 全屏的 Esc 只退出全屏，不该顺手把弹窗也关掉。
+    void document.exitFullscreen().catch(() => undefined);
+    return;
+  }
+  if (state.previewImmersive) {
+    togglePreviewImmersive(false);
+    return;
+  }
+  // 标签选择器开着时先收它：即使焦点在它的搜索框里，Esc 也不该关掉整个预览。
+  if (previewUi.tagPickerOpen) {
+    previewUi.tagPickerOpen = false;
+    previewUi.tagPickerQuery = "";
+    rerenderPreviewMetaPanel();
+    return;
+  }
+  closePreview();
 }
 
 /** Re-render the open preview's meta panel in place from previewUi.metaCache. */
