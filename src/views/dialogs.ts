@@ -461,11 +461,32 @@ export function mergeUpdateFooter(): void {
   bindMergeFooterEvents();
 }
 
+/**
+ * 首启引导：三步走。空媒体库（连了目录但还没索引）与未配置媒体库共用同一张卡，
+ * 只把第一步的完成态与文案区分开。
+ */
+function renderFirstRunGuide(picked: boolean): string {
+  const steps = [
+    {
+      title: "选择文件夹",
+      text: picked ? "媒体库已连接，可以直接进入下一步" : "指向相机存储卡，或已经备份过的照片目录",
+    },
+    { title: "开始扫描", text: "也可以先跳过、之后再手动扫描，本机索引随时可重建" },
+    { title: "查看结果", text: "扫描完成后按新增、更新、缺失三类看差异" },
+  ];
+  return `<ol class="first-run-steps">${steps
+    .map((step, index) => {
+      const done = picked && index === 0;
+      return `<li class="first-run-step${done ? " is-done" : ""}"><span class="first-run-index" aria-hidden="true">${done ? "✓" : index + 1}</span><div><strong>${step.title}</strong><span>${step.text}</span></div></li>`;
+    })
+    .join("")}</ol>`;
+}
+
 export function renderLibraryEmpty(): string {
   if (state.loading)
     return `<div class="empty-state"><span class="empty-icon spinner large"></span><h2>正在读取媒体库</h2><p>正在从 Tauri 后端加载索引。</p></div>`;
   if (state.availability === "unconfigured")
-    return `<div class="empty-state setup-state"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会建立可搜索的索引。</p><div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div></div>`;
+    return `<div class="empty-state setup-state first-run"><span class="empty-icon">⌂</span><h2>还没有媒体库</h2><p>选择一个本地媒体目录，Camlib 会为它建立可搜索的索引。</p>${renderFirstRunGuide(false)}<div class="library-form"><button class="primary-button" id="choose-folder-button" type="button">选择文件夹…</button><details class="manual-path"><summary>手动输入路径</summary><form id="library-form"><input id="library-path" required placeholder="例如：D:\\照片" aria-label="媒体库路径" /><button class="outline-button" type="submit">连接媒体库</button></form></details></div><p class="first-run-note">索引存在 SSD，原始照片始终留在媒体盘。</p></div>`;
   if (!state.library)
     return `<div class="empty-state"><span class="empty-icon">◎</span><h2>找不到媒体库记录</h2><p>请重新连接媒体库。</p></div>`;
   if (!state.page.total) return renderNoMatchEmpty();
@@ -478,7 +499,7 @@ export function renderLibraryEmpty(): string {
  */
 function renderNoMatchEmpty(): string {
   if (!hasAnyFilter(state))
-    return `<div class="empty-state"><span class="empty-icon">◎</span><h2>媒体库还是空的</h2><p>点击右上角“扫描媒体库”开始建立索引。</p></div>`;
+    return `<div class="empty-state first-run"><span class="empty-icon">◎</span><h2>媒体库还是空的</h2><p>索引里还没有媒体。点右上角「扫描媒体库」建立索引，或先用侧栏「导入照片」拷一批进来。</p>${renderFirstRunGuide(true)}<p class="first-run-note">索引存在 SSD，原始照片始终留在媒体盘。</p></div>`;
   const conditions = activeFilterParts(state);
   const searching = Boolean(state.search || state.semanticSearch);
   const lead = searching

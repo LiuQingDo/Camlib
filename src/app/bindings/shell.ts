@@ -16,6 +16,7 @@ import {
 import { onGridScroll } from "../../render/virtual";
 import { state } from "../../state";
 import { dismissNotice, runNoticeAction } from "../notices";
+import { openTagManager } from "../dialogs-ops";
 import { patchBackupOverlay, patchErrorBar, patchTaskPill } from "../orchestrate";
 import { cancelTask } from "../tasks";
 import { showToast } from "../toast";
@@ -36,7 +37,6 @@ import {
   scanLibrary,
   startConfirmedBackup,
   viewNewImports,
-  viewRecentImports,
 } from "../library";
 import { toggleTheme } from "../settings-ops";
 import { clearAllFilters, clearFiltersKeepSearch, commitSemanticSearch, exitSemanticSearch } from "./toolbar";
@@ -209,8 +209,6 @@ export function bindShellEvents(): void {
   bind(app.querySelector("#search-mode"), "click", () => setSearchMode(searchUi.mode === "ai" ? "text" : "ai"));
   bind(app.querySelector("#search-button"), "click", () => commitSearch(true));
   bind(app.querySelector("#scan-top-button"), "click", () => void scanLibrary());
-  // 侧栏「导入照片…」是骨架里的静态节点：在这里绑一次，不依赖 patchSidebar。
-  bindAll('[data-nav="import"]', "click", () => void openBackupPanel());
   // 骨架重建后 .content 是新节点，滚动监听要跟着新节点重挂。
   bind(app.querySelector(".content"), "scroll", onGridScroll);
   bindBackupDrawerEvents();
@@ -321,40 +319,113 @@ function toggleBackupRun(runId: string | undefined): void {
   }
 }
 
-/** 侧栏：媒体库块 / 日期树 / AI 块 / 页脚。 */
-export function bindSidebarEvents(): void {
-  bind(app.querySelector("#theme-toggle"), "click", () => void toggleTheme());
-  bindAll("#settings-button, #settings-button-top", "click", () => void openSettings());
-  bindAll('[data-nav="recent-imports"]', "click", () => void viewRecentImports());
-  bindAll("[data-prefix]", "click", (event) => {
-    const prefix = (event.currentTarget as HTMLElement).dataset.prefix || undefined;
-    state.datePrefix = prefix;
-    // 日期前缀与区间是唯一合法互斥的一对：标题只能呈现一种日期条件，
-    // 两者并存会让 primaryDateLabel() 二选一、标题失去确定性。
-    // 其他筛选（类型 / 收藏 / 连拍 / 标签…）都按 AND 叠加，不要在这里顺手清。
+/** 「最近导入」的时间窗：最近 7 天首次被索引的媒体。 */
+const RECENT_IMPORT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 导航项本质是预设筛选：切换时先把其它条件清干净。
+ * 与筛选 chip 的叠加语义不冲突——chip 只在自己那条条件上叠加，导航负责整体复位，
+ * 否则「收藏」会带着上一条日期条件一起生效，看着像是收藏里少了东西。
+ */
+function resetNavFilters(): void {
+  state.kind = undefined;
+  state.favoriteOnly = false;
+  state.burstOnly = false;
+  state.datePrefix = undefined;
+  state.dateFrom = undefined;
+  state.dateTo = undefined;
+  state.firstSeenFrom = null;
+  state.tagIds.clear();
+  state.ratingEq = null;
+  state.ratingMin = null;
+  state.semanticSearch = null;
+  searchUi.semantic = "";
+  state.semanticMeta = null;
+  state.semanticMode = null;
+  state.search = "";
+  searchUi.draft = "";
+}
+
+function applyRecentImportsPreset(): void {
+  resetNavFilters();
+  // 与备份完成后的「新导入」同一种表达，只是窗口固定为 7 天。
+  state.firstSeenFrom = `unix-ms:${Date.now() - RECENT_IMPORT_WINDOW_MS}`;
+  resetSidebarExpansionForSelection();
+  void refreshMedia({ resetScroll: true });
+}
+
+function applyFavoritesPreset(): void {
+  resetNavFilters();
+  state.favoriteOnly = true;
+  resetSidebarExpansionForSelection();
+  void refreshMedia({ resetScroll: true });
+}
+
+/** 侧栏一级导航统一分派（[data-nav]）。 */
+function handleSidebarNav(nav: string | undefined): void {
+  // 没有媒体库时预设筛选无处可落（库卡本身就是首启 CTA），只放行「导入照片」。
+  if (!state.library && nav !== "import") return;
+  switch (nav) {
+    case "all":
+      clearAllFilters();
+      return;
+    case "recent":
+      applyRecentImportsPreset();
+      return;
+    case "favorites":
+      applyFavoritesPreset();
+      return;
+    case "tags":
+      openTagManager();
+      return;
+    case "import":
+      void openBackupPanel();
+      return;
+    default:
+      // "deleted" 留给后续半场：按钮已 disabled，这里只兜住意外触发。
+      return;
+  }
+}
+
+/**
+ * 日期行整行可点：未选中 → 选中并展开；已选中 → 只切换展开。
+ * 月份是叶子节点（第三级已去掉），再点一次同一行即取消日期条件。
+ */
+function handleDateRow(row: HTMLElement): void {
+  const prefix = row.dataset.dateRow;
+  if (!prefix) return;
+  const isYear = row.dataset.dateLevel === "year";
+  if (state.datePrefix === prefix) {
+    if (isYear) {
+      if (state.expandedYears.has(prefix)) state.expandedYears.delete(prefix);
+      else state.expandedYears.add(prefix);
+      patchSidebar();
+      return;
+    }
+    state.datePrefix = undefined;
     state.dateFrom = undefined;
     state.dateTo = undefined;
-    if (prefix) {
-      state.expandedYears.add(prefix.slice(0, 4));
-      if (prefix.length >= 7) state.expandedMonths.add(prefix.slice(0, 7));
-    } else {
-      resetSidebarExpansionForSelection();
-    }
+    resetSidebarExpansionForSelection();
     patchSidebar();
-    void refreshMedia();
-  });
-  bindAll("[data-year-toggle]", "click", (event) => {
-    const year = (event.currentTarget as HTMLElement).dataset.yearToggle!;
-    if (state.expandedYears.has(year)) state.expandedYears.delete(year);
-    else state.expandedYears.add(year);
-    patchSidebar();
-  });
-  bindAll("[data-month-toggle]", "click", (event) => {
-    const month = (event.currentTarget as HTMLElement).dataset.monthToggle!;
-    if (state.expandedMonths.has(month)) state.expandedMonths.delete(month);
-    else state.expandedMonths.add(month);
-    patchSidebar();
-  });
+    void refreshMedia({ resetScroll: true });
+    return;
+  }
+  state.datePrefix = prefix;
+  // 日期前缀与区间是唯一合法互斥的一对：标题只能呈现一种日期条件。
+  // 其他筛选（类型 / 收藏 / 连拍 / 标签…）按 AND 叠加，不在这里顺手清。
+  state.dateFrom = undefined;
+  state.dateTo = undefined;
+  state.expandedYears.add(prefix.slice(0, 4));
+  patchSidebar();
+  void refreshMedia({ resetScroll: true });
+}
+
+/** 侧栏：导航 / 媒体库块 / 日期树 / AI 块 / 页脚。 */
+export function bindSidebarEvents(): void {
+  bind(app.querySelector("#theme-toggle"), "click", () => void toggleTheme());
+  bind(app.querySelector("#settings-button-top"), "click", () => void openSettings());
+  bindAll("[data-nav]", "click", (event) => handleSidebarNav((event.currentTarget as HTMLElement).dataset.nav));
+  bindAll("[data-date-row]", "click", (event) => handleDateRow(event.currentTarget as HTMLElement));
   bind(app.querySelector("#scan-button"), "click", () => void scanLibrary());
   bind(app.querySelector("#refresh-button"), "click", () => void bootstrap());
   bind(app.querySelector("#change-library-button"), "click", () => {
@@ -384,16 +455,10 @@ export function bindSidebarEvents(): void {
       }
     })();
   });
-  bind(app.querySelector("#ai-open-settings"), "click", () => void openSettings("ai"));
-  bind(app.querySelector("#ai-open-batch"), "click", () => void openSettings("ai"));
   bind(app.querySelector("#ai-chat-open"), "click", () => void openAiChatDrawer());
   bind(app.querySelector("#ai-single-cancel"), "click", () => {
     // The sequential loop checks this flag before each photo.
     state.aiSingleBusy = false;
-  });
-  bind(app.querySelector("#ai-semantic-focus"), "click", () => {
-    // 侧栏入口与搜索框的 ✦ 是同一个开关：切到 AI 模式并把光标放进搜索框。
-    setSearchMode("ai");
   });
 }
 

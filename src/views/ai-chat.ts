@@ -21,29 +21,25 @@ export let aiChatWidth = 400;
 // 预览弹窗“问 AI 助手”时钉住的照片上下文：抽屉层级低于预览，需先关预览，
 // 再把这张照片作为固定上下文带入抽屉（mediaId 仍可用于取缩略图）。
 /**
- * Sidebar AI section: run counters plus quick entries for semantic search,
- * batch processing and the settings. Only rendered once a library exists.
+ * Sidebar AI section: 只有一行「AI 助手」入口 + 未处理计数。
+ * AI 搜索、批量处理、AI 设置在抽屉与设置页里，侧栏不再开三个并列入口。
  */
 export function renderAiSidebarSection(): string {
   if (!state.library) return "";
   const stats = state.aiStats;
-  const busy = state.aiSingleBusy;
+  const pending = stats?.pending ?? 0;
+  const count =
+    pending > 0
+      ? `<span class="sidebar-nav-count" title="待处理 ${formatCount(pending)} 张">${formatCount(pending)}</span>`
+      : "";
   const progressPercent =
     state.aiSingleTotal > 0 ? Math.min(100, Math.round((state.aiSingleDone / state.aiSingleTotal) * 100)) : 0;
-  const statsRow = stats
-    ? `<dl class="ai-sidebar-stats"><div><dt>已处理</dt><dd>${formatCount(stats.processed)}</dd></div><div><dt>待处理</dt><dd>${formatCount(stats.pending)}</dd></div><div class="${stats.failed > 0 ? "has-failed" : ""}"><dt>失败</dt><dd>${formatCount(stats.failed)}</dd></div></dl>`
-    : `<div class="ai-sidebar-hint">加载统计…</div>`;
-  return `<div class="sidebar-section ai-section" aria-label="AI 增强"><div class="section-label"><span>AI 增强</span><span class="section-actions"><button class="icon-button" id="ai-open-settings" title="AI 设置" aria-label="AI 设置">⚙</button></span></div>
-    ${statsRow}
-    ${
-      busy
-        ? `<div class="ai-single-progress" id="ai-single-progress"><div class="ai-single-copy"><span class="spinner"></span><span data-ai-single-count>${state.aiSingleDone} / ${state.aiSingleTotal}</span><button class="text-button" id="ai-single-cancel" type="button">取消</button></div><div class="progress-track"><span data-ai-single-track style="width:${progressPercent}%"></span></div><div class="ai-single-current" data-ai-single-current>${escapeHtml(state.aiSingleCurrent ?? "")}</div></div>`
-        : state.aiSingleNotice
-          ? `<div class="ai-single-notice">${escapeHtml(state.aiSingleNotice)}</div>`
-          : ""
-    }
-    <div class="ai-sidebar-actions"><button class="text-button" id="ai-chat-open" type="button">✬ AI 助手</button><button class="text-button" id="ai-semantic-focus" type="button">✦ AI 搜索</button><button class="text-button" id="ai-open-batch" type="button">批量处理${stats && stats.pending > 0 ? `（${formatCount(stats.pending)}）` : ""}</button></div>
-  </div>`;
+  const feedback = state.aiSingleBusy
+    ? `<div class="ai-single-progress" id="ai-single-progress"><div class="ai-single-copy"><span class="spinner"></span><span data-ai-single-count>${state.aiSingleDone} / ${state.aiSingleTotal}</span><button class="text-button" id="ai-single-cancel" type="button">取消</button></div><div class="progress-track"><span data-ai-single-track style="width:${progressPercent}%"></span></div><div class="ai-single-current" data-ai-single-current>${escapeHtml(state.aiSingleCurrent ?? "")}</div></div>`
+    : state.aiSingleNotice
+      ? `<div class="ai-single-notice">${escapeHtml(state.aiSingleNotice)}</div>`
+      : "";
+  return `<div class="sidebar-section ai-section" aria-label="AI 助手"><button class="sidebar-nav-item" type="button" id="ai-chat-open" aria-haspopup="dialog"><span class="sidebar-nav-icon" aria-hidden="true">✬</span><span>AI 助手</span>${count}</button>${feedback}</div>`;
 }
 
 // ── AI 助手（聊天抽屉） ─────────────────────────────────────────────────────

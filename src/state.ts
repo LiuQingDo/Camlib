@@ -94,8 +94,6 @@ export interface AppState {
   tagDeleteConfirmId: string | null;
   /** Years whose month list is visible in the sidebar. */
   expandedYears: Set<string>;
-  /** Months whose day list is visible in the sidebar. */
-  expandedMonths: Set<string>;
   sort: SortMode;
   density: Density;
   /** Default preview surface: framed modal or immersive pure media. */
@@ -290,7 +288,6 @@ export const state: AppState = {
   tagsManagerError: null,
   tagDeleteConfirmId: null,
   expandedYears: new Set(),
-  expandedMonths: new Set(),
   sort: "newest",
   density: 3,
   previewMode: "standard",

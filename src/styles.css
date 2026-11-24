@@ -359,6 +359,7 @@ textarea:focus-visible,
 }
 .library-section {
   flex: 0 0 auto;
+  margin-bottom: 10px;
 }
 .section-label {
   display: flex;
@@ -422,6 +423,26 @@ textarea:focus-visible,
 .library-entry.is-empty {
   border-style: dashed;
   background: rgba(255, 255, 255, 0.28);
+}
+/* 未配置时整张库卡就是按钮：点击与空态主按钮同一个出口（选择文件夹）。 */
+button.library-entry {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.library-entry:hover {
+  border-color: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.85),
+    0 6px 16px rgba(0, 0, 0, 0.05);
+}
+.library-entry-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
 }
 .drive-icon {
   display: grid;
@@ -490,107 +511,94 @@ textarea:focus-visible,
   background: rgba(0, 0, 0, 0.4);
   background-clip: padding-box;
 }
-.date-link,
-.day-link {
+/* 日期树：年 / 月两级，每行一个整行按钮；▸/▾ 只是行内的状态图标。 */
+.date-row {
   display: flex;
   width: 100%;
+  min-height: 32px;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  padding: 0 8px;
   border: 0;
   border-radius: 9px;
   color: #555555;
   background: transparent;
   font-size: 12px;
   text-align: left;
-}
-.date-link {
-  min-height: 32px;
-  padding: 0 8px;
   transition:
     color 0.18s ease,
     background 0.18s ease;
 }
-.date-link span:last-child,
-.day-link span:last-child {
+/* 选择器带 .date-tree：月份行的浅底（.month-row:not(.is-selected)）写在后面，
+   不带这一层就会被它盖掉，悬停看起来像没反应。 */
+.date-tree .date-row:hover {
+  color: #111111;
+  background: var(--nav-hover);
+}
+.date-row.is-selected {
+  color: #111111;
+  background: var(--nav-active);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.86);
+}
+.date-row-caret {
+  width: 12px;
+  flex: 0 0 12px;
+  color: #9a9a9a;
+  font-size: 9px;
+  line-height: 1;
+  text-align: center;
+}
+.date-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.date-row-count {
+  margin-left: auto;
+  padding-left: 6px;
   color: #9a9a9a;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
-.date-link:hover,
-.day-link:hover {
-  color: #111111;
-  background: rgba(255, 255, 255, 0.5);
-}
-.date-link.is-selected,
-.day-link.is-selected {
-  color: #111111;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.86);
-}
-.date-link.is-selected span:last-child,
-.day-link.is-selected span:last-child {
+.date-row.is-selected .date-row-count {
   color: #666666;
-}
-.all-link {
-  margin-bottom: 7px;
-  color: #333333;
-  font-weight: 750;
 }
 .year-group {
   margin-top: 4px;
 }
-.year-link {
+.year-row {
   color: #222222;
   font-weight: 720;
 }
 .month-list {
   margin-left: 13px;
-  padding: 1px 0 0 13px;
+  padding: 1px 0 4px 13px;
   border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
-.month-group {
-  margin-bottom: 7px;
-}
-.month-group + .month-group {
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-}
-.month-link {
+.month-row {
   min-height: 30px;
   color: #444444;
   font-weight: 650;
 }
-.month-link:not(.is-selected) {
+.month-row:not(.is-selected) {
   background: rgba(255, 255, 255, 0.18);
-}
-.day-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px 3px;
-  margin-left: 5px;
-  padding: 0 0 4px 7px;
-  border-left: 1px solid rgba(0, 0, 0, 0.06);
-}
-.day-link {
-  min-height: 25px;
-  padding: 0 6px;
-  font-size: 11px;
-  transition:
-    color 0.18s ease,
-    background 0.18s ease;
 }
 .nav-empty {
   padding: 9px 10px;
   color: #8a8a8a;
   font-size: 12px;
 }
-/* 侧栏一级入口：导入照片 / 最近导入。与日期树同列，不参与滚动。 */
-.import-section {
-  margin-bottom: 12px;
+/* 侧栏一级导航：库卡在上，六项预设筛选紧随其后。与日期树同列，不参与滚动。 */
+.sidebar-nav-section {
+  flex: 0 0 auto;
+  margin-bottom: 14px;
 }
-.recent-section {
-  margin-bottom: 10px;
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 3px;
 }
 .sidebar-nav-item {
   display: flex;
@@ -628,6 +636,32 @@ textarea:focus-visible,
   font-size: 13px;
   line-height: 1;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.9);
+}
+/* 当前导航项：与日期树的选中态同一套玻璃高亮，不另造第 N 种「激活」。 */
+.sidebar-nav-item[aria-current="page"] {
+  border-color: rgba(255, 255, 255, 0.95);
+  color: #111111;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.9),
+    0 4px 12px rgba(0, 0, 0, 0.05);
+}
+.sidebar-nav-item:disabled:hover {
+  border-color: rgba(255, 255, 255, 0.7);
+  color: inherit;
+  background: rgba(255, 255, 255, 0.4);
+}
+/* 即将支持的项：按钮禁用但保留可见，鼠标停在整行上给出原因。 */
+.sidebar-nav-disabled {
+  display: block;
+}
+.sidebar-nav-count {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 /* 底部状态栏：状态独占一行、控件独占一行。272px 窄侧栏放不进单行，
    挤在一起时「索引已连接」会被压成两行，基线全乱。 */
@@ -2598,6 +2632,66 @@ h1 {
   border-color: rgba(0, 0, 0, 0.2);
   box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.06);
 }
+/* 首启引导：三步清单 + 一句「索引只存在 SSD」的落盘说明。
+   与空态其它块同一套玻璃与字阶，不另起一套视觉语言。 */
+.first-run-steps {
+  display: flex;
+  width: min(430px, 100%);
+  flex-direction: column;
+  gap: 9px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+.first-run-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.72);
+}
+.first-run-step div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.first-run-step strong {
+  color: #222222;
+  font-size: 12px;
+  line-height: 16px;
+}
+.first-run-step div span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+.first-run-index {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border-radius: 8px;
+  color: #333333;
+  background: rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  font-weight: 700;
+}
+.first-run-step.is-done .first-run-index {
+  color: #1f6b3a;
+  background: rgba(31, 107, 58, 0.12);
+}
+.empty-state p.first-run-note {
+  margin-top: 14px;
+  color: var(--faint);
+  font-size: 11px;
+}
 .primary-button {
   height: 42px;
   padding: 0 16px;
@@ -3295,31 +3389,8 @@ h1 {
   width: 100%;
 }
 
-.year-row,
-.month-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.tree-toggle {
-  min-width: 22px;
-  min-height: 22px;
-  flex: 0 0 22px;
-  border-radius: 7px;
-  color: #888888;
-  font-size: 10px;
-}
-.tree-toggle:hover {
-  color: #111111;
-}
-.year-row .year-link,
-.month-row .month-link {
-  flex: 1;
-  min-width: 0;
-}
-.year-group:not(.is-expanded) .month-list {
-  display: none;
-}
+/* 日期行已改为整行一个 .date-row 按钮（见上方日期树样式段），
+   这里不再保留 .tree-toggle 与 year-link / month-link 的旧规则。 */
 
 /* folder chip styles live with the shared .card-action cluster above */
 .burst-badge {
@@ -4957,16 +5028,21 @@ h1 {
   background: var(--chip-hover);
   box-shadow: 0 5px 12px rgba(0, 0, 0, 0.25);
 }
-[data-theme="dark"] .date-link:hover,
-[data-theme="dark"] .day-link:hover {
+[data-theme="dark"] .month-row:not(.is-selected) {
+  background: rgba(255, 255, 255, 0.04);
+}
+[data-theme="dark"] .date-tree .date-row:hover {
   color: var(--ink);
   background: var(--nav-hover);
 }
-[data-theme="dark"] .date-link.is-selected,
-[data-theme="dark"] .day-link.is-selected {
+[data-theme="dark"] .date-row.is-selected {
   color: var(--ink);
   background: var(--nav-active);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
+[data-theme="dark"] .date-row-caret,
+[data-theme="dark"] .date-row-count {
+  color: var(--faint);
 }
 [data-theme="dark"] .sidebar-footer {
   border-top-color: var(--border-hairline);
@@ -4980,6 +5056,12 @@ h1 {
 [data-theme="dark"] .sidebar-nav-item:hover {
   border-color: rgba(255, 255, 255, 0.3);
   background: var(--surface-strong);
+}
+[data-theme="dark"] .sidebar-nav-item[aria-current="page"] {
+  border-color: rgba(255, 255, 255, 0.24);
+  color: var(--ink);
+  background: var(--nav-active);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
 }
 [data-theme="dark"] .sidebar-nav-icon {
   background: rgba(255, 255, 255, 0.08);
@@ -5222,12 +5304,6 @@ h1 {
 [data-theme="dark"] .filter-panel-foot {
   border-top-color: var(--border-hairline);
 }
-[data-theme="dark"] .tree-toggle {
-  color: var(--faint);
-}
-[data-theme="dark"] .tree-toggle:hover {
-  color: var(--ink);
-}
 
 [data-theme="dark"] h1,
 [data-theme="dark"] .eyebrow,
@@ -5452,6 +5528,23 @@ h1 {
   color: var(--ink);
   background: var(--control-bg);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+[data-theme="dark"] .first-run-step {
+  border-color: var(--glass-border);
+  background: var(--surface-soft);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
+[data-theme="dark"] .first-run-step strong {
+  color: var(--ink);
+}
+[data-theme="dark"] .first-run-index {
+  color: var(--ink);
+  background: var(--inset-strong);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
+[data-theme="dark"] .first-run-step.is-done .first-run-index {
+  color: var(--success);
+  background: rgba(125, 206, 160, 0.14);
 }
 [data-theme="dark"] .library-form input:focus {
   border-color: rgba(255, 255, 255, 0.3);
@@ -5727,101 +5820,9 @@ h1 {
 }
 
 /* ── 侧边栏 AI 区块 ─────────────────────────────────────────────────────── */
+/* 只剩一行入口（复用 .sidebar-nav-item），进度与结果提示挂在它下面。 */
 .ai-section {
   flex: 0 0 auto;
-}
-/* 区块内所有纵向间距统一 6px：标题→统计卡→操作行，别让某一段更松或更挤。 */
-.ai-section .section-label {
-  padding-bottom: 6px;
-}
-.ai-sidebar-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  margin: 0 0 6px;
-}
-/* 容器一律不用描边：靠白底 + 柔和投影分层，边缘不会在近白侧栏上切出一道灰线。 */
-.ai-sidebar-stats > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 5px 12px rgba(0, 0, 0, 0.05);
-}
-.ai-sidebar-stats dt {
-  color: #8a8a8a;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-.ai-sidebar-stats dd {
-  margin: 0;
-  color: #111111;
-  font-size: 14px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-.ai-sidebar-stats > div.has-failed dd {
-  color: #8a2a2a;
-}
-.ai-sidebar-hint {
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border-radius: 12px;
-  color: #8a8a8a;
-  font-size: 11px;
-  background: rgba(255, 255, 255, 0.3);
-}
-.ai-sidebar-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-/* 浅色模式下 .text-button 是纯透明，AI 区块会散成几行没有容器的文字；
-   这里补上跟统计卡同款的白底 + 投影，深色模式再用下面的 rule 接回原样式。 */
-.ai-sidebar-actions .text-button {
-  min-width: 0;
-  overflow: hidden;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 5px 12px rgba(0, 0, 0, 0.05);
-  font-weight: 700;
-  text-align: left;
-  text-overflow: ellipsis;
-  transition:
-    background 0.18s ease,
-    box-shadow 0.18s ease;
-}
-.ai-sidebar-actions .text-button:hover {
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow:
-    0 2px 4px rgba(0, 0, 0, 0.05),
-    0 8px 18px rgba(0, 0, 0, 0.08);
-}
-[data-theme="dark"] .ai-sidebar-actions .text-button {
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.4),
-    0 6px 14px rgba(0, 0, 0, 0.3);
-}
-[data-theme="dark"] .ai-sidebar-actions .text-button:hover {
-  background: rgba(255, 255, 255, 0.12);
-  box-shadow:
-    0 2px 5px rgba(0, 0, 0, 0.45),
-    0 9px 20px rgba(0, 0, 0, 0.38);
-}
-/* 批量处理带待处理计数，独占一行；三项挤同一行会把「（317）」推到栏外。 */
-.ai-sidebar-actions .text-button:last-child {
-  grid-column: 1 / -1;
 }
 .ai-single-progress {
   margin: 0 0 6px;
@@ -5874,26 +5875,12 @@ h1 {
   color: #999999;
 }
 
-[data-theme="dark"] .ai-sidebar-stats > div,
 [data-theme="dark"] .ai-single-progress {
   border: 0;
   background: var(--control-bg, rgba(255, 255, 255, 0.06));
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.4),
     0 6px 14px rgba(0, 0, 0, 0.3);
-}
-[data-theme="dark"] .ai-sidebar-stats dt {
-  color: var(--faint);
-}
-[data-theme="dark"] .ai-sidebar-stats dd {
-  color: var(--ink);
-}
-[data-theme="dark"] .ai-sidebar-stats > div.has-failed dd {
-  color: var(--danger);
-}
-[data-theme="dark"] .ai-sidebar-hint {
-  color: var(--faint);
-  background: rgba(255, 255, 255, 0.04);
 }
 [data-theme="dark"] .ai-single-current {
   color: var(--faint);
@@ -7678,14 +7665,10 @@ details.ai-advanced .settings-form {
 [data-theme="dark"] .section-label {
   color: var(--faint);
 }
-[data-theme="dark"] .month-link:not(.is-selected) {
-  background: rgba(255, 255, 255, 0.04);
-}
 [data-theme="dark"] .nav-empty {
   color: var(--faint);
 }
-[data-theme="dark"] .all-link,
-[data-theme="dark"] .year-link {
+[data-theme="dark"] .year-row {
   color: var(--ink);
 }
 

@@ -85,21 +85,15 @@ export function currentQueryFields(): Pick<
   };
 }
 
+/** 日期树只剩两级：展开状态只记年份，「天」不再有第三层。 */
 export function resetSidebarExpansionForSelection(): void {
   if (state.datePrefix) {
-    const year = state.datePrefix.slice(0, 4);
-    state.expandedYears = new Set([year]);
-    if (state.datePrefix.length >= 7) {
-      state.expandedMonths = new Set([state.datePrefix.slice(0, 7)]);
-    } else {
-      state.expandedMonths = new Set();
-    }
+    state.expandedYears = new Set([state.datePrefix.slice(0, 4)]);
     return;
   }
   // Default: show only the newest year's months, days stay closed.
   const newestYear = groupedFacets()[0]?.year;
   state.expandedYears = newestYear ? new Set([newestYear]) : new Set();
-  state.expandedMonths = new Set();
 }
 
 export function scrollToContentTop(): void {
